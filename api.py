@@ -1413,7 +1413,7 @@ def build_prompt(messages, model_name):
             logger.debug(f"RAG prompt END: {prompt[-250:]}")
         else:
             logger.debug(f"RAG prompt FULL: {prompt}")
-        approx_tokens = len(prompt) // 3
+        approx_tokens = len(prompt) // CHARS_PER_TOKEN_ESTIMATE
         if approx_tokens > ctx * 0.85:
             logger.warning(
                 f"RAG prompt (~{approx_tokens} tokens) approaches context limit ({ctx}). "
