@@ -65,7 +65,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Context-dependent thinking** — disables reasoning on small context models to save tokens
 
 ### Reasoning Model Support
-- **`<think>` tag parsing** for Qwen3, DeepSeek-R1 and similar models
+- **`<think>` tag parsing** for Qwen3 and similar reasoning models
 - **`reasoning_content`** field in both streaming deltas and non-streaming responses
 - **Streaming state machine** handles tags split across output chunks
 - **Open WebUI integration** — reasoning appears as collapsible thinking blocks
@@ -345,6 +345,14 @@ Ready-to-run `.rkllm` models converted by the author for RK3588 NPU are availabl
 
 All models are converted with **RKLLM Toolkit v1.2.3**, targeting **RK3588 (3 NPU cores)**, and tested on an **Orange Pi 5 Plus** (16 GB RAM, RKNPU driver 0.9.8).
 
+> **⚠️ DeepSeek-R1 on NPU — Currently Not Usable**
+>
+> DeepSeek-R1 (including distilled variants like DeepSeek-R1-Distill-Qwen-1.5B) **does not work correctly** with RKLLM Runtime v1.2.3. The model converts without errors but produces garbage output — repeating `[PAD151935]` tokens instead of real text ([rknn-llm#424](https://github.com/airockchip/rknn-llm/issues/424)). The model is also sensitive to quantization, and multi-turn conversations fail silently ([rknn-llm#277](https://github.com/airockchip/rknn-llm/issues/277)). The Airockchip team has acknowledged this is a known issue and stated it will be fixed in a future runtime version.
+>
+> **For NPU reasoning, use Qwen3-1.7B instead** — it supports `<think>` tags, runs at ~13.6 tok/s on the NPU, and works reliably with RKLLM v1.2.3.
+>
+> If you need DeepSeek-R1, run `deepseek-r1:7b` via **Ollama on CPU** — it works correctly (just slower, ~2-3 tok/s on RK3588 ARM cores). See [Using Ollama Alongside](#using-ollama-alongside-cpu-models) below.
+
 ### Quick Download
 
 ```bash
@@ -586,6 +594,19 @@ Both backends appear in Open WebUI's model dropdown:
 
 > **Note:** NPU and CPU inference don't conflict — they use different hardware. You can have an NPU model loaded via this server while Ollama runs a CPU model simultaneously.
 
+**Recommended Ollama models for RK3588:**
+
+```bash
+# DeepSeek-R1 reasoning (works on CPU, broken on NPU — see Pre-Built Models note)
+ollama pull deepseek-r1:7b
+
+# Other useful CPU models
+ollama pull gemma2:2b
+ollama pull phi3:3.8b
+```
+
+> **CPU models (Ollama) do NOT need the NPU-specific settings.** The system prompt, disabled "Builtin Tools", and other restrictions documented below apply only to small NPU models served by this RKLLM API. Ollama models are larger, handle function-calling natively, and manage their own system prompts — leave their Open WebUI per-model settings at defaults.
+
 ### System Prompt (Required for All NPU Models)
 
 **Workspace > Models > Edit** each NPU model, and set the **System Prompt** to:
@@ -723,13 +744,15 @@ RAG responses are cached in an LRU cache (key: model + question hash) to avoid r
 
 ## Reasoning Models
 
-Models like **Qwen3** and **DeepSeek-R1** output chain-of-thought wrapped in `<think>...</think>` tags.
+Models like **Qwen3** output chain-of-thought wrapped in `<think>...</think>` tags.
 
 The server:
 - Parses these tags from the token stream using a state machine (handles tags split across chunks)
 - Sends `reasoning_content` in streaming deltas (Open WebUI displays these as collapsible thinking blocks)
 - Returns `reasoning_content` in non-streaming responses
 - **Context-dependent thinking for RAG**: On small context models (< 8k), thinking is disabled via `/no_think` to save tokens for the actual answer
+
+> **Note:** DeepSeek-R1 is currently **not usable on the NPU** with RKLLM Runtime v1.2.3 (produces `[PAD]` garbage tokens). Use **Qwen3-1.7B** for NPU reasoning, or run `deepseek-r1:7b` via Ollama on CPU. See the [Pre-Built Models](#pre-built-models) section for details.
 
 ---
 
