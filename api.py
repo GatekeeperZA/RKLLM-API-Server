@@ -1867,6 +1867,9 @@ def chat_completions():
     if not isinstance(messages, list):
         return make_error_response("'messages' must be a JSON array", 400, "invalid_request")
 
+    # Validate message elements are dicts (rejects e.g. messages: ["hello"])
+    messages = [m for m in messages if isinstance(m, dict)]
+
     # Normalize message content: OpenAI allows content to be a list of
     # multimodal parts (e.g., [{"type":"text","text":"..."}]).  Convert to
     # plain strings once so all downstream code gets clean string content.
@@ -2395,6 +2398,10 @@ def _generate_complete(prompt, request_id, model_name, created,
         prompt_tokens = max(1, len(prompt_text) // CHARS_PER_TOKEN_ESTIMATE)
         completion_tokens = stats_data.get('generate_tokens', max(1, len(full_content) // CHARS_PER_TOKEN_ESTIMATE))
 
+        # Determine finish_reason: "stop" for clean generation, "length" for
+        # timeout/silence, "stop" with empty content for abort/error.
+        finish_reason = "stop" if generation_clean else "length"
+
         message_obj = {
             "role": "assistant",
             "content": cleaned_content,
@@ -2412,7 +2419,7 @@ def _generate_complete(prompt, request_id, model_name, created,
                 "index": 0,
                 "message": message_obj,
                 "logprobs": None,
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
             }],
             "usage": {
                 "prompt_tokens": prompt_tokens,
