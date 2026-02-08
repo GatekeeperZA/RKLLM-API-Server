@@ -12,6 +12,8 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Installation](#installation)
+  - [RKNPU Driver 0.9.8](#2-rknpu-driver-098)
+  - [RKLLM Runtime v1.2.3](#3-rkllm-runtime-v123)
 - [Pre-Built Models](#pre-built-models)
 - [Model Setup](#model-setup)
 - [Running the Server](#running-the-server)
@@ -112,9 +114,10 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - Minimum **8GB RAM** recommended (16GB for larger models)
 
 ### Software
-- **Linux** (ARM64) — tested on Ubuntu/Debian
+- **Linux** (ARM64) — tested on Ubuntu/Debian (Armbian)
 - **Python 3.8+**
-- **rkllm binary** — the C++ inference runtime, must be in `$PATH` or set via `RKLLM_BINARY` env var
+- **RKNPU driver ≥ 0.9.6** (0.9.8 recommended — see [Driver Setup](#rknpu-driver-098) below)
+- **RKLLM Runtime v1.2.3** — the C++ inference runtime (see [Runtime Setup](#rkllm-runtime-v123) below)
 - **RKLLM models** (`.rkllm` format) placed in `~/models/`
 
 ### Python Dependencies
@@ -126,20 +129,143 @@ pip install flask flask-cors gunicorn gevent
 
 ## Installation
 
+### 1. Clone This Repository
+
 ```bash
-# Clone the repository
 git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
 cd RKLLM-API-Server
 
 # Install Python dependencies
 pip install flask flask-cors gunicorn gevent
 
-# Ensure rkllm binary is in PATH
-which rkllm  # should return a path
-
 # Create models directory
 mkdir -p ~/models
 ```
+
+### 2. RKNPU Driver 0.9.8
+
+The RKNPU kernel driver enables communication with the NPU hardware. Some board images ship with an older driver — you need **≥ 0.9.6** (0.9.8 recommended).
+
+**Check your current driver version:**
+```bash
+dmesg | grep -i rknpu
+# Look for a line like: "RKNPU driver loaded version 0.9.8"
+# or:
+cat /sys/kernel/debug/rknpu/version 2>/dev/null || echo "Check dmesg"
+```
+
+**If you need to update:**
+
+The driver source is included in the [rknn-llm](https://github.com/airockchip/rknn-llm) repository as a pre-built tarball. It must be compiled against your running kernel's headers.
+
+```bash
+# Clone the rknn-llm repo (if not already done)
+git clone https://github.com/airockchip/rknn-llm.git
+cd rknn-llm/rknpu-driver
+
+# Extract the driver source
+tar xjf rknpu_driver_0.9.8_20241009.tar.bz2
+cd rknpu_driver_0.9.8
+
+# Install kernel headers (required for compilation)
+sudo apt update
+sudo apt install -y linux-headers-$(uname -r) build-essential
+
+# Build the driver module
+make -C /lib/modules/$(uname -r)/build M=$(pwd)/drivers/rknpu modules
+
+# Install the new driver
+sudo cp drivers/rknpu/rknpu.ko /lib/modules/$(uname -r)/kernel/drivers/rknpu/
+sudo depmod -a
+
+# Load the new driver (or reboot)
+sudo modprobe -r rknpu 2>/dev/null  # unload old
+sudo modprobe rknpu                  # load new
+
+# Verify
+dmesg | tail -5 | grep -i rknpu
+```
+
+> **Note:** Many Armbian and Orange Pi images already include RKNPU driver 0.9.8. Check before building. If `dmesg | grep rknpu` shows `0.9.8`, you're good.
+
+> **Alternative:** Some distributions update the driver via a board-specific kernel update: `sudo apt upgrade` may pull in a newer kernel with the driver included.
+
+### 3. RKLLM Runtime v1.2.3
+
+The RKLLM runtime provides the `librkllmrt.so` shared library and the demo binary that this API server uses. You need to:
+1. Install the shared library so the `rkllm` binary can find it
+2. Compile the `llm_demo` binary (the `rkllm` binary this server calls)
+
+```bash
+# Clone the rknn-llm repo (if not already done)
+git clone https://github.com/airockchip/rknn-llm.git
+cd rknn-llm
+
+# --- Install the runtime library ---
+sudo cp rkllm-runtime/Linux/librkllm_api/aarch64/librkllmrt.so /usr/lib/
+sudo ldconfig
+
+# Verify the library is findable
+ldconfig -p | grep rkllm
+# Should show: librkllmrt.so => /usr/lib/librkllmrt.so
+```
+
+**Compile the `llm_demo` binary natively on your board (aarch64):**
+
+```bash
+cd examples/rkllm_api_demo/deploy
+
+# Compile (natively on the RK3588 board)
+g++ -O2 -o rkllm src/llm_demo.cpp \
+    -I../../../rkllm-runtime/Linux/librkllm_api/include \
+    -L../../../rkllm-runtime/Linux/librkllm_api/aarch64 \
+    -lrkllmrt -lpthread
+
+# Install to PATH
+sudo cp rkllm /usr/local/bin/
+rkllm --help  # or run with a model to test
+```
+
+> **For thinking models (Qwen3, DeepSeek-R1):** You must edit `src/llm_demo.cpp` to enable thinking mode before compiling. Add `rkllm_input.enable_thinking = true;` — see the [Qwen3 model card](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) for the exact code change.
+
+**Verify everything works:**
+```bash
+# Check RKNPU driver
+dmesg | grep -i rknpu
+
+# Check runtime library
+ldconfig -p | grep rkllm
+
+# Check binary
+which rkllm
+rkllm ~/models/Qwen3-1.7B-4K/Qwen3-1.7B-w8a8-rk3588.rkllm 2048 4096
+# Should print "rkllm init success" then wait for input
+```
+
+### 4. Fix NPU Frequency (Recommended)
+
+For consistent performance, pin the NPU and CPU frequencies. The rknn-llm repo includes scripts for this:
+
+```bash
+cd rknn-llm/scripts
+
+# RK3588
+sudo bash fix_freq_rk3588.sh
+
+# RK3576 (if using that platform)
+sudo bash fix_freq_rk3576.sh
+```
+
+> Run this after each reboot, or add it to `/etc/rc.local` for persistence.
+
+### 5. Enable Performance Logging (Optional)
+
+To see token speed and generation stats in the output:
+```bash
+export RKLLM_LOG_LEVEL=1
+```
+
+This API server sets `RKLLM_LOG_LEVEL=1` automatically for the subprocess (parses `[Token/s]`, `[Tokens]`, `[Seconds]` from the output).
 
 ---
 
