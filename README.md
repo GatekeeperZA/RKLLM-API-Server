@@ -12,6 +12,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Pre-Built Models](#pre-built-models)
 - [Model Setup](#model-setup)
 - [Running the Server](#running-the-server)
 - [API Endpoints](#api-endpoints)
@@ -142,16 +143,58 @@ mkdir -p ~/models
 
 ---
 
+## Pre-Built Models
+
+Ready-to-run `.rkllm` models converted by the author for RK3588 NPU are available on HuggingFace:
+
+| Model | Parameters | Quant | Context | Speed | RAM | Thinking | Link |
+|-------|-----------|-------|---------|-------|-----|----------|------|
+| **Qwen3-1.7B** | 1.7B | w8a8 | 4,096 | ~13.6 tok/s | ~2 GB | ✅ Yes | [Download](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) |
+| **Phi-3-mini-4k-instruct** | 3.82B | w8a8 | 4,096 | ~6.8 tok/s | ~3.7 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8) |
+
+> Browse all models: **[huggingface.co/GatekeeperZA](https://huggingface.co/GatekeeperZA)**
+
+All models are converted with **RKLLM Toolkit v1.2.3**, targeting **RK3588 (3 NPU cores)**, and tested on an **Orange Pi 5 Plus** (16 GB RAM, RKNPU driver 0.9.8).
+
+### Quick Download
+
+```bash
+# Install git-lfs (required for large files)
+sudo apt install git-lfs
+git lfs install
+
+# Qwen3-1.7B (thinking/reasoning model — recommended)
+mkdir -p ~/models/Qwen3-1.7B-4K
+cd ~/models/Qwen3-1.7B-4K
+git clone https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3 .
+# or download just the .rkllm file from the HuggingFace web UI
+
+# Phi-3-mini (3.8B — strong at math/code, MIT licensed)
+mkdir -p ~/models/Phi-3-mini-4k-instruct
+cd ~/models/Phi-3-mini-4k-instruct
+git clone https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8 .
+```
+
+### Model Notes
+
+**Qwen3-1.7B** — Hybrid thinking model. Produces `<think>...</think>` reasoning blocks that this API server parses into `reasoning_content` for Open WebUI's collapsible thinking display. Requires RKLLM Runtime ≥ v1.2.1 (v1.2.3 recommended) and `enable_thinking = true` in the C++ binary. Supports English and Chinese.
+
+**Phi-3-mini-4k-instruct** — Microsoft's 3.8B parameter model excelling at reasoning, math (85.7% GSM8K), and code generation (57.3% HumanEval). English-primary. No thinking mode — this is a standard instruct model. MIT licensed.
+
+> **Thinking mode requirement:** The compiled `rkllm` binary must have `enable_thinking = true` set in the source code for Qwen3 thinking to work. See the [Qwen3 model card](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) for compilation instructions.
+
+---
+
 ## Model Setup
 
 Place each `.rkllm` model in its own subfolder under `~/models/`:
 
 ```
 ~/models/
-├── Qwen2.5-1.5B-Instruct-4K/
-│   └── Qwen2.5-1.5B-Instruct-4K.rkllm
-├── Qwen3-4B-16K/
-│   └── Qwen3-4B-16K.rkllm
+├── Qwen3-1.7B-4K/
+│   └── Qwen3-1.7B-w8a8-rk3588.rkllm
+├── Phi-3-mini-4k-instruct/
+│   └── Phi-3-mini-4k-instruct-w8a8.rkllm
 └── DeepSeek-R1-Distill-Qwen-1.5B-4K/
     └── DeepSeek-R1-Distill-Qwen-1.5B-4K.rkllm
 ```
@@ -175,7 +218,8 @@ Model folder names are converted to IDs (lowercase, hyphens). Aliases are auto-g
 
 | Model ID | Auto-Aliases |
 |----------|-------------|
-| `qwen2.5-1.5b-instruct-4k` | `qwen`, `qwen2`, `qwen2.5`, `qwen2.5-1.5b` |
+| `qwen3-1.7b-4k` | `qwen`, `qwen3` |
+| `phi-3-mini-4k-instruct` | `phi`, `phi-3` |
 | `deepseek-r1-distill-qwen-1.5b-4k` | `deepseek`, `deepseek-r1` |
 
 Aliases are only created when unambiguous (one model claims the alias). If two models share a prefix, that alias is skipped.
