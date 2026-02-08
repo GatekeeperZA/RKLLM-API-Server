@@ -70,7 +70,6 @@ if not RKLLM_LIB_PATH:
         RKLLM_LIB_PATH = 'librkllmrt.so'  # Let ctypes search LD_LIBRARY_PATH
 
 # Timeouts
-MODEL_LOAD_TIMEOUT = 180
 GENERATION_TIMEOUT = 600
 FIRST_TOKEN_TIMEOUT = 120     # Max wait for first token (includes prefill)
 FALLBACK_SILENCE = 12         # Max silence between tokens after first token
@@ -295,19 +294,19 @@ logger.info(f"Aliases: {ALIASES}")
 
 RKLLM_Handle_t = ctypes.c_void_p
 
-# Callback states
+# Callback states (mirrors rkllm.h LLMCallState enum)
 RKLLM_RUN_NORMAL  = 0   # result->text has the next token(s)
 RKLLM_RUN_WAITING = 1   # Waiting for complete UTF-8 char (ignore)
 RKLLM_RUN_FINISH  = 2   # Generation complete, result->perf has stats
 RKLLM_RUN_ERROR   = 3   # Error occurred
 
-# Input types
+# Input types (mirrors rkllm.h — only PROMPT used; others kept for completeness)
 RKLLM_INPUT_PROMPT     = 0
 RKLLM_INPUT_TOKEN      = 1
 RKLLM_INPUT_EMBED      = 2
 RKLLM_INPUT_MULTIMODAL = 3
 
-# Inference modes
+# Inference modes (mirrors rkllm.h — only GENERATE used; others kept for completeness)
 RKLLM_INFER_GENERATE              = 0
 RKLLM_INFER_GET_LAST_HIDDEN_LAYER = 1
 RKLLM_INFER_GET_LOGITS            = 2
@@ -520,8 +519,13 @@ def _rkllm_callback_impl(result_ptr, userdata, state):
                     pass
             _token_queue.put(("error", error_msg))
         # RKLLM_RUN_WAITING (state=1): incomplete UTF-8 — ignore
-    except Exception:
-        pass  # Callback must never raise into C land
+    except Exception as _cb_exc:
+        # Callback must never raise into C land — but signal the error
+        # so the consumer doesn't hang for GENERATION_TIMEOUT seconds.
+        try:
+            _token_queue.put(("error", f"callback exception: {_cb_exc}"))
+        except Exception:
+            pass  # Last resort: swallow to protect C caller
     return 0
 
 
@@ -1195,6 +1199,14 @@ def build_prompt(messages, model_name):
     for msg in messages:
         role = msg.get('role', 'user')
         content = msg.get('content', '')
+        # OpenAI multimodal: content can be a list of {"type":"text","text":"..."}
+        if isinstance(content, list):
+            content = " ".join(
+                part.get('text', '') for part in content
+                if isinstance(part, dict) and part.get('type') == 'text'
+            )
+        if not isinstance(content, str):
+            content = str(content) if content else ''
         if not content:
             continue
         if role == 'system':
@@ -1791,6 +1803,15 @@ def select_model():
     if config is None:
         return make_error_response(f"Model '{model_name}' not found", 404, "not_found")
 
+    # Reject if a generation is currently in flight
+    with ACTIVE_LOCK:
+        if ACTIVE_REQUEST["id"] is not None:
+            elapsed = time.time() - ACTIVE_REQUEST["last_activity"]
+            if elapsed <= REQUEST_STALE_TIMEOUT:
+                return make_error_response(
+                    "Cannot switch models while a request is in progress",
+                    503, "service_unavailable")
+
     if not load_model(name, config):
         return make_error_response(f"Failed to load model '{name}'", 500)
 
@@ -1800,6 +1821,15 @@ def select_model():
 @app.route('/v1/models/unload', methods=['POST'])
 def unload_model():
     """Explicitly unload the current model to free NPU memory."""
+    # Reject if a generation is currently in flight
+    with ACTIVE_LOCK:
+        if ACTIVE_REQUEST["id"] is not None:
+            elapsed = time.time() - ACTIVE_REQUEST["last_activity"]
+            if elapsed <= REQUEST_STALE_TIMEOUT:
+                return make_error_response(
+                    "Cannot unload model while a request is in progress",
+                    503, "service_unavailable")
+
     if CURRENT_MODEL:
         model = CURRENT_MODEL
         unload_current("explicit unload request")
@@ -1834,14 +1864,20 @@ def chat_completions():
     # Parse request
     requested_model = body.get('model', '')
     messages = body.get('messages', [])
-    stream = body.get('stream', False)
-    stream_options = body.get('stream_options') or {}
+    if not isinstance(messages, list):
+        return make_error_response("'messages' must be a JSON array", 400, "invalid_request")
+    stream = bool(body.get('stream', False))
+    stream_options = body.get('stream_options')
+    if not isinstance(stream_options, dict):
+        stream_options = {}
     include_usage = stream_options.get('include_usage', False) if stream else False
-    max_tokens = body.get('max_tokens')
-    if max_tokens is None:
-        max_tokens = body.get('max_completion_tokens')
-    if max_tokens is None:
-        max_tokens = MAX_TOKENS_DEFAULT
+
+    # Per-request max_tokens — rkllm uses the model-config value set at load
+    # time; log when the caller's requested value differs so they know.
+    req_max_tokens = body.get('max_tokens') or body.get('max_completion_tokens')
+    if req_max_tokens is not None:
+        logger.debug(f"[{request_id}] max_tokens={req_max_tokens} requested "
+                     f"(rkllm uses model-config value; per-request override not supported)")
 
     # Log ignored sampling parameters
     ignored_params = {k: body[k] for k, default in _SAMPLING_DEFAULTS.items()
@@ -1890,6 +1926,9 @@ def chat_completions():
 
         # Build prompt
         prompt, is_rag, enable_thinking = build_prompt(messages, name)
+        if not prompt:
+            end_request(request_id)
+            return make_error_response("Failed to build prompt from messages", 400, "invalid_request")
 
         # KV cache strategy:
         # - RAG: always keep_history=0 (fresh context each time)
