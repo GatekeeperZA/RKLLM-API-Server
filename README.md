@@ -497,7 +497,19 @@ In Open WebUI **Admin > Settings > Connections**, add the API as an OpenAI-compa
 | API Base URL | `http://<device-ip>:8000/v1` |
 | API Key | *(any non-empty string — the server has no auth)* |
 
-### Web Search (for RAG)
+### System Prompt (Required for All NPU Models)
+
+**Workspace > Models > Edit** each NPU model, and set the **System Prompt** to:
+
+```
+Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}.
+```
+
+> **Why this is required:** NPU models have no built-in awareness of the current date or time. Without this, any question like "what day is it?", "what happened today?", or "what's the weather now?" gets a hallucinated answer. Open WebUI replaces the `{{...}}` variables with live values before sending the request. The API server detects this date-only prompt and intelligently includes/omits it based on whether the user's question is date-related (prevents the model from fixating on the date for unrelated questions).
+
+> **Do NOT add generic instructions** like "You are a helpful assistant" — these get sent to the rkllm binary as part of the user prompt and cause the model to respond with a greeting instead of answering the question. The API server automatically strips these if detected, but it's better to not include them at all.
+
+### Web Search (Required for RAG/SearXNG)
 
 **Admin > Settings > Web Search:**
 
@@ -506,25 +518,27 @@ In Open WebUI **Admin > Settings > Connections**, add the API as an OpenAI-compa
 | Search Engine | `searxng` | Self-hosted, JSON API |
 | SearXNG Query URL | `http://searxng:8080/search` | Docker service name |
 | Web Search Result Count | `3` (4k models) / `5` (16k models) | Balances coverage vs. context |
-| Bypass Web Loader | **ON** | Snippets > raw page scraping for small models |
-| Bypass Embedding | **ON** | No embedding model on ARM/NPU |
+| **Bypass Web Loader** | **ON** ⚠️ | **Required.** Snippets are cleaner than raw page scraping for small models. SafeWebBaseLoader returns raw `get_text()` with all navigation/footer boilerplate |
+| **Bypass Embedding and Retrieval** | **ON** ⚠️ | **Required.** No embedding model available on ARM/NPU. Skips ChromaDB vector search and sends docs directly to the model |
 
-### Documents (RAG Template)
+### Documents / RAG Template (Required for SearXNG)
 
 **Admin > Settings > Documents:**
 
 | Setting | Value | Reason |
 |---------|-------|--------|
-| RAG Template | `{{CONTEXT}}` | The default template wastes 300+ tokens on meta-instructions |
+| **RAG Template** | `{{CONTEXT}}` | **Required.** Just the variable, nothing else. The default template is 300+ tokens of meta-instructions that waste context and encourage the model to use "own knowledge" instead of the search results |
 
-### Per-Model Settings
+> **Important:** The RAG Template must be exactly `{{CONTEXT}}` — no extra text, no instructions. The API server builds its own optimized reading-comprehension prompt format internally. Any additional template text gets prepended to the search results and wastes tokens.
 
-**Workspace > Models > Edit > Capabilities:**
+### Per-Model Capabilities (Required)
+
+**Workspace > Models > Edit > Capabilities** — configure for **each** NPU model:
 
 | Setting | Value | Reason |
 |---------|-------|--------|
-| Builtin Tools | **OFF** | Small models can't do function-calling |
-| File Context | **ON** | Enables document/search result injection |
+| **Builtin Tools** | **OFF** ⚠️ | **Required.** Small NPU models (1.5B-4B) cannot do function-calling or tool-use. Leaving this on causes Open WebUI to inject tool-use instructions that confuse the model |
+| File Context | **ON** | Enables document and search result injection into the conversation |
 
 ---
 
