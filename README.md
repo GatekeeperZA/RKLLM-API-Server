@@ -83,32 +83,39 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 
 ```mermaid
 graph TD
-    OW["🌐 Open WebUI"] -- "OpenAI API · HTTP/SSE" --> API
-    OW -. "Ollama API · HTTP" .-> OL["🦙 Ollama<br/>(CPU Models)"]
-    OW -- "Search Query" --> SX["🔎 SearXNG"]
-    SX -- "Results" --> OW
+    OW["🌐 Open WebUI"]
 
-    API["📡 API Endpoint<br/>/v1/chat/completions"] --> BP["🔧 Prompt Builder<br/>RAG · Web Cleaning<br/>Score Selection"]
-    BP --> RC["💾 RAG Cache<br/>LRU · TTL"]
+    OW -- "OpenAI API<br/>HTTP / SSE" --> API
+    OW -. "Ollama API" .-> OL["🦙 Ollama · CPU Models"]
+    OW <-- "Search Results" --> SX["🔎 SearXNG"]
 
-    API -- "stdin · plain text" --> RKLLM["⚡ rkllm C++<br/>Chat Template<br/>Token Sampling"]
-    RKLLM -- "stdout · tokens + stats" --> TP["🧠 Think Parser<br/>‹think› Tags<br/>State Machine"]
-    TP -- "SSE chunks" --> API
+    subgraph server [" RKLLM API Server · Flask "]
+        API["📡 /v1/chat/completions"]
+        BP["🔧 Prompt Builder<br/>RAG Detection · Web Cleaning · Score Selection"]
+        RC["💾 RAG Cache · LRU"]
+        TP["🧠 Think Tag Parser"]
+        PM["🔍 Process Monitor"]
+        API --> BP --> RC
+    end
 
-    RKLLM --> NPU["🔲 RK3588 NPU<br/>6 TOPS × 3 cores"]
+    API -- "stdin · plain text" --> RKLLM
+    RKLLM -- "stdout · tokens" --> TP
+    TP -- "SSE stream" --> OW
+    PM -. "health check<br/>kill / restart" .-> RKLLM
 
-    PM["🔍 Process Monitor<br/>Health · Recovery<br/>Idle Unload"] -. "monitor · kill/restart" .-> RKLLM
+    RKLLM["⚡ rkllm · C++ Binary<br/>Chat Template · Sampling"] --> NPU["🔲 RK3588 NPU<br/>6 TOPS × 3 cores"]
 
     style OW fill:#4a9eff,stroke:#2d7cd4,color:#fff
     style OL fill:#f5f5f5,stroke:#999,color:#333
     style API fill:#2ecc71,stroke:#27ae60,color:#fff
     style BP fill:#3498db,stroke:#2980b9,color:#fff
-    style PM fill:#e67e22,stroke:#d35400,color:#fff
     style RC fill:#9b59b6,stroke:#8e44ad,color:#fff
     style TP fill:#1abc9c,stroke:#16a085,color:#fff
+    style PM fill:#e67e22,stroke:#d35400,color:#fff
     style RKLLM fill:#e74c3c,stroke:#c0392b,color:#fff
     style NPU fill:#2c3e50,stroke:#1a252f,color:#fff
     style SX fill:#f39c12,stroke:#e67e22,color:#fff
+    style server fill:none,stroke:#555,stroke-width:2px,stroke-dasharray:5 5
 ```
 
 **Key design decisions:**
