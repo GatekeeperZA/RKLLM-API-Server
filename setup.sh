@@ -39,7 +39,7 @@ set -euo pipefail
 # =============================================================================
 INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"    # Where this script lives (repo root)
 MODELS_DIR="$HOME/models"                        # Where .rkllm models are stored
-VENV_DIR="$INSTALL_DIR/venv"                     # Python virtual environment
+VENV_DIR="$INSTALL_DIR/.venv"                    # Python virtual environment (.venv convention)
 RKNN_LLM_DIR="$HOME/rknn-llm"                   # rknn-llm repo clone location
 SERVICE_NAME="rkllm-api"                         # systemd service name
 BIND_ADDRESS="0.0.0.0"                           # Listen address
@@ -150,36 +150,120 @@ success "System packages installed"
 # STEP 3: CHECK RKNPU DRIVER
 # =============================================================================
 
-separator "Step 2/7 — Checking RKNPU Driver"
+separator "Step 2/7 — Checking RKNPU Kernel Module & Driver"
 
+DRIVER_OK=false
+
+# --- Check 1: Kernel module loaded ---
+info "Checking kernel module..."
+if lsmod 2>/dev/null | grep -q rknpu; then
+    success "rknpu kernel module is loaded"
+    # Show module info
+    MODINFO=$(modinfo rknpu 2>/dev/null | grep -E '^(version|description|filename):' || echo "")
+    if [[ -n "$MODINFO" ]]; then
+        echo "$MODINFO" | while read -r line; do echo "    $line"; done
+    fi
+else
+    warn "rknpu kernel module not in lsmod — attempting to load..."
+    if sudo modprobe rknpu 2>/dev/null; then
+        success "rknpu module loaded via modprobe"
+    else
+        error "Failed to load rknpu module. The kernel may not include RKNPU support."
+        echo "  Use a kernel with RKNPU built-in (e.g. Pelochus Armbian 24.11.0):"
+        echo "  https://github.com/Pelochus/armbian-build-rknpu-updates/releases"
+        echo ""
+        read -rp "$(echo -e "${YELLOW}Continue anyway? [y/N]: ${NC}")" CONTINUE_NO_MOD
+        if [[ ! "$CONTINUE_NO_MOD" =~ ^[Yy] ]]; then
+            exit 1
+        fi
+    fi
+fi
+
+# --- Check 2: Driver version ---
 DRIVER_VERSION=""
 
-# Method 1: sysfs (may need root for debugfs)
+# Method 1: sysfs debugfs (may need root)
 if [[ -f /sys/kernel/debug/rknpu/version ]]; then
     DRIVER_VERSION=$(sudo cat /sys/kernel/debug/rknpu/version 2>/dev/null || echo "")
 fi
 
-# Method 2: dmesg (may need sudo on newer kernels)
+# Method 2: modinfo version field
+if [[ -z "$DRIVER_VERSION" ]]; then
+    DRIVER_VERSION=$(modinfo rknpu 2>/dev/null | grep -oP '^version:\s+\K[\d.]+' || echo "")
+fi
+
+# Method 3: dmesg (may need sudo on newer kernels)
 if [[ -z "$DRIVER_VERSION" ]]; then
     DRIVER_VERSION=$(sudo dmesg 2>/dev/null | grep -ioP 'rknpu.*version\s+\K[\d.]+' | tail -1 || echo "")
 fi
 
-# Method 3: Check if the device node exists (driver is loaded even if version unreadable)
-if [[ -z "$DRIVER_VERSION" && -c /dev/rknpu ]]; then
-    DRIVER_VERSION="present (version unreadable)"
-fi
-
 if [[ -n "$DRIVER_VERSION" ]]; then
-    success "RKNPU driver detected: v$DRIVER_VERSION"
-    if [[ "$DRIVER_VERSION" != "present"* && "$DRIVER_VERSION" < "0.9.6" ]]; then
+    success "RKNPU driver version: $DRIVER_VERSION"
+    if [[ "$DRIVER_VERSION" < "0.9.6" ]]; then
         warn "Driver $DRIVER_VERSION is older than recommended (0.9.8)."
         warn "Consider using Pelochus Armbian builds which include 0.9.8:"
         warn "  https://github.com/Pelochus/armbian-build-rknpu-updates/releases"
     fi
 else
-    warn "Could not detect RKNPU driver version."
-    warn "If using Pelochus Armbian 24.11.0, the driver (0.9.8) is already included."
-    warn "Continuing anyway — the runtime will fail at model load time if the driver is missing."
+    warn "Could not read driver version (common when driver is built into kernel)."
+    warn "If using Pelochus Armbian 24.11.0, it's 0.9.8 — this is fine."
+fi
+
+# --- Check 3: /dev/rknpu device node ---
+info "Checking /dev/rknpu device node..."
+if [[ -e /dev/rknpu ]]; then
+    DEV_PERMS=$(ls -l /dev/rknpu 2>/dev/null)
+    success "/dev/rknpu exists: $DEV_PERMS"
+    DRIVER_OK=true
+else
+    warn "/dev/rknpu does not exist."
+    # Try loading the module again
+    sudo modprobe rknpu 2>/dev/null
+    sleep 1
+    if [[ -e /dev/rknpu ]]; then
+        success "/dev/rknpu appeared after modprobe"
+        DRIVER_OK=true
+    else
+        error "/dev/rknpu still missing. NPU may not be available."
+    fi
+fi
+
+# --- Check 4: udev rules for /dev/rknpu permissions ---
+# Ensure the device is accessible to users in the 'render' group
+# without requiring root for every inference call.
+info "Checking udev rules for /dev/rknpu..."
+UDEV_RULE_FILE="/etc/udev/rules.d/99-rknpu.rules"
+UDEV_RULE='SUBSYSTEM=="rknpu", MODE="0660", GROUP="render"'
+
+if [[ -f "$UDEV_RULE_FILE" ]] && grep -q 'rknpu' "$UDEV_RULE_FILE" 2>/dev/null; then
+    success "udev rule already exists: $UDEV_RULE_FILE"
+elif ls /lib/udev/rules.d/ 2>/dev/null | grep -q rknpu; then
+    success "System udev rule for rknpu found in /lib/udev/rules.d/"
+else
+    info "Creating udev rule for /dev/rknpu group access..."
+    echo "$UDEV_RULE" | sudo tee "$UDEV_RULE_FILE" > /dev/null
+    sudo udevadm control --reload-rules 2>/dev/null
+    sudo udevadm trigger 2>/dev/null
+    success "udev rule created: $UDEV_RULE_FILE"
+fi
+
+# --- Check 5: render group membership ---
+info "Checking render group membership..."
+if id -nG "$USER" 2>/dev/null | grep -qw render; then
+    success "User '$USER' is in the 'render' group"
+else
+    warn "User '$USER' is NOT in the 'render' group — adding..."
+    sudo usermod -aG render "$USER"
+    success "Added '$USER' to 'render' group"
+    warn "NOTE: Group change takes effect on next login or run: newgrp render"
+fi
+
+# --- Summary ---
+if [[ "$DRIVER_OK" == true ]]; then
+    success "RKNPU driver check passed"
+else
+    warn "RKNPU driver check had warnings — NPU inference may fail."
+    warn "The API server will start but model loading could error out."
 fi
 
 # =============================================================================
@@ -341,10 +425,15 @@ fi
 
 separator "Step 4/7 — Setting Up Python Virtual Environment"
 
+# Check for existing venvs (may be .venv or venv from previous installs)
 if [[ -d "$VENV_DIR" && -f "$VENV_DIR/bin/activate" ]]; then
     success "Virtual environment already exists at $VENV_DIR"
+elif [[ -d "$INSTALL_DIR/venv" && -f "$INSTALL_DIR/venv/bin/activate" ]]; then
+    # Found a 'venv' instead of '.venv' — use it as-is
+    VENV_DIR="$INSTALL_DIR/venv"
+    success "Virtual environment found at $VENV_DIR (using existing)"
 else
-    info "Creating virtual environment..."
+    info "Creating virtual environment at $VENV_DIR ..."
     python3 -m venv "$VENV_DIR"
     success "Virtual environment created at $VENV_DIR"
 fi
