@@ -60,6 +60,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(SCRIPT_DIR, 'api.log')
 MODELS_ROOT = os.path.expanduser("~/models")
 RKLLM_BINARY = os.environ.get('RKLLM_BINARY', 'rkllm')
+SYSTEM_FINGERPRINT = "rkllm-v1.2.3"  # Sent in all API responses
 
 # Timeouts
 MODEL_LOAD_TIMEOUT = 180
@@ -977,7 +978,7 @@ def build_prompt(messages, model_name):
     ctx = model_cfg.get('context_length', CONTEXT_LENGTH_DEFAULT) if model_cfg else CONTEXT_LENGTH_DEFAULT
 
     # Collect messages by role
-    system_text = ""
+    system_parts = []  # accumulate all system messages (Open WebUI usually sends one)
     conversation = []  # list of (role, content)
     for msg in messages:
         role = msg.get('role', 'user')
@@ -985,9 +986,12 @@ def build_prompt(messages, model_name):
         if not content:
             continue
         if role == 'system':
-            system_text = content
+            system_parts.append(content)
         else:
             conversation.append((role, content))
+    if len(system_parts) > 1:
+        logger.warning(f"Multiple system messages ({len(system_parts)}) — concatenating")
+    system_text = "\n".join(system_parts)
 
     # Get the actual user question (last user message)
     user_question = ""
@@ -1362,7 +1366,9 @@ def build_prompt(messages, model_name):
             f"Model may truncate input — web search results or long conversations could be cut off."
         )
 
-    return prompt, bool(rag_parts)
+    # If we reach here, we're in normal mode — is_rag is always False.
+    # (RAG mode returns early above with is_rag=True.)
+    return prompt, False
 
 
 def drain_stdout(proc, timeout=0.5):
@@ -1616,7 +1622,10 @@ def process_monitor():
                 logger.warning(f"Process for {CURRENT_MODEL} died unexpectedly - cleaning up")
                 unload_current("process died")
 
-            # Auto-unload model after idle timeout to free NPU memory
+            # Auto-unload model after idle timeout to free NPU memory.
+            # LAST_REQUEST_TIME is read without ACTIVE_LOCK here which is safe:
+            # CPython's GIL makes float reads/writes atomic, and the worst case
+            # (stale value) only delays unload by one monitor cycle.
             elif (IDLE_UNLOAD_TIMEOUT > 0 and CURRENT_PROCESS and is_process_healthy()
                   and not is_request_active() and LAST_REQUEST_TIME > 0
                   and (time.time() - LAST_REQUEST_TIME) > IDLE_UNLOAD_TIMEOUT):
@@ -1679,7 +1688,7 @@ def make_sse_chunk(request_id, model, created, delta=None, finish_reason=None, u
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
-        "system_fingerprint": "rkllm-v1.2.3",
+        "system_fingerprint": SYSTEM_FINGERPRINT,
     }
     # Per OpenAI spec: the usage-only final chunk has "choices": []
     # (empty array), not a regular choices entry with empty delta.
@@ -1865,20 +1874,15 @@ def chat_completions():
                 completion_tokens = max(1, len(cached_response) // 3)
                 reasoning_content, cleaned_content = parse_think_tags(cached_response)
                 if stream:
-                    # Synthesize SSE stream from cached response
+                    # Synthesize SSE stream from cached response using make_sse_chunk
                     def _cached_stream():
-                        # Role chunk
-                        yield f"data: {json.dumps({'id': request_id, 'object': 'chat.completion.chunk', 'created': created, 'model': name, 'system_fingerprint': 'rkllm-v1.2.3', 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
-                        # Reasoning chunk (if present)
+                        yield make_sse_chunk(request_id, name, created, delta={"role": "assistant"})
                         if reasoning_content:
-                            yield f"data: {json.dumps({'id': request_id, 'object': 'chat.completion.chunk', 'created': created, 'model': name, 'system_fingerprint': 'rkllm-v1.2.3', 'choices': [{'index': 0, 'delta': {'reasoning_content': reasoning_content}, 'finish_reason': None}]})}\n\n"
-                        # Content chunk
-                        yield f"data: {json.dumps({'id': request_id, 'object': 'chat.completion.chunk', 'created': created, 'model': name, 'system_fingerprint': 'rkllm-v1.2.3', 'choices': [{'index': 0, 'delta': {'content': cleaned_content}, 'finish_reason': None}]})}\n\n"
-                        # Stop chunk (with optional usage)
-                        stop_data = {'id': request_id, 'object': 'chat.completion.chunk', 'created': created, 'model': name, 'system_fingerprint': 'rkllm-v1.2.3', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]}
+                            yield make_sse_chunk(request_id, name, created, delta={"reasoning_content": reasoning_content})
+                        yield make_sse_chunk(request_id, name, created, delta={"content": cleaned_content})
+                        yield make_sse_chunk(request_id, name, created, finish_reason="stop")
                         if include_usage:
-                            stop_data['usage'] = {'prompt_tokens': prompt_tokens, 'completion_tokens': completion_tokens, 'total_tokens': prompt_tokens + completion_tokens}
-                        yield f"data: {json.dumps(stop_data)}\n\n"
+                            yield make_sse_chunk(request_id, name, created, usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": prompt_tokens + completion_tokens})
                         yield "data: [DONE]\n\n"
                     return Response(
                         stream_with_context(_cached_stream()),
@@ -1893,7 +1897,7 @@ def chat_completions():
                     return jsonify({
                         "id": request_id, "object": "chat.completion",
                         "created": created, "model": name,
-                        "system_fingerprint": "rkllm-v1.2.3",
+                        "system_fingerprint": SYSTEM_FINGERPRINT,
                         "choices": [{"index": 0, "message": message_obj,
                                      "logprobs": None, "finish_reason": "stop"}],
                         "usage": {"prompt_tokens": prompt_tokens,
@@ -2537,7 +2541,7 @@ def _generate_complete(proc, request_id, model_name, created, is_rag=False, mess
             "object": "chat.completion",
             "created": created,
             "model": model_name,
-            "system_fingerprint": "rkllm-v1.2.3",
+            "system_fingerprint": SYSTEM_FINGERPRINT,
             "choices": [{
                 "index": 0,
                 "message": message_obj,
