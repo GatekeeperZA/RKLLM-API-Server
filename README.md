@@ -497,6 +497,32 @@ In Open WebUI **Admin > Settings > Connections**, add the API as an OpenAI-compa
 | API Base URL | `http://<device-ip>:8000/v1` |
 | API Key | *(any non-empty string — the server has no auth)* |
 
+### Using Ollama Alongside (CPU Models)
+
+Ollama can be installed on the same board and added as a **second connection** in Open WebUI. This gives you access to CPU-only models (e.g., larger models that don't have RKLLM conversions) alongside your NPU models — both appear in the model selector.
+
+```bash
+# Install Ollama on the same ARM board
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull a model
+ollama pull gemma2:2b
+```
+
+**Admin > Settings > Connections:**
+
+Add Ollama as an additional connection (don't remove the RKLLM one):
+
+| Setting | Value |
+|---------|-------|
+| Ollama API URL | `http://localhost:11434` |
+
+Both backends appear in Open WebUI's model dropdown:
+- **NPU models** (fast, via this RKLLM API server) — use for everyday chat and web search
+- **CPU models** (slower, via Ollama) — use for larger models or architectures not yet supported by RKLLM
+
+> **Note:** NPU and CPU inference don't conflict — they use different hardware. You can have an NPU model loaded via this server while Ollama runs a CPU model simultaneously.
+
 ### System Prompt (Required for All NPU Models)
 
 **Workspace > Models > Edit** each NPU model, and set the **System Prompt** to:
