@@ -690,6 +690,57 @@ GENERATION_COMPLETE.set()  # Initially set — no generation is running
 SERVER_START_TIME = int(time.time())
 LAST_REQUEST_TIME = 0
 
+# KV Cache History Tracking
+# Tracks what the rkllm runtime has in its internal KV cache so we can
+# send only the new user message on follow-up turns (incremental mode)
+# instead of the full concatenated conversation.  With keep_history=1,
+# the runtime keeps all prior turns — we just need to add the new one.
+_kv_cache_state = {
+    "model": None,          # Model name currently in KV cache
+    "user_messages": [],    # User messages (in order) the KV cache covers
+}
+
+
+def _check_kv_incremental(model_name, messages):
+    """Check if KV cache allows incremental mode (send only last user message).
+
+    Returns the last user message text if incremental is possible, else None.
+    """
+    if _kv_cache_state["model"] != model_name:
+        return None
+
+    user_msgs = [m['content'] for m in messages
+                 if m.get('role') == 'user' and m.get('content')]
+    if not user_msgs:
+        return None
+
+    # History = all user messages except the latest
+    history = user_msgs[:-1]
+
+    if history == _kv_cache_state["user_messages"]:
+        return user_msgs[-1]
+    return None
+
+
+def _update_kv_tracking(model_name, messages, is_reset):
+    """Update KV cache tracking after successful generation."""
+    user_msgs = [m['content'] for m in messages
+                 if m.get('role') == 'user' and m.get('content')]
+    _kv_cache_state["model"] = model_name
+    if is_reset:
+        # Full reset — track all user messages from this conversation
+        _kv_cache_state["user_messages"] = list(user_msgs)
+    else:
+        # Incremental — append only the latest user message
+        if user_msgs:
+            _kv_cache_state["user_messages"].append(user_msgs[-1])
+
+
+def _reset_kv_tracking():
+    """Reset KV tracking (model unloaded or KV cache cleared)."""
+    _kv_cache_state["model"] = None
+    _kv_cache_state["user_messages"] = []
+
 
 # =============================================================================
 # REQUEST TRACKING
@@ -1465,6 +1516,7 @@ def unload_current(reason="requested"):
         # Destroy the model (frees NPU memory)
         _rkllm_wrapper.destroy()
         CURRENT_MODEL = None
+        _reset_kv_tracking()
 
         logger.info(f">>> UNLOAD COMPLETE in {time.time() - unload_start:.1f}s")
 
@@ -1783,9 +1835,27 @@ def chat_completions():
         # Build prompt
         prompt, is_rag, enable_thinking = build_prompt(messages, name)
 
-        # KV cache strategy: keep_history=1 for normal multi-turn,
-        # keep_history=0 for RAG (fresh context each time)
-        keep_history = 0 if is_rag else 1
+        # KV cache strategy:
+        # - RAG: always keep_history=0 (fresh context each time)
+        # - Normal incremental: send only last user message, keep_history=1
+        #   (runtime already has prior turns in KV cache)
+        # - Normal reset: full prompt, keep_history=0 (new conversation)
+        if is_rag:
+            keep_history = 0
+            _reset_kv_tracking()
+        else:
+            incremental_msg = _check_kv_incremental(name, messages)
+            if incremental_msg is not None:
+                logger.info(f"[{request_id}] KV INCREMENTAL — sending only latest "
+                            f"user message ({len(incremental_msg)} chars "
+                            f"vs {len(prompt)} full)")
+                prompt = incremental_msg
+                keep_history = 1
+            else:
+                logger.info(f"[{request_id}] KV RESET — new conversation or "
+                            f"history mismatch")
+                keep_history = 0
+                _reset_kv_tracking()
 
         # Extract user question for cache key
         user_question = ""
@@ -2041,6 +2111,10 @@ def _generate_stream(prompt, request_id, model_name, created,
             _rag_cache_put(_model, _question, _prompt, cache_response)
             logger.info(f"[{request_id}] RAG cache STORE ({len(cache_response)} chars)")
 
+        # Update KV cache tracking after successful generation
+        if generation_clean and not is_rag and messages:
+            _update_kv_tracking(model_name, messages, is_reset=(keep_history == 0))
+
     except GeneratorExit:
         logger.warning(f"[{request_id}] Client DISCONNECTED / stopped")
         if _rkllm_wrapper:
@@ -2209,6 +2283,10 @@ def _generate_complete(prompt, request_id, model_name, created,
             _model, _question, _prompt = rag_cache_info
             _rag_cache_put(_model, _question, _prompt, cache_text)
             logger.info(f"[{request_id}] RAG cache STORE ({len(cache_text)} chars)")
+
+        # Update KV cache tracking after successful generation
+        if generation_clean and not is_rag and messages:
+            _update_kv_tracking(model_name, messages, is_reset=(keep_history == 0))
 
         if reasoning_content:
             logger.info(f"[{request_id}] Completed ({len(cleaned_content)} content + "
