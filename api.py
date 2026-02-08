@@ -1866,6 +1866,20 @@ def chat_completions():
     messages = body.get('messages', [])
     if not isinstance(messages, list):
         return make_error_response("'messages' must be a JSON array", 400, "invalid_request")
+
+    # Normalize message content: OpenAI allows content to be a list of
+    # multimodal parts (e.g., [{"type":"text","text":"..."}]).  Convert to
+    # plain strings once so all downstream code gets clean string content.
+    for msg in messages:
+        content = msg.get('content')
+        if isinstance(content, list):
+            msg['content'] = " ".join(
+                part.get('text', '') for part in content
+                if isinstance(part, dict) and part.get('type') == 'text'
+            )
+        elif content is not None and not isinstance(content, str):
+            msg['content'] = str(content)
+
     stream = bool(body.get('stream', False))
     stream_options = body.get('stream_options')
     if not isinstance(stream_options, dict):
