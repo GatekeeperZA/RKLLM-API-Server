@@ -73,6 +73,12 @@ MINIMUM_PREFILL_TIME = 0.3    # Discard data arriving faster than this after pro
 MAX_TOKENS_DEFAULT = 2048
 CONTEXT_LENGTH_DEFAULT = 4096
 
+# I/O buffer sizes (used in generation loops and drain)
+READ_BUFFER_SIZE = 4096       # os.read() buffer for stdout
+DRAIN_BUFFER_SIZE = 8192      # os.read() buffer for drain_stdout
+SELECT_TIMEOUT = 0.5          # select() poll interval in seconds
+DRAIN_TIMEOUT = 1.0            # drain_stdout silence timeout (must capture all stats lines)
+
 # Multi-line prompt protocol.
 # When True, sends prompts with \n__END__\n delimiter (preserves paragraph
 # structure in RAG prompts).  Requires the C++ binary to be recompiled
@@ -188,7 +194,7 @@ _rag_cache_lock = Lock()
 def _rag_cache_key(model_name, question):
     """Generate a deterministic cache key from model + question."""
     raw = f"{model_name}:{question.strip().lower()}"
-    return hashlib.md5(raw.encode('utf-8'), usedforsecurity=False).hexdigest()
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]
 
 
 def _rag_cache_get(model_name, question):
@@ -280,10 +286,12 @@ if os.path.exists(MODELS_ROOT):
     for root, _, files in os.walk(MODELS_ROOT):
         rkllm_file = None
 
-        for f in files:
-            if f.endswith(".rkllm"):
-                rkllm_file = os.path.join(root, f)
-                break
+        rkllm_files = sorted(f for f in files if f.endswith(".rkllm"))
+        if len(rkllm_files) > 1:
+            logger.warning(f"Multiple .rkllm files in {root}: {rkllm_files} — using '{rkllm_files[0]}'")
+        for f in rkllm_files:
+            rkllm_file = os.path.join(root, f)
+            break
 
         if not rkllm_file:
             continue
@@ -675,16 +683,18 @@ def _clean_web_content(text):
                 run_start = i
             run_count += 1
         else:
-            if run_count >= 4:
-                # Drop the entire run — it's a navigation menu
-                pass
-            else:
-                # Keep the short run (< 4 lines, probably legitimate)
-                for j in range(run_start, run_start + run_count):
-                    if run_start >= 0 and j < len(pass1):
-                        pass2.append(pass1[j])
+            # Flush the pending short-line run before appending this line.
+            # Reset run_start/run_count first so state is always clean.
+            pending_start = run_start
+            pending_count = run_count
             run_count = 0
             run_start = -1
+            if pending_count >= 4:
+                pass  # Drop the entire run — it's a navigation menu
+            elif pending_start >= 0:
+                for j in range(pending_start, pending_start + pending_count):
+                    if j < len(pass1):
+                        pass2.append(pass1[j])
             pass2.append(line)
     # Handle trailing run
     if run_count >= 4:
@@ -1371,14 +1381,17 @@ def build_prompt(messages, model_name):
     return prompt, False
 
 
-def drain_stdout(proc, timeout=0.5):
+def drain_stdout(proc, timeout=None):
     """Drain any buffered stdout from the process before sending a new prompt.
 
     Reads in a loop until the pipe has been quiet for 'timeout' seconds.
-    Increased buffer size (8 KB) and default timeout (0.5s) to ensure all
+    Uses DRAIN_BUFFER_SIZE (8 KB) and DRAIN_TIMEOUT (1.0s) to ensure all
     post-generation output (stats, prompt indicators, late flushes) is fully
-    consumed before we send the next prompt.
+    consumed before we send the next prompt.  The 1s timeout is necessary
+    because rkllm prints 3+ stats lines with brief pauses between NPU flushes.
     """
+    if timeout is None:
+        timeout = DRAIN_TIMEOUT
     drained = 0
     while True:
         try:
@@ -1387,7 +1400,7 @@ def drain_stdout(proc, timeout=0.5):
             break
         if ready:
             try:
-                data = os.read(proc.stdout.fileno(), 8192)
+                data = os.read(proc.stdout.fileno(), DRAIN_BUFFER_SIZE)
                 if data:
                     drained += len(data)
                 else:
@@ -1499,7 +1512,7 @@ def load_model(model_name, config):
             try:
                 ready, _, _ = select.select([proc.stdout], [], [], 0)
                 if ready:
-                    peek = os.read(proc.stdout.fileno(), 8192)
+                    peek = os.read(proc.stdout.fileno(), DRAIN_BUFFER_SIZE)
                     if not peek:
                         stdout_ok = False
                         logger.warning("Stdout returned EOF during reuse check")
@@ -1742,7 +1755,9 @@ def list_models():
 @app.route('/v1/models/select', methods=['POST'])
 def select_model():
     """Pre-load a model without generating (useful for warm-up)."""
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return make_error_response("Request body must be a JSON object", 400, "invalid_request")
     model_name = body.get('model', '')
 
     name, config = resolve_model(model_name)
@@ -1783,7 +1798,9 @@ def health():
 @app.route('/chat/completions', methods=['POST'])
 def chat_completions():
     """OpenAI-compatible chat completions endpoint (streaming and non-streaming)."""
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return make_error_response("Request body must be a JSON object", 400, "invalid_request")
 
     request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     logger.info(f">>> NEW REQUEST {request_id}")
@@ -1794,7 +1811,19 @@ def chat_completions():
     stream = body.get('stream', False)
     stream_options = body.get('stream_options') or {}
     include_usage = stream_options.get('include_usage', False) if stream else False
-    max_tokens = body.get('max_tokens') or body.get('max_completion_tokens') or MAX_TOKENS_DEFAULT
+    max_tokens = body.get('max_tokens')
+    if max_tokens is None:
+        max_tokens = body.get('max_completion_tokens')
+    if max_tokens is None:
+        max_tokens = MAX_TOKENS_DEFAULT
+
+    # Log warning for sampling parameters that rkllm ignores.
+    # The rkllm binary applies its own sampling config (compiled into the model);
+    # these OpenAI-standard params have no effect but users may expect them to.
+    for param_name in ('temperature', 'top_p', 'frequency_penalty', 'presence_penalty'):
+        val = body.get(param_name)
+        if val is not None and val != {'temperature': 1.0, 'top_p': 1.0, 'frequency_penalty': 0.0, 'presence_penalty': 0.0}.get(param_name):
+            logger.info(f"[{request_id}] Note: '{param_name}={val}' ignored — rkllm uses model-compiled sampling")
 
     logger.info(f"Request {request_id} model: '{requested_model}' stream: {stream}")
 
@@ -1906,7 +1935,7 @@ def chat_completions():
                     })
 
         # Drain any buffered output (stats lines, prompt indicators from previous turn)
-        drain_stdout(proc, timeout=0.5)
+        drain_stdout(proc)  # Uses DRAIN_TIMEOUT (1.0s) to capture all stats lines
 
         # Health-check: ensure the process didn't die during drain
         if proc.poll() is not None:
@@ -2119,14 +2148,18 @@ def _generate_stream(proc, request_id, model_name, created, include_usage=False,
 
             # Wait for data
             try:
-                ready, _, _ = select.select([proc.stdout], [], [], 0.5)
-            except (ValueError, OSError):
+                ready, _, _ = select.select([proc.stdout], [], [], SELECT_TIMEOUT)
+            except (ValueError, OSError, Exception) as e:
+                # Catch broadly: gevent can raise ConcurrentObjectUseError
+                # on closed fds, which isn't a subclass of OSError.
+                if 'ConcurrentObjectUseError' not in type(e).__name__ and not isinstance(e, (ValueError, OSError)):
+                    raise
                 logger.warning(f"[{request_id}] select() failed - stdout closed")
                 break
 
             if ready:
                 try:
-                    raw = os.read(proc.stdout.fileno(), 4096)
+                    raw = os.read(proc.stdout.fileno(), READ_BUFFER_SIZE)
                 except (OSError, ValueError):
                     logger.warning(f"[{request_id}] os.read failed - stdout closed")
                     break
@@ -2425,13 +2458,15 @@ def _generate_complete(proc, request_id, model_name, created, is_rag=False, mess
                 break
 
             try:
-                ready, _, _ = select.select([proc.stdout], [], [], 0.5)
-            except (ValueError, OSError):
+                ready, _, _ = select.select([proc.stdout], [], [], SELECT_TIMEOUT)
+            except (ValueError, OSError, Exception) as e:
+                if 'ConcurrentObjectUseError' not in type(e).__name__ and not isinstance(e, (ValueError, OSError)):
+                    raise
                 break
 
             if ready:
                 try:
-                    raw = os.read(proc.stdout.fileno(), 4096)
+                    raw = os.read(proc.stdout.fileno(), READ_BUFFER_SIZE)
                 except (OSError, ValueError):
                     break
 
@@ -2491,6 +2526,17 @@ def _generate_complete(proc, request_id, model_name, created, is_rag=False, mess
 
                 if generation_clean and not finished:
                     finished = True
+
+                # Fix #9: Check partial line_buffer for prompt indicator mid-loop
+                # (not just at silence timeout). Without this, a prompt indicator
+                # arriving concatenated with content (no trailing \n) wastes up to
+                # FALLBACK_SILENCE seconds before being detected.
+                if not finished and got_first_token and line_buffer.strip():
+                    s = line_buffer.strip()
+                    if re.match(r'^(user|robot)\s*:\s*$', s, re.IGNORECASE):
+                        generation_clean = True
+                        finished = True
+                        line_buffer = ""
 
             else:
                 silence = time.time() - last_activity
