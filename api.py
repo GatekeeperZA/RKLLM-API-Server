@@ -79,6 +79,15 @@ DRAIN_BUFFER_SIZE = 8192      # os.read() buffer for drain_stdout
 SELECT_TIMEOUT = 0.5          # select() poll interval in seconds
 DRAIN_TIMEOUT = 1.0            # drain_stdout silence timeout (must capture all stats lines)
 
+# OpenAI sampling parameter defaults — rkllm ignores these (model-compiled
+# sampling), but we log when callers send non-default values so they know.
+_SAMPLING_DEFAULTS = {
+    'temperature': 1.0,
+    'top_p': 1.0,
+    'frequency_penalty': 0.0,
+    'presence_penalty': 0.0,
+}
+
 # Multi-line prompt protocol.
 # When True, sends prompts with \n__END__\n delimiter (preserves paragraph
 # structure in RAG prompts).  Requires the C++ binary to be recompiled
@@ -1820,9 +1829,9 @@ def chat_completions():
     # Log warning for sampling parameters that rkllm ignores.
     # The rkllm binary applies its own sampling config (compiled into the model);
     # these OpenAI-standard params have no effect but users may expect them to.
-    for param_name in ('temperature', 'top_p', 'frequency_penalty', 'presence_penalty'):
+    for param_name, default_val in _SAMPLING_DEFAULTS.items():
         val = body.get(param_name)
-        if val is not None and val != {'temperature': 1.0, 'top_p': 1.0, 'frequency_penalty': 0.0, 'presence_penalty': 0.0}.get(param_name):
+        if val is not None and val != default_val:
             logger.info(f"[{request_id}] Note: '{param_name}={val}' ignored — rkllm uses model-compiled sampling")
 
     logger.info(f"Request {request_id} model: '{requested_model}' stream: {stream}")
@@ -2149,13 +2158,16 @@ def _generate_stream(proc, request_id, model_name, created, include_usage=False,
             # Wait for data
             try:
                 ready, _, _ = select.select([proc.stdout], [], [], SELECT_TIMEOUT)
-            except (ValueError, OSError, Exception) as e:
-                # Catch broadly: gevent can raise ConcurrentObjectUseError
-                # on closed fds, which isn't a subclass of OSError.
-                if 'ConcurrentObjectUseError' not in type(e).__name__ and not isinstance(e, (ValueError, OSError)):
-                    raise
+            except (ValueError, OSError):
                 logger.warning(f"[{request_id}] select() failed - stdout closed")
                 break
+            except Exception as e:
+                # Gevent can raise ConcurrentObjectUseError on closed fds,
+                # which isn't a subclass of OSError.  Re-raise anything else.
+                if 'ConcurrentObjectUseError' in type(e).__name__:
+                    logger.warning(f"[{request_id}] select() failed (gevent): {e}")
+                    break
+                raise
 
             if ready:
                 try:
@@ -2459,10 +2471,12 @@ def _generate_complete(proc, request_id, model_name, created, is_rag=False, mess
 
             try:
                 ready, _, _ = select.select([proc.stdout], [], [], SELECT_TIMEOUT)
-            except (ValueError, OSError, Exception) as e:
-                if 'ConcurrentObjectUseError' not in type(e).__name__ and not isinstance(e, (ValueError, OSError)):
-                    raise
+            except (ValueError, OSError):
                 break
+            except Exception as e:
+                if 'ConcurrentObjectUseError' in type(e).__name__:
+                    break
+                raise
 
             if ready:
                 try:
