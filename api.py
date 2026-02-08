@@ -579,7 +579,7 @@ class RKLLMWrapper:
         except AttributeError:
             pass  # May not exist in older library versions
 
-        # rkllm_set_chat_template(handle, system_prefix, user_prefix, assistant_prefix) -> int
+        # rkllm_set_chat_template(handle, system_prompt, prompt_prefix, prompt_postfix) -> int
         try:
             self.lib.rkllm_set_chat_template.argtypes = [
                 ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
