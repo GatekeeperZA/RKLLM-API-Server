@@ -539,6 +539,10 @@ curl http://localhost:8000/v1/chat/completions \
 | `messages` | array | *required* | OpenAI messages format |
 | `stream` | bool | `false` | Enable SSE streaming |
 | `max_tokens` | int | `2048` | Max completion tokens |
+| `temperature` | float | *(ignored)* | Accepted but has no effect — rkllm uses model-compiled sampling |
+| `top_p` | float | *(ignored)* | Accepted but has no effect |
+| `frequency_penalty` | float | *(ignored)* | Accepted but has no effect |
+| `presence_penalty` | float | *(ignored)* | Accepted but has no effect |
 | `stream_options.include_usage` | bool | `false` | Include token counts in stream |
 
 ### `POST /v1/models/select`
@@ -799,6 +803,15 @@ All configuration is at the top of `api.py`:
 | `MAX_TOKENS_DEFAULT` | 2048 | Default max completion tokens |
 | `CONTEXT_LENGTH_DEFAULT` | 4096 | Fallback when not detected from filename |
 
+### I/O Buffers
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `READ_BUFFER_SIZE` | 4096 | `os.read()` buffer for stdout during generation |
+| `DRAIN_BUFFER_SIZE` | 8192 | `os.read()` buffer for `drain_stdout` |
+| `SELECT_TIMEOUT` | 0.5s | `select()` poll interval in generation loops |
+| `DRAIN_TIMEOUT` | 1.0s | Max silence before `drain_stdout` returns (two-phase: 0.3s initial, escalates to 1.0s when data found) |
+
 ### RAG Controls
 
 | Variable | Default | Description |
@@ -910,6 +923,7 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 ```
 RKLLM-API-Server/
 ├── api.py           # Main API server (Flask + rkllm process management)
+├── setup.sh         # Zero-config installer (experimental)
 ├── settings.yml     # SearXNG configuration (optimized for Open WebUI)
 ├── .gitignore       # Excludes logs, __pycache__, etc.
 └── README.md        # This file
