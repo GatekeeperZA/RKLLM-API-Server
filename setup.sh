@@ -6,18 +6,22 @@
 #
 # What this script does:
 #   1. Installs system packages (python3, venv, build-essential, git, git-lfs)
-#   2. Clones the rknn-llm repo and installs RKLLM Runtime v1.2.3
-#   3. Compiles the rkllm (llm_demo) binary natively on the board
+#   2. Checks RKNPU driver status
+#   3. Installs RKLLM Runtime v1.2.3 (library + binary) if not already present
 #   4. Creates a Python virtual environment with all dependencies
 #   5. Creates ~/models directory for .rkllm model files
-#   6. Installs a systemd service for auto-start on boot
-#   7. Applies NPU frequency fix for consistent performance
-#   8. Sets up log rotation
+#   6. Applies NPU frequency fix for consistent performance
+#   7. Installs a systemd service for auto-start on boot
 #
 # Tested on:
 #   - Orange Pi 5 Plus (16 GB RAM, RK3588)
 #   - Armbian Pelochus 24.11.0 (jammy vendor, RKNPU driver 0.9.8)
 #     https://github.com/Pelochus/armbian-build-rknpu-updates/releases
+#
+# The script is IDEMPOTENT — safe to run multiple times.  It detects what
+# is already installed (rkllm binary at /usr/bin or /usr/local/bin,
+# librkllmrt.so at /lib or /usr/lib, existing systemd services) and
+# skips those steps.
 #
 # Usage:
 #   chmod +x setup.sh
@@ -101,6 +105,9 @@ separator() {
 
 separator "RKLLM API Server — Zero-Configuration Setup"
 
+# Track whether the service file was changed (used later for restart prompt)
+SERVICE_CHANGED=false
+
 echo "  Install directory : $INSTALL_DIR"
 echo "  Models directory  : $MODELS_DIR"
 echo "  Venv directory    : $VENV_DIR"
@@ -146,18 +153,25 @@ success "System packages installed"
 separator "Step 2/7 — Checking RKNPU Driver"
 
 DRIVER_VERSION=""
+
+# Method 1: sysfs (may need root for debugfs)
 if [[ -f /sys/kernel/debug/rknpu/version ]]; then
-    DRIVER_VERSION=$(cat /sys/kernel/debug/rknpu/version 2>/dev/null || echo "")
+    DRIVER_VERSION=$(sudo cat /sys/kernel/debug/rknpu/version 2>/dev/null || echo "")
 fi
 
+# Method 2: dmesg (may need sudo on newer kernels)
 if [[ -z "$DRIVER_VERSION" ]]; then
-    # Try dmesg fallback
-    DRIVER_VERSION=$(dmesg 2>/dev/null | grep -ioP 'rknpu.*version\s+\K[\d.]+' | tail -1 || echo "")
+    DRIVER_VERSION=$(sudo dmesg 2>/dev/null | grep -ioP 'rknpu.*version\s+\K[\d.]+' | tail -1 || echo "")
+fi
+
+# Method 3: Check if the device node exists (driver is loaded even if version unreadable)
+if [[ -z "$DRIVER_VERSION" && -c /dev/rknpu ]]; then
+    DRIVER_VERSION="present (version unreadable)"
 fi
 
 if [[ -n "$DRIVER_VERSION" ]]; then
     success "RKNPU driver detected: v$DRIVER_VERSION"
-    if [[ "$DRIVER_VERSION" < "0.9.6" ]]; then
+    if [[ "$DRIVER_VERSION" != "present"* && "$DRIVER_VERSION" < "0.9.6" ]]; then
         warn "Driver $DRIVER_VERSION is older than recommended (0.9.8)."
         warn "Consider using Pelochus Armbian builds which include 0.9.8:"
         warn "  https://github.com/Pelochus/armbian-build-rknpu-updates/releases"
@@ -174,61 +188,128 @@ fi
 
 separator "Step 3/7 — Installing RKLLM Runtime v1.2.3"
 
-# Check if rkllm binary already exists
+# --- Detect existing rkllm binary (may be at /usr/bin or /usr/local/bin) ---
+RKLLM_BIN=""
 if command -v rkllm &>/dev/null; then
-    success "rkllm binary already installed: $(which rkllm)"
-    SKIP_RUNTIME=true
+    RKLLM_BIN=$(which rkllm)
+    success "rkllm binary already installed: $RKLLM_BIN"
+    SKIP_BINARY=true
 else
-    SKIP_RUNTIME=false
+    # Search common locations
+    for candidate in /usr/local/bin/rkllm /usr/bin/rkllm; do
+        if [[ -x "$candidate" ]]; then
+            RKLLM_BIN="$candidate"
+            success "rkllm binary found at: $RKLLM_BIN (not in PATH — will fix)"
+            # Add to PATH via profile if needed
+            break
+        fi
+    done
+    if [[ -z "$RKLLM_BIN" ]]; then
+        SKIP_BINARY=false
+        info "rkllm binary not found — will compile from source"
+    else
+        SKIP_BINARY=true
+    fi
 fi
 
-# Check if library already installed
+# --- Detect existing runtime library (may be at /lib/ or /usr/lib/) ---
+LIB_INSTALLED=false
 if ldconfig -p 2>/dev/null | grep -q librkllmrt; then
-    success "librkllmrt.so already installed"
+    LIB_PATH=$(ldconfig -p 2>/dev/null | grep librkllmrt | awk '{print $NF}' | head -1)
+    success "librkllmrt.so already installed: $LIB_PATH"
     LIB_INSTALLED=true
-else
-    LIB_INSTALLED=false
+elif [[ -f /usr/lib/librkllmrt.so || -f /lib/librkllmrt.so ]]; then
+    # Library exists but ldconfig doesn't know about it — fix that
+    warn "librkllmrt.so found on disk but not in ldconfig — running ldconfig..."
+    sudo ldconfig
+    if ldconfig -p 2>/dev/null | grep -q librkllmrt; then
+        success "librkllmrt.so now registered with ldconfig"
+        LIB_INSTALLED=true
+    fi
 fi
 
-if [[ "$SKIP_RUNTIME" == false || "$LIB_INSTALLED" == false ]]; then
-    # Clone rknn-llm repo if not present
-    if [[ ! -d "$RKNN_LLM_DIR" ]]; then
+# --- Install missing components ---
+if [[ "$SKIP_BINARY" == false || "$LIB_INSTALLED" == false ]]; then
+
+    # We need the rknn-llm repo for source files
+    # Check common locations: $HOME/rknn-llm, $HOME/Downloads/ezrknpu/ezrknn-llm
+    RKNN_FOUND=false
+    for candidate_dir in "$RKNN_LLM_DIR" "$HOME/Downloads/ezrknpu/ezrknn-llm"; do
+        if [[ -d "$candidate_dir/rkllm-runtime" ]]; then
+            RKNN_LLM_DIR="$candidate_dir"
+            RKNN_FOUND=true
+            success "rknn-llm repo found at: $RKNN_LLM_DIR"
+            break
+        fi
+    done
+
+    if [[ "$RKNN_FOUND" == false ]]; then
+        if [[ -d "$RKNN_LLM_DIR" ]]; then
+            # Directory exists but missing expected structure — might be incomplete
+            warn "rknn-llm directory exists at $RKNN_LLM_DIR but missing rkllm-runtime/"
+            warn "Re-cloning..."
+            rm -rf "$RKNN_LLM_DIR"
+        fi
         info "Cloning rknn-llm repository..."
         git clone --depth 1 https://github.com/airockchip/rknn-llm.git "$RKNN_LLM_DIR"
         success "rknn-llm cloned to $RKNN_LLM_DIR"
-    else
-        success "rknn-llm already exists at $RKNN_LLM_DIR"
     fi
 
-    # Install shared library
+    # Install shared library if missing
     if [[ "$LIB_INSTALLED" == false ]]; then
-        info "Installing librkllmrt.so to /usr/lib/..."
-        sudo cp "$RKNN_LLM_DIR/rkllm-runtime/Linux/librkllm_api/aarch64/librkllmrt.so" /usr/lib/
-        sudo ldconfig
-        success "librkllmrt.so installed"
-    fi
-
-    # Compile llm_demo binary
-    if [[ "$SKIP_RUNTIME" == false ]]; then
-        info "Compiling rkllm (llm_demo) binary natively..."
-        DEMO_DIR="$RKNN_LLM_DIR/examples/rkllm_api_demo/deploy"
-
-        if [[ ! -f "$DEMO_DIR/src/llm_demo.cpp" ]]; then
-            error "llm_demo.cpp not found at $DEMO_DIR/src/"
-            error "Check that rknn-llm cloned correctly."
+        LIB_SRC="$RKNN_LLM_DIR/rkllm-runtime/Linux/librkllm_api/aarch64/librkllmrt.so"
+        if [[ -f "$LIB_SRC" ]]; then
+            info "Installing librkllmrt.so to /usr/lib/..."
+            sudo cp "$LIB_SRC" /usr/lib/
+            sudo ldconfig
+            success "librkllmrt.so installed"
+        else
+            error "librkllmrt.so not found in rknn-llm repo at expected path:"
+            error "  $LIB_SRC"
             exit 1
         fi
+    fi
 
-        cd "$DEMO_DIR"
-        g++ -O2 -o rkllm src/llm_demo.cpp \
-            -I../../../rkllm-runtime/Linux/librkllm_api/include \
-            -L../../../rkllm-runtime/Linux/librkllm_api/aarch64 \
-            -lrkllmrt -lpthread
+    # Compile llm_demo binary if missing
+    if [[ "$SKIP_BINARY" == false ]]; then
+        # Search for llm_demo.cpp in the rknn-llm repo
+        DEMO_SRC=$(find "$RKNN_LLM_DIR" -name "llm_demo.cpp" -type f 2>/dev/null | head -1)
 
-        sudo cp rkllm /usr/local/bin/
-        cd "$INSTALL_DIR"
+        if [[ -n "$DEMO_SRC" ]]; then
+            DEMO_DIR=$(dirname "$DEMO_SRC")
+            DEPLOY_DIR=$(dirname "$DEMO_DIR")  # Go up from src/ to deploy/
+            info "Compiling rkllm (llm_demo) binary natively..."
+            info "Source: $DEMO_SRC"
 
-        success "rkllm binary compiled and installed to /usr/local/bin/rkllm"
+            cd "$DEPLOY_DIR"
+            g++ -O2 -o rkllm "$DEMO_SRC" \
+                -I"$RKNN_LLM_DIR/rkllm-runtime/Linux/librkllm_api/include" \
+                -L"$RKNN_LLM_DIR/rkllm-runtime/Linux/librkllm_api/aarch64" \
+                -lrkllmrt -lpthread
+
+            sudo cp rkllm /usr/local/bin/
+            RKLLM_BIN="/usr/local/bin/rkllm"
+            cd "$INSTALL_DIR"
+
+            success "rkllm binary compiled and installed to /usr/local/bin/rkllm"
+        else
+            error "llm_demo.cpp not found anywhere in $RKNN_LLM_DIR"
+            echo ""
+            echo "  This can happen if the rknn-llm repo structure changed or"
+            echo "  the examples were removed.  You have two options:"
+            echo ""
+            echo "  Option 1: Re-clone the full repo (not shallow):"
+            echo "    rm -rf $RKNN_LLM_DIR"
+            echo "    git clone https://github.com/airockchip/rknn-llm.git $RKNN_LLM_DIR"
+            echo "    Then re-run this script."
+            echo ""
+            echo "  Option 2: If you already have a compiled rkllm binary,"
+            echo "    copy it to /usr/local/bin/:"
+            echo "    sudo cp /path/to/rkllm /usr/local/bin/"
+            echo "    Then re-run this script."
+            echo ""
+            exit 1
+        fi
     fi
 else
     success "RKLLM runtime already fully installed — skipping"
@@ -236,9 +317,20 @@ fi
 
 # Verify
 info "Verifying RKLLM runtime..."
-if ldconfig -p | grep -q librkllmrt && command -v rkllm &>/dev/null; then
+RKLLM_BIN_FINAL=$(which rkllm 2>/dev/null || echo "")
+RKLLM_LIB_FINAL=$(ldconfig -p 2>/dev/null | grep librkllmrt | awk '{print $NF}' | head -1)
+
+if [[ -n "$RKLLM_LIB_FINAL" && -n "$RKLLM_BIN_FINAL" ]]; then
     success "Runtime verification passed"
+    success "  Binary : $RKLLM_BIN_FINAL"
+    success "  Library: $RKLLM_LIB_FINAL"
 else
+    if [[ -z "$RKLLM_LIB_FINAL" ]]; then
+        error "librkllmrt.so not found in ldconfig"
+    fi
+    if [[ -z "$RKLLM_BIN_FINAL" ]]; then
+        error "rkllm binary not found in PATH"
+    fi
     error "Runtime verification failed. Check the output above."
     exit 1
 fi
@@ -307,11 +399,14 @@ fi
 
 separator "Step 6/7 — NPU Frequency Fix"
 
-# Create a persistent frequency fix script
+# Create a persistent frequency fix script (the actual commands)
 NPU_FIX_SCRIPT="/usr/local/bin/rk3588-npu-fix-freq.sh"
 
-info "Installing NPU frequency fix script..."
-sudo tee "$NPU_FIX_SCRIPT" > /dev/null << 'FREQSCRIPT'
+if [[ -x "$NPU_FIX_SCRIPT" ]]; then
+    success "Frequency fix script already exists: $NPU_FIX_SCRIPT"
+else
+    info "Installing NPU frequency fix script..."
+    sudo tee "$NPU_FIX_SCRIPT" > /dev/null << 'FREQSCRIPT'
 #!/bin/bash
 # RK3588 NPU + CPU frequency governor fix for consistent inference performance.
 # Sets performance governor to prevent clock scaling during inference.
@@ -336,38 +431,17 @@ if [[ -f "$DMC_GOV" ]]; then
     echo performance > "$DMC_GOV" 2>/dev/null && echo "[OK] DMC governor: performance" || echo "[SKIP] DMC governor"
 fi
 FREQSCRIPT
-
-sudo chmod +x "$NPU_FIX_SCRIPT"
-success "Frequency fix script installed: $NPU_FIX_SCRIPT"
+    sudo chmod +x "$NPU_FIX_SCRIPT"
+    success "Frequency fix script installed: $NPU_FIX_SCRIPT"
+fi
 
 # Apply it now
 info "Applying frequency fix..."
 sudo "$NPU_FIX_SCRIPT" || warn "Some frequency settings may have failed (non-critical)"
 
-# Add to rc.local for persistence across reboots
-RC_LOCAL="/etc/rc.local"
-if [[ -f "$RC_LOCAL" ]]; then
-    if ! grep -q "rk3588-npu-fix-freq" "$RC_LOCAL"; then
-        # Insert before 'exit 0' if present, otherwise append
-        if grep -q "^exit 0" "$RC_LOCAL"; then
-            sudo sed -i "/^exit 0/i $NPU_FIX_SCRIPT" "$RC_LOCAL"
-        else
-            echo "$NPU_FIX_SCRIPT" | sudo tee -a "$RC_LOCAL" > /dev/null
-        fi
-        success "Frequency fix added to $RC_LOCAL (persistent across reboots)"
-    else
-        success "Frequency fix already in $RC_LOCAL"
-    fi
-else
-    # Create rc.local
-    sudo tee "$RC_LOCAL" > /dev/null << EOF
-#!/bin/bash
-$NPU_FIX_SCRIPT
-exit 0
-EOF
-    sudo chmod +x "$RC_LOCAL"
-    success "Created $RC_LOCAL with frequency fix"
-fi
+# Persistence: prefer systemd service over rc.local
+# The systemd service is created in Step 7 below (fix-freq.service).
+# If an old rc.local entry exists, it's harmless (runs before systemd service).
 
 # =============================================================================
 # STEP 8: SYSTEMD SERVICE
@@ -376,12 +450,78 @@ fi
 separator "Step 7/7 — Creating Systemd Service"
 
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+FREQ_SERVICE_FILE="/etc/systemd/system/fix-freq.service"
 
-info "Creating systemd service: $SERVICE_NAME"
-sudo tee "$SERVICE_FILE" > /dev/null << EOF
+# --- Frequency fix as a proper systemd service (replaces rc.local method) ---
+if [[ -f "$FREQ_SERVICE_FILE" ]]; then
+    success "Frequency fix service already exists: $FREQ_SERVICE_FILE"
+else
+    info "Creating frequency fix systemd service..."
+    sudo tee "$FREQ_SERVICE_FILE" > /dev/null << 'EOF'
+[Unit]
+Description=Fix NPU/CPU/DDR frequencies for RKLLM performance
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rk3588-npu-fix-freq.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo systemctl daemon-reload
+    sudo systemctl enable fix-freq.service
+    sudo systemctl start fix-freq.service 2>/dev/null || true
+    success "Frequency fix service created and enabled"
+fi
+
+# --- Main API service ---
+# Detect the rkllm binary location for the service PATH
+RKLLM_BIN_DIR=$(dirname "$(which rkllm 2>/dev/null || echo /usr/local/bin/rkllm)")
+
+EXISTING_SERVICE=false
+SERVICE_CHANGED=false
+if [[ -f "$SERVICE_FILE" ]]; then
+    EXISTING_SERVICE=true
+    info "Existing service found: $SERVICE_FILE"
+
+    # Check if it points to our install directory
+    EXISTING_WORKDIR=$(grep -oP 'WorkingDirectory=\K.*' "$SERVICE_FILE" 2>/dev/null || echo "")
+    if [[ "$EXISTING_WORKDIR" == "$INSTALL_DIR" ]]; then
+        # Check if venv path matches (upgrade from non-venv to venv)
+        if grep -q "$VENV_DIR/bin/gunicorn" "$SERVICE_FILE" 2>/dev/null; then
+            success "Service already configured correctly for $INSTALL_DIR"
+        else
+            info "Service exists but needs updating (venv path changed)"
+            SERVICE_CHANGED=true
+        fi
+    else
+        warn "Existing service points to: $EXISTING_WORKDIR"
+        warn "This script's install dir is: $INSTALL_DIR"
+        echo ""
+        read -rp "$(echo -e "${YELLOW}Update service to use this directory? [Y/n]: ${NC}")" UPDATE_SVC
+        UPDATE_SVC=${UPDATE_SVC:-Y}
+        if [[ "$UPDATE_SVC" =~ ^[Yy] ]]; then
+            SERVICE_CHANGED=true
+        else
+            info "Keeping existing service configuration"
+        fi
+    fi
+fi
+
+if [[ "$EXISTING_SERVICE" == false || "$SERVICE_CHANGED" == true ]]; then
+    # Stop existing service before overwriting
+    if [[ "$EXISTING_SERVICE" == true ]]; then
+        info "Stopping existing service..."
+        sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    fi
+
+    info "Creating systemd service: $SERVICE_NAME"
+    sudo tee "$SERVICE_FILE" > /dev/null << EOF
 [Unit]
 Description=RKLLM API Server (OpenAI-compatible, RK3588 NPU)
-After=network.target
+After=network.target fix-freq.service
 Wants=network-online.target
 
 [Service]
@@ -391,7 +531,7 @@ Group=$(id -gn)
 WorkingDirectory=$INSTALL_DIR
 
 # Environment
-Environment="PATH=$VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=$VENV_DIR/bin:$RKLLM_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 Environment="RKLLM_LOG_LEVEL=$RKLLM_LOG_LEVEL"
 Environment="RKLLM_API_LOG_LEVEL=INFO"
 
@@ -415,7 +555,7 @@ StartLimitBurst=3
 LimitNOFILE=65536
 LimitNPROC=4096
 
-# Security hardening (optional — comment out if causing issues)
+# Security hardening (comment out if causing issues)
 ProtectHome=no
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -425,11 +565,12 @@ ReadWritePaths=$INSTALL_DIR $MODELS_DIR /tmp
 WantedBy=multi-user.target
 EOF
 
-# Reload systemd and enable the service
-sudo systemctl daemon-reload
-sudo systemctl enable "$SERVICE_NAME"
-
-success "Service created and enabled: $SERVICE_NAME"
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$SERVICE_NAME"
+    success "Service created and enabled: $SERVICE_NAME"
+else
+    success "Service unchanged"
+fi
 echo ""
 echo "  Start now:     sudo systemctl start $SERVICE_NAME"
 echo "  Stop:          sudo systemctl stop $SERVICE_NAME"
@@ -443,20 +584,38 @@ echo "  Disable:       sudo systemctl disable $SERVICE_NAME"
 
 echo ""
 if [[ "$MODEL_COUNT" -gt 0 ]]; then
-    read -rp "$(echo -e "${GREEN}Models found. Start the API server now? [Y/n]: ${NC}")" START_NOW
-    START_NOW=${START_NOW:-Y}
-    if [[ "$START_NOW" =~ ^[Yy] ]]; then
-        sudo systemctl start "$SERVICE_NAME"
-        sleep 2
-        if sudo systemctl is-active --quiet "$SERVICE_NAME"; then
-            success "API server is running!"
-            echo ""
-            echo "  API endpoint: http://$(hostname -I | awk '{print $1}'):$BIND_PORT/v1/models"
-            echo "  Test:         curl http://localhost:$BIND_PORT/v1/models"
-        else
-            warn "Service started but may not be ready yet. Check:"
-            echo "  sudo systemctl status $SERVICE_NAME"
-            echo "  journalctl -u $SERVICE_NAME -f"
+    # Check if already running
+    if sudo systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        success "API server is already running!"
+        if [[ "$SERVICE_CHANGED" == true ]]; then
+            read -rp "$(echo -e "${YELLOW}Service was updated. Restart now? [Y/n]: ${NC}")" RESTART_NOW
+            RESTART_NOW=${RESTART_NOW:-Y}
+            if [[ "$RESTART_NOW" =~ ^[Yy] ]]; then
+                sudo systemctl restart "$SERVICE_NAME"
+                sleep 2
+                if sudo systemctl is-active --quiet "$SERVICE_NAME"; then
+                    success "API server restarted successfully!"
+                else
+                    warn "Restart may have failed. Check: journalctl -u $SERVICE_NAME -f"
+                fi
+            fi
+        fi
+    else
+        read -rp "$(echo -e "${GREEN}Models found. Start the API server now? [Y/n]: ${NC}")" START_NOW
+        START_NOW=${START_NOW:-Y}
+        if [[ "$START_NOW" =~ ^[Yy] ]]; then
+            sudo systemctl start "$SERVICE_NAME"
+            sleep 2
+            if sudo systemctl is-active --quiet "$SERVICE_NAME"; then
+                success "API server is running!"
+                echo ""
+                echo "  API endpoint: http://$(hostname -I | awk '{print $1}'):$BIND_PORT/v1/models"
+                echo "  Test:         curl http://localhost:$BIND_PORT/v1/models"
+            else
+                warn "Service started but may not be ready yet. Check:"
+                echo "  sudo systemctl status $SERVICE_NAME"
+                echo "  journalctl -u $SERVICE_NAME -f"
+            fi
         fi
     fi
 else
@@ -474,13 +633,13 @@ echo "  ┌───────────────────────
 echo "  │  RKLLM API Server — Installation Summary               │"
 echo "  ├─────────────────────────────────────────────────────────┤"
 echo "  │                                                         │"
-echo "  │  API Server  : $INSTALL_DIR/api.py"
+echo "  │  API Server   : $INSTALL_DIR/api.py"
 echo "  │  Venv         : $VENV_DIR"
-echo "  │  Models       : $MODELS_DIR"
+echo "  │  Models       : $MODELS_DIR ($MODEL_COUNT model(s))"
 echo "  │  Service      : $SERVICE_NAME (systemd)"
 echo "  │  Endpoint     : http://0.0.0.0:$BIND_PORT/v1"
-echo "  │  rkllm binary : $(which rkllm)"
-echo "  │  Runtime lib  : $(ldconfig -p | grep librkllmrt | awk '{print $NF}')"
+echo "  │  rkllm binary : ${RKLLM_BIN_FINAL:-$(which rkllm 2>/dev/null || echo 'not found')}"
+echo "  │  Runtime lib  : ${RKLLM_LIB_FINAL:-$(ldconfig -p 2>/dev/null | grep librkllmrt | awk '{print $NF}' | head -1)}"
 echo "  │                                                         │"
 echo "  ├─────────────────────────────────────────────────────────┤"
 echo "  │  NEXT STEPS:                                            │"
