@@ -77,7 +77,7 @@ CONTEXT_LENGTH_DEFAULT = 4096
 READ_BUFFER_SIZE = 4096       # os.read() buffer for stdout
 DRAIN_BUFFER_SIZE = 8192      # os.read() buffer for drain_stdout
 SELECT_TIMEOUT = 0.5          # select() poll interval in seconds
-DRAIN_TIMEOUT = 1.0            # drain_stdout silence timeout (must capture all stats lines)
+DRAIN_TIMEOUT = 1.0           # drain_stdout silence timeout (must capture all stats lines)
 
 # OpenAI sampling parameter defaults — rkllm ignores these (model-compiled
 # sampling), but we log when callers send non-default values so they know.
@@ -252,9 +252,9 @@ def _jaccard_similarity(text_a, text_b):
 # LOGGING
 # =============================================================================
 # Use RKLLM_API_LOG_LEVEL for the Python API's own logging.
-# RKLLM_LOG_LEVEL is reserved for the rkllm C runtime (expects integer 0-2).
-# Fallback chain: RKLLM_API_LOG_LEVEL → RKLLM_LOG_LEVEL → DEBUG
-_log_env = os.environ.get('RKLLM_API_LOG_LEVEL') or os.environ.get('RKLLM_LOG_LEVEL', 'DEBUG')
+# RKLLM_LOG_LEVEL is reserved for the rkllm C runtime (expects integer 0-2)
+# and must NOT be used as a Python log level name.
+_log_env = os.environ.get('RKLLM_API_LOG_LEVEL', 'DEBUG')
 LOG_LEVEL = getattr(logging, _log_env.upper(), logging.DEBUG)
 
 logging.basicConfig(
@@ -298,9 +298,8 @@ if os.path.exists(MODELS_ROOT):
         rkllm_files = sorted(f for f in files if f.endswith(".rkllm"))
         if len(rkllm_files) > 1:
             logger.warning(f"Multiple .rkllm files in {root}: {rkllm_files} — using '{rkllm_files[0]}'")
-        for f in rkllm_files:
-            rkllm_file = os.path.join(root, f)
-            break
+        if rkllm_files:
+            rkllm_file = os.path.join(root, rkllm_files[0])
 
         if not rkllm_file:
             continue
@@ -1853,7 +1852,7 @@ def chat_completions():
         role = msg.get('role', '?')
         content = msg.get('content', '')
         preview = content[:500] if len(content) <= 500 else content[:500] + f"... [{len(content)} chars total]"
-        logger.info(f"[{request_id}] MSG[{i}] role={role} len={len(content)}: {preview}")
+        logger.debug(f"[{request_id}] MSG[{i}] role={role} len={len(content)}: {preview}")
     # === END DIAGNOSTIC ===
 
     if not messages:
@@ -1956,7 +1955,7 @@ def chat_completions():
                     })
 
         # Drain any buffered output (stats lines, prompt indicators from previous turn)
-        drain_stdout(proc)  # Uses DRAIN_TIMEOUT (1.0s) to capture all stats lines
+        drain_stdout(proc)  # Two-phase: 0.3s initial, escalates to DRAIN_TIMEOUT if data found
 
         # Health-check: ensure the process didn't die during drain
         if proc.poll() is not None:
@@ -2629,9 +2628,12 @@ def _generate_complete(proc, request_id, model_name, created, is_rag=False, mess
 
         # Store in RAG cache if generation was clean
         if rag_cache_info and generation_clean and full_content:
+            cache_text = full_content
+            if reasoning_content:
+                cache_text = f"<think>{reasoning_content}</think>{cleaned_content}"
             _model, _question, _prompt = rag_cache_info
-            _rag_cache_put(_model, _question, _prompt, full_content)
-            logger.info(f"[{request_id}] RAG cache STORE ({len(full_content)} chars)")
+            _rag_cache_put(_model, _question, _prompt, cache_text)
+            logger.info(f"[{request_id}] RAG cache STORE ({len(cache_text)} chars)")
 
         if reasoning_content:
             logger.info(f"[{request_id}] Completed ({len(cleaned_content)} content + {len(reasoning_content)} reasoning chars)")
