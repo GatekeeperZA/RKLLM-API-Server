@@ -78,6 +78,7 @@ FALLBACK_SILENCE = 12         # Max silence between tokens after first token
 # Defaults
 MAX_TOKENS_DEFAULT = 2048
 CONTEXT_LENGTH_DEFAULT = 4096
+CHARS_PER_TOKEN_ESTIMATE = 4  # ~4 chars/token for English (industry standard)
 
 # OpenAI sampling parameter defaults — rkllm uses model-compiled sampling,
 # but we log when callers send non-default values so they know.
@@ -672,11 +673,13 @@ class RKLLMWrapper:
         if not self._model_loaded:
             return
         try:
-            self.lib.rkllm_clear_kv_cache(
+            ret = self.lib.rkllm_clear_kv_cache(
                 self.handle, ctypes.c_int(0), None, None
             )
-        except Exception:
-            pass
+            if ret != 0:
+                logger.warning(f"rkllm_clear_kv_cache returned error code {ret}")
+        except Exception as e:
+            logger.warning(f"rkllm_clear_kv_cache exception: {e}")
 
     def destroy(self):
         """Destroy the model and free NPU resources."""
@@ -722,6 +725,7 @@ LAST_REQUEST_TIME = 0
 # send only the new user message on follow-up turns (incremental mode)
 # instead of the full concatenated conversation.  With keep_history=1,
 # the runtime keeps all prior turns — we just need to add the new one.
+_KV_LOCK = Lock()
 _kv_cache_state = {
     "model": None,          # Model name currently in KV cache
     "user_messages": [],    # User messages (in order) the KV cache covers
@@ -733,40 +737,43 @@ def _check_kv_incremental(model_name, messages):
 
     Returns the last user message text if incremental is possible, else None.
     """
-    if _kv_cache_state["model"] != model_name:
+    with _KV_LOCK:
+        if _kv_cache_state["model"] != model_name:
+            return None
+
+        user_msgs = [m['content'] for m in messages
+                     if m.get('role') == 'user' and m.get('content')]
+        if not user_msgs:
+            return None
+
+        # History = all user messages except the latest
+        history = user_msgs[:-1]
+
+        if history == _kv_cache_state["user_messages"]:
+            return user_msgs[-1]
         return None
-
-    user_msgs = [m['content'] for m in messages
-                 if m.get('role') == 'user' and m.get('content')]
-    if not user_msgs:
-        return None
-
-    # History = all user messages except the latest
-    history = user_msgs[:-1]
-
-    if history == _kv_cache_state["user_messages"]:
-        return user_msgs[-1]
-    return None
 
 
 def _update_kv_tracking(model_name, messages, is_reset):
     """Update KV cache tracking after successful generation."""
     user_msgs = [m['content'] for m in messages
                  if m.get('role') == 'user' and m.get('content')]
-    _kv_cache_state["model"] = model_name
-    if is_reset:
-        # Full reset — track all user messages from this conversation
-        _kv_cache_state["user_messages"] = list(user_msgs)
-    else:
-        # Incremental — append only the latest user message
-        if user_msgs:
-            _kv_cache_state["user_messages"].append(user_msgs[-1])
+    with _KV_LOCK:
+        _kv_cache_state["model"] = model_name
+        if is_reset:
+            # Full reset — track all user messages from this conversation
+            _kv_cache_state["user_messages"] = list(user_msgs)
+        else:
+            # Incremental — append only the latest user message
+            if user_msgs:
+                _kv_cache_state["user_messages"].append(user_msgs[-1])
 
 
 def _reset_kv_tracking():
     """Reset KV tracking (model unloaded or KV cache cleared)."""
-    _kv_cache_state["model"] = None
-    _kv_cache_state["user_messages"] = []
+    with _KV_LOCK:
+        _kv_cache_state["model"] = None
+        _kv_cache_state["user_messages"] = []
 
 
 # =============================================================================
@@ -807,19 +814,28 @@ def try_start_request(request_id, model):
 
 
 def force_clear_if_orphaned():
-    """Clear orphaned request tracking if model is not loaded."""
+    """Clear orphaned request tracking if model changed or unloaded."""
     loaded = is_model_loaded()
     with ACTIVE_LOCK:
         if ACTIVE_REQUEST["id"] is None:
             return
         if CURRENT_MODEL != ACTIVE_REQUEST["model"]:
-            return  # Model is still loading
-        if not loaded:
-            logger.warning(f"Clearing orphaned request {ACTIVE_REQUEST['id']} - model not loaded")
-            ACTIVE_REQUEST["id"] = None
-            ACTIVE_REQUEST["start_time"] = 0
-            ACTIVE_REQUEST["last_activity"] = 0
-            ACTIVE_REQUEST["model"] = None
+            # Model switched — only clear if request is stale
+            elapsed = time.time() - ACTIVE_REQUEST["last_activity"]
+            if elapsed <= REQUEST_STALE_TIMEOUT:
+                return  # Model may still be loading
+            logger.warning(f"Clearing orphaned request {ACTIVE_REQUEST['id']} "
+                          f"- model mismatch ({ACTIVE_REQUEST['model']} vs "
+                          f"{CURRENT_MODEL}) after {elapsed:.0f}s")
+        elif not loaded:
+            logger.warning(f"Clearing orphaned request {ACTIVE_REQUEST['id']} "
+                          f"- model not loaded")
+        else:
+            return  # Model matches and is loaded — not orphaned
+        ACTIVE_REQUEST["id"] = None
+        ACTIVE_REQUEST["start_time"] = 0
+        ACTIVE_REQUEST["last_activity"] = 0
+        ACTIVE_REQUEST["model"] = None
 
 
 def update_request_activity():
@@ -1447,7 +1463,7 @@ def build_prompt(messages, model_name):
     else:
         logger.debug(f"Prompt FULL: {prompt}")
 
-    approx_tokens = len(prompt) // 3
+    approx_tokens = len(prompt) // CHARS_PER_TOKEN_ESTIMATE
     if approx_tokens > ctx * 0.85:
         logger.warning(
             f"Prompt (~{approx_tokens} tokens) approaches context limit ({ctx}). "
@@ -1471,9 +1487,10 @@ def load_model(model_name, config):
         logger.warning("Previous generation still active — aborting for clean state")
         if _rkllm_wrapper:
             _rkllm_wrapper.abort()
-        if _worker_thread and _worker_thread.is_alive():
-            _worker_thread.join(timeout=10)
-        _worker_thread = None
+        with PROCESS_LOCK:
+            if _worker_thread and _worker_thread.is_alive():
+                _worker_thread.join(timeout=10)
+            _worker_thread = None
         GENERATION_COMPLETE.set()
 
     with PROCESS_LOCK:
@@ -1721,10 +1738,22 @@ class ThinkTagParser:
 
 
 def parse_think_tags(text):
-    """Parse <think>...</think> from complete text. Returns (reasoning_content, content)."""
+    """Parse <think>...</think> from complete text. Returns (reasoning_content, content).
+
+    Handles unclosed <think> tags consistently with the streaming ThinkTagParser:
+    any content after an unclosed <think> is treated as reasoning.
+    """
     pattern = re.compile(r'<think>(.*?)</think>', re.DOTALL)
     thinking_parts = pattern.findall(text)
-    content = pattern.sub('', text).strip()
+    content = pattern.sub('', text)
+
+    # Handle unclosed <think> tag (matches ThinkTagParser.flush() behavior)
+    unclosed = re.search(r'<think>(.*?)$', content, re.DOTALL)
+    if unclosed:
+        thinking_parts.append(unclosed.group(1))
+        content = content[:unclosed.start()]
+
+    content = content.strip()
     reasoning = '\n'.join(part.strip() for part in thinking_parts if part.strip())
     return (reasoning if reasoning else None, content)
 
@@ -1908,12 +1937,17 @@ def chat_completions():
             cached = _rag_cache_get(name, user_question)
             if cached:
                 cached_prompt, cached_response = cached
+                # Invalidate if web context changed (different search results)
+                if cached_prompt != prompt:
+                    logger.info(f"[{request_id}] RAG cache STALE \u2014 web context changed, regenerating")
+                    cached = None
+            if cached:
                 logger.info(f"[{request_id}] RAG cache HIT for '{user_question[:60]}' "
                             f"({len(cached_response)} chars)")
                 end_request(request_id)
                 created = int(time.time())
-                prompt_tokens = max(1, len(cached_prompt) // 3)
-                completion_tokens = max(1, len(cached_response) // 3)
+                prompt_tokens = max(1, len(cached_prompt) // CHARS_PER_TOKEN_ESTIMATE)
+                completion_tokens = max(1, len(cached_response) // CHARS_PER_TOKEN_ESTIMATE)
                 reasoning_content, cleaned_content = parse_think_tags(cached_response)
                 if stream:
                     def _cached_stream():
@@ -2025,8 +2059,9 @@ def _generate_stream(prompt, request_id, model_name, created,
             logger.error(f"[{request_id}] Worker thread error: {e}")
             _token_queue.put(("error", str(e)))
 
-    _worker_thread = Thread(target=_worker, daemon=True)
-    _worker_thread.start()
+    with PROCESS_LOCK:
+        _worker_thread = Thread(target=_worker, daemon=True)
+        _worker_thread.start()
 
     generation_start = time.time()
     got_first_token = False
@@ -2106,9 +2141,10 @@ def _generate_stream(prompt, request_id, model_name, created,
         request_ended = True
 
         # Wait for worker thread to finish
-        if _worker_thread and _worker_thread.is_alive():
-            _worker_thread.join(timeout=5)
-        _worker_thread = None
+        with PROCESS_LOCK:
+            if _worker_thread and _worker_thread.is_alive():
+                _worker_thread.join(timeout=5)
+            _worker_thread = None
 
         # Flush think-tag parser
         flushed = think_parser.flush()
@@ -2132,10 +2168,10 @@ def _generate_stream(prompt, request_id, model_name, created,
         if include_usage:
             prompt_text = "".join(m.get("content", "") for m in (messages or [])
                                   if isinstance(m.get("content"), str))
-            prompt_tokens = max(1, len(prompt_text) // 3)
+            prompt_tokens = max(1, len(prompt_text) // CHARS_PER_TOKEN_ESTIMATE)
             total_output_chars = len(total_content) + len(total_reasoning)
             completion_tokens = stats_data.get(
-                'generate_tokens', max(1, total_output_chars // 3))
+                'generate_tokens', max(1, total_output_chars // CHARS_PER_TOKEN_ESTIMATE))
             yield make_sse_chunk(request_id, model_name, created, usage={
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
@@ -2172,11 +2208,12 @@ def _generate_stream(prompt, request_id, model_name, created,
         if not request_ended:
             end_request(request_id)
         # Ensure worker thread is cleaned up
-        if _worker_thread and _worker_thread.is_alive():
-            if _rkllm_wrapper:
-                _rkllm_wrapper.abort()
-            _worker_thread.join(timeout=5)
-            _worker_thread = None
+        with PROCESS_LOCK:
+            if _worker_thread and _worker_thread.is_alive():
+                if _rkllm_wrapper:
+                    _rkllm_wrapper.abort()
+                _worker_thread.join(timeout=5)
+                _worker_thread = None
         GENERATION_COMPLETE.set()
         if total_reasoning:
             logger.info(f"[{request_id}] Stream ended ({len(total_content)} content + "
@@ -2221,8 +2258,9 @@ def _generate_complete(prompt, request_id, model_name, created,
             logger.error(f"[{request_id}] Worker thread error: {e}")
             _token_queue.put(("error", str(e)))
 
-    _worker_thread = Thread(target=_worker, daemon=True)
-    _worker_thread.start()
+    with PROCESS_LOCK:
+        _worker_thread = Thread(target=_worker, daemon=True)
+        _worker_thread.start()
 
     generation_start = time.time()
     got_first_token = False
@@ -2277,9 +2315,10 @@ def _generate_complete(prompt, request_id, model_name, created,
                 break
 
         # Wait for worker thread
-        if _worker_thread and _worker_thread.is_alive():
-            _worker_thread.join(timeout=5)
-        _worker_thread = None
+        with PROCESS_LOCK:
+            if _worker_thread and _worker_thread.is_alive():
+                _worker_thread.join(timeout=5)
+            _worker_thread = None
 
         full_content = "".join(content_parts).rstrip()
 
@@ -2289,8 +2328,8 @@ def _generate_complete(prompt, request_id, model_name, created,
         # Token counts: use real NPU stats if available, else approximate
         prompt_text = "".join(m.get("content", "") for m in (messages or [])
                               if isinstance(m.get("content"), str))
-        prompt_tokens = max(1, len(prompt_text) // 3)
-        completion_tokens = stats_data.get('generate_tokens', max(1, len(full_content) // 3))
+        prompt_tokens = max(1, len(prompt_text) // CHARS_PER_TOKEN_ESTIMATE)
+        completion_tokens = stats_data.get('generate_tokens', max(1, len(full_content) // CHARS_PER_TOKEN_ESTIMATE))
 
         message_obj = {
             "role": "assistant",
@@ -2344,11 +2383,12 @@ def _generate_complete(prompt, request_id, model_name, created,
     finally:
         end_request(request_id)
         # Ensure worker cleanup
-        if _worker_thread and _worker_thread.is_alive():
-            if _rkllm_wrapper:
-                _rkllm_wrapper.abort()
-            _worker_thread.join(timeout=5)
-            _worker_thread = None
+        with PROCESS_LOCK:
+            if _worker_thread and _worker_thread.is_alive():
+                if _rkllm_wrapper:
+                    _rkllm_wrapper.abort()
+                _worker_thread.join(timeout=5)
+                _worker_thread = None
         GENERATION_COMPLETE.set()
 
 
