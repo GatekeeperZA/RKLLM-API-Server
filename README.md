@@ -81,19 +81,55 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 
 ## Architecture
 
-```
-┌──────────────┐    HTTP/SSE     ┌──────────────────┐    stdin/stdout    ┌──────────────┐
-│              │  ──────────────▶│                  │  ────────────────▶│              │
-│  Open WebUI  │    OpenAI API   │  RKLLM API       │    plain text      │  rkllm       │
-│  (Frontend)  │  ◀──────────────│  Server (Flask)  │  ◀────────────────│  (C++ binary)│
-│              │                 │                  │                    │              │
-└──────────────┘                 └──────────────────┘                    └──────┬───────┘
-                                        │                                      │
-                                        │ monitor thread                       │
-                                        │ health checks                   ┌────▼────┐
-                                        └─────────────────────────────────│  RK3588  │
-                                                                          │   NPU    │
-                                                                          └──────────┘
+```mermaid
+graph LR
+    subgraph Frontend
+        OW["🌐 Open WebUI"]
+        OL["🦙 Ollama<br/>(CPU Models)"]
+    end
+
+    subgraph srv ["RKLLM API Server — Flask"]
+        API["📡 API Endpoint<br/>/v1/chat/completions"]
+        BP["🔧 Prompt Builder<br/>RAG · Web Cleaning<br/>Score Selection"]
+        PM["🔍 Process Monitor<br/>Health · Recovery<br/>Idle Unload"]
+        RC["💾 RAG Cache<br/>LRU · TTL"]
+        TP["🧠 Think Parser<br/>‹think› Tags<br/>State Machine"]
+    end
+
+    subgraph bin ["Native Binary"]
+        RKLLM["⚡ rkllm  C++<br/>Chat Template<br/>Token Sampling"]
+    end
+
+    subgraph hw ["Hardware"]
+        NPU["🔲 RK3588 NPU<br/>6 TOPS × 3 cores"]
+    end
+
+    subgraph search ["Search"]
+        SX["🔎 SearXNG"]
+    end
+
+    OW -- "OpenAI API<br/>HTTP / SSE" --> API
+    OW -. "Ollama API<br/>HTTP" .-> OL
+    OW -- "Search Query" --> SX
+    SX -- "Results" --> OW
+    API --> BP
+    BP --> RC
+    API -- "stdin · plain text" --> RKLLM
+    RKLLM -- "stdout · tokens + stats" --> TP
+    TP -- "SSE chunks" --> API
+    PM -. "monitor · kill/restart" .-> RKLLM
+    RKLLM --> NPU
+
+    style OW fill:#4a9eff,stroke:#2d7cd4,color:#fff
+    style OL fill:#f5f5f5,stroke:#999,color:#333
+    style API fill:#2ecc71,stroke:#27ae60,color:#fff
+    style BP fill:#3498db,stroke:#2980b9,color:#fff
+    style PM fill:#e67e22,stroke:#d35400,color:#fff
+    style RC fill:#9b59b6,stroke:#8e44ad,color:#fff
+    style TP fill:#1abc9c,stroke:#16a085,color:#fff
+    style RKLLM fill:#e74c3c,stroke:#c0392b,color:#fff
+    style NPU fill:#2c3e50,stroke:#1a252f,color:#fff
+    style SX fill:#f39c12,stroke:#e67e22,color:#fff
 ```
 
 **Key design decisions:**
