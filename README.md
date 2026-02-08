@@ -143,7 +143,50 @@ pip install flask flask-cors gunicorn gevent
 
 ## Installation
 
-### 1. Clone This Repository
+### Automated Setup (Recommended)
+
+A zero-configuration setup script is included that handles **everything** — system packages, Python venv, RKLLM runtime compilation, systemd service, and NPU frequency fix:
+
+```bash
+git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
+cd RKLLM-API-Server
+chmod +x setup.sh
+./setup.sh
+```
+
+> **Do NOT run as root.** The script uses `sudo` internally only where needed (installing system packages, copying libraries, creating the systemd service). User-level files (venv, models directory) are owned by your normal account.
+
+The script is **idempotent** — safe to run multiple times. It detects what's already installed and skips those steps.
+
+**What it installs:**
+- System packages: `python3`, `python3-venv`, `python3-pip`, `build-essential`, `git`, `git-lfs`
+- RKLLM Runtime: `librkllmrt.so` → `/usr/lib/`, `rkllm` binary → `/usr/local/bin/`
+- Python venv with `flask`, `flask-cors`, `gunicorn`, `gevent`
+- Systemd service `rkllm-api` (auto-starts on boot)
+- NPU/CPU frequency governor fix (persistent across reboots via `/etc/rc.local`)
+
+After setup, download a model and start the service:
+```bash
+# Download Qwen3-1.7B (recommended)
+mkdir -p ~/models/Qwen3-1.7B-4K && cd ~/models/Qwen3-1.7B-4K
+git lfs install && git clone https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3 .
+
+# Start the server
+sudo systemctl start rkllm-api
+
+# Check status
+sudo systemctl status rkllm-api
+curl http://localhost:8000/v1/models
+```
+
+---
+
+### Manual Installation
+
+<details>
+<summary>Click to expand manual step-by-step instructions</summary>
+
+#### 1. Clone This Repository
 
 ```bash
 git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
@@ -156,7 +199,7 @@ pip install flask flask-cors gunicorn gevent
 mkdir -p ~/models
 ```
 
-### 2. RKNPU Driver 0.9.8
+#### 2. RKNPU Driver 0.9.8
 
 The RKNPU kernel driver enables communication with the NPU hardware. Some board images ship with an older driver — you need **≥ 0.9.6** (0.9.8 recommended).
 
@@ -206,7 +249,7 @@ dmesg | tail -5 | grep -i rknpu
 
 > **Alternative:** Some distributions update the driver via a board-specific kernel update: `sudo apt upgrade` may pull in a newer kernel with the driver included.
 
-### 3. RKLLM Runtime v1.2.3
+#### 3. RKLLM Runtime v1.2.3
 
 The RKLLM runtime provides the `librkllmrt.so` shared library and the demo binary that this API server uses. You need to:
 1. Install the shared library so the `rkllm` binary can find it
@@ -258,7 +301,7 @@ rkllm ~/models/Qwen3-1.7B-4K/Qwen3-1.7B-w8a8-rk3588.rkllm 2048 4096
 # Should print "rkllm init success" then wait for input
 ```
 
-### 4. Fix NPU Frequency (Recommended)
+#### 4. Fix NPU Frequency (Recommended)
 
 For consistent performance, pin the NPU and CPU frequencies. The rknn-llm repo includes scripts for this:
 
@@ -274,7 +317,7 @@ sudo bash fix_freq_rk3576.sh
 
 > Run this after each reboot, or add it to `/etc/rc.local` for persistence.
 
-### 5. Enable Performance Logging (Optional)
+#### 5. Enable Performance Logging (Optional)
 
 To see token speed and generation stats in the output:
 ```bash
@@ -282,6 +325,8 @@ export RKLLM_LOG_LEVEL=1
 ```
 
 This API server sets `RKLLM_LOG_LEVEL=1` automatically for the subprocess (parses `[Token/s]`, `[Tokens]`, `[Seconds]` from the output).
+
+</details>
 
 ---
 
