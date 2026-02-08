@@ -21,6 +21,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Open WebUI Configuration](#open-webui-configuration)
 - [SearXNG Configuration](#searxng-configuration)
 - [RAG Pipeline](#rag-pipeline)
+  - [Multi-Turn Conversation History](#multi-turn-conversation-history)
 - [Reasoning Models](#reasoning-models)
 - [Configuration Reference](#configuration-reference)
 - [Logging](#logging)
@@ -38,6 +39,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Auto-detection** of all `.rkllm` models in `~/models` directory
 - **Context length auto-detection** from filename patterns (2k/4k/8k/16k/32k)
 - **Auto-generated aliases** — short names like `qwen`, `deepseek` resolve automatically
+- **Multi-turn conversation history** — full chat context (user + assistant turns) sent to the model for coherent follow-ups
 - **Process reuse** for fast follow-up requests (no reload between turns)
 - **Model hot-switching** — request a different model and it loads automatically
 - **On-demand loading** via `/v1/models/select` for warm-up
@@ -756,6 +758,25 @@ Open WebUI searches SearXNG with the raw user message. Short follow-ups produce 
 | Layer 3: Topical overlap | < 30% query keywords found in reference text | Off-topic search results |
 
 When any layer fires, RAG is skipped and the model uses normal conversation mode.
+
+### Multi-Turn Conversation History
+
+The server preserves full conversation context across turns within a chat session. Open WebUI sends the entire message history (system, user, and assistant messages) with each request, and the server formats them into a multi-turn prompt:
+
+```
+User: What is the capital of France?
+Assistant: The capital of France is Paris.
+User: What is its population?
+```
+
+The model sees all previous turns and can answer follow-up questions in context (e.g. "its" refers to Paris). This works because:
+
+- **Open WebUI** sends the full `messages[]` array with every request (no server-side session state needed)
+- **Normal mode** labels each turn with `User:` / `Assistant:` prefixes for multi-turn conversations
+- **RAG mode** uses only the last user question (the reference data replaces conversation history to maximize context for search results)
+- **Single-turn** conversations omit the role labels for a cleaner prompt
+
+> **Note:** The rkllm binary has no KV cache persistence between requests — each prompt is processed from scratch. Long conversations increase prefill time proportionally (visible in the `Prefill` stats in the logs).
 
 ### Response Cache
 
