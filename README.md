@@ -143,9 +143,11 @@ pip install flask flask-cors gunicorn gevent
 
 ## Installation
 
-### Automated Setup (Recommended)
+### Automated Setup (Experimental)
 
-A zero-configuration setup script is included that handles **everything** — system packages, Python venv, RKLLM runtime compilation, systemd service, and NPU frequency fix:
+> **⚠️ Note:** This script has not been fully tested on a clean system yet. It is provided as a convenience and should work on Armbian/Ubuntu aarch64 systems, but please review the output carefully and report any issues.
+
+A zero-configuration setup script is included that handles **everything** — system packages, Python venv, RKLLM runtime compilation, kernel module/driver verification, udev rules, systemd service, and NPU frequency fix:
 
 ```bash
 git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
@@ -158,12 +160,12 @@ chmod +x setup.sh
 
 The script is **idempotent** — safe to run multiple times. It detects what's already installed and skips those steps.
 
-**What it installs:**
+**What it installs / verifies:**
 - System packages: `python3`, `python3-venv`, `python3-pip`, `build-essential`, `git`, `git-lfs`
+- RKNPU kernel module check (`lsmod`, `modinfo`, `/dev/rknpu`, udev rules, `render` group)
 - RKLLM Runtime: `librkllmrt.so` → `/usr/lib/`, `rkllm` binary → `/usr/local/bin/`
-- Python venv with `flask`, `flask-cors`, `gunicorn`, `gevent`
-- Systemd service `rkllm-api` (auto-starts on boot)
-- NPU/CPU frequency governor fix (persistent across reboots via `/etc/rc.local`)
+- Python venv (`.venv`) with `flask`, `flask-cors`, `gunicorn`, `gevent`
+- Systemd services: `rkllm-api` (API server) + `fix-freq` (NPU/CPU frequency governor)
 
 After setup, download a model and start the service:
 ```bash
