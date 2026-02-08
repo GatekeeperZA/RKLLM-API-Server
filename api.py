@@ -2087,7 +2087,6 @@ def _generate_stream(prompt, request_id, model_name, created,
 
     logger.info(f"[{request_id}] Starting STREAMING generation "
                 f"(rag={is_rag}, keep_history={keep_history}, thinking={enable_thinking})")
-    GENERATION_COMPLETE.clear()
 
     # Clear any stale items from the token queue
     while not _token_queue.empty():
@@ -2096,8 +2095,9 @@ def _generate_stream(prompt, request_id, model_name, created,
         except queue.Empty:
             break
 
-    # First chunk: role
-    yield make_sse_chunk(request_id, model_name, created, delta={"role": "assistant"})
+    # GENERATION_COMPLETE and the first yield are inside try so that an
+    # early client disconnect (GeneratorExit) is caught by the finally
+    # block, which resets GENERATION_COMPLETE and calls end_request().
 
     # Start rkllm_run in a worker thread (it blocks until generation completes)
     def _worker():
@@ -2126,6 +2126,11 @@ def _generate_stream(prompt, request_id, model_name, created,
     think_parser = ThinkTagParser()
 
     try:
+        GENERATION_COMPLETE.clear()
+
+        # First chunk: role
+        yield make_sse_chunk(request_id, model_name, created, delta={"role": "assistant"})
+
         while True:
             # Check abort
             if ABORT_EVENT.is_set():
@@ -2233,18 +2238,23 @@ def _generate_stream(prompt, request_id, model_name, created,
 
         yield "data: [DONE]\n\n"
 
-        # Store in RAG cache if generation was clean
-        if rag_cache_info and generation_clean and total_content:
-            cache_response = total_content
-            if total_reasoning:
-                cache_response = f"<think>{total_reasoning}</think>{total_content}"
-            _model, _question, _prompt = rag_cache_info
-            _rag_cache_put(_model, _question, _prompt, cache_response)
-            logger.info(f"[{request_id}] RAG cache STORE ({len(cache_response)} chars)")
+        # Post-stream bookkeeping — wrapped so a failure here doesn't
+        # cause duplicate SSE termination (Bug 3 from audit round 6).
+        try:
+            # Store in RAG cache if generation was clean
+            if rag_cache_info and generation_clean and total_content:
+                cache_response = total_content
+                if total_reasoning:
+                    cache_response = f"<think>{total_reasoning}</think>{total_content}"
+                _model, _question, _prompt = rag_cache_info
+                _rag_cache_put(_model, _question, _prompt, cache_response)
+                logger.info(f"[{request_id}] RAG cache STORE ({len(cache_response)} chars)")
 
-        # Update KV cache tracking after successful generation
-        if generation_clean and not is_rag and messages:
-            _update_kv_tracking(model_name, messages, is_reset=kv_is_reset)
+            # Update KV cache tracking after successful generation
+            if generation_clean and not is_rag and messages:
+                _update_kv_tracking(model_name, messages, is_reset=kv_is_reset)
+        except Exception as _post_exc:
+            logger.error(f"[{request_id}] Post-stream bookkeeping error: {_post_exc}")
 
     except GeneratorExit:
         logger.warning(f"[{request_id}] Client DISCONNECTED / stopped")
@@ -2410,18 +2420,23 @@ def _generate_complete(prompt, request_id, model_name, created,
             },
         }
 
-        # Store in RAG cache
-        if rag_cache_info and generation_clean and full_content:
-            cache_text = full_content
-            if reasoning_content:
-                cache_text = f"<think>{reasoning_content}</think>{cleaned_content}"
-            _model, _question, _prompt = rag_cache_info
-            _rag_cache_put(_model, _question, _prompt, cache_text)
-            logger.info(f"[{request_id}] RAG cache STORE ({len(cache_text)} chars)")
+        # Post-generation bookkeeping — wrapped so a failure doesn't
+        # discard the already-computed valid response (Bug 1 from audit round 6).
+        try:
+            # Store in RAG cache
+            if rag_cache_info and generation_clean and full_content:
+                cache_text = full_content
+                if reasoning_content:
+                    cache_text = f"<think>{reasoning_content}</think>{cleaned_content}"
+                _model, _question, _prompt = rag_cache_info
+                _rag_cache_put(_model, _question, _prompt, cache_text)
+                logger.info(f"[{request_id}] RAG cache STORE ({len(cache_text)} chars)")
 
-        # Update KV cache tracking after successful generation
-        if generation_clean and not is_rag and messages:
-            _update_kv_tracking(model_name, messages, is_reset=kv_is_reset)
+            # Update KV cache tracking after successful generation
+            if generation_clean and not is_rag and messages:
+                _update_kv_tracking(model_name, messages, is_reset=kv_is_reset)
+        except Exception as _post_exc:
+            logger.error(f"[{request_id}] Post-generation bookkeeping error: {_post_exc}")
 
         if reasoning_content:
             logger.info(f"[{request_id}] Completed ({len(cleaned_content)} content + "
