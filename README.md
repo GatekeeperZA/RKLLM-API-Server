@@ -629,6 +629,16 @@ Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}.
 | **Builtin Tools** | **OFF** ⚠️ | **Required.** Small NPU models (1.5B-4B) cannot do function-calling or tool-use. Leaving this on causes Open WebUI to inject tool-use instructions that confuse the model |
 | File Context | **ON** | Enables document and search result injection into the conversation |
 
+### Interface Settings (Recommended)
+
+**Admin > Settings > Interface > Generation Settings:**
+
+Disable **all** generation parameter controls (Temperature, Top-P, Top-K, etc.) in the chat interface. These sliders add unnecessary overhead — Open WebUI sends them with every request, and the `rkllm` binary manages its own sampling parameters internally. Leaving them enabled provides no benefit and can cause unexpected behaviour.
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| **Show Generation Settings** | **OFF** | The RKLLM runtime handles sampling internally. UI sliders are ignored by the API but add request overhead |
+
 ---
 
 ## SearXNG Configuration
