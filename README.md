@@ -83,30 +83,16 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 
 ```mermaid
 graph LR
-    subgraph Frontend
-        OW["🌐 Open WebUI"]
-        OL["🦙 Ollama<br/>(CPU Models)"]
-    end
-
-    subgraph srv ["RKLLM API Server — Flask"]
-        API["📡 API Endpoint<br/>/v1/chat/completions"]
-        BP["🔧 Prompt Builder<br/>RAG · Web Cleaning<br/>Score Selection"]
-        PM["🔍 Process Monitor<br/>Health · Recovery<br/>Idle Unload"]
-        RC["💾 RAG Cache<br/>LRU · TTL"]
-        TP["🧠 Think Parser<br/>‹think› Tags<br/>State Machine"]
-    end
-
-    subgraph bin ["Native Binary"]
-        RKLLM["⚡ rkllm  C++<br/>Chat Template<br/>Token Sampling"]
-    end
-
-    subgraph hw ["Hardware"]
-        NPU["🔲 RK3588 NPU<br/>6 TOPS × 3 cores"]
-    end
-
-    subgraph search ["Search"]
-        SX["🔎 SearXNG"]
-    end
+    OW["🌐 Open WebUI"]
+    OL["🦙 Ollama<br/>(CPU Models)"]
+    API["📡 API Endpoint<br/>/v1/chat/completions"]
+    BP["🔧 Prompt Builder<br/>RAG · Web Cleaning<br/>Score Selection"]
+    PM["🔍 Process Monitor<br/>Health · Recovery<br/>Idle Unload"]
+    RC["💾 RAG Cache<br/>LRU · TTL"]
+    TP["🧠 Think Parser<br/>‹think› Tags<br/>State Machine"]
+    RKLLM["⚡ rkllm  C++<br/>Chat Template<br/>Token Sampling"]
+    NPU["🔲 RK3588 NPU<br/>6 TOPS × 3 cores"]
+    SX["🔎 SearXNG"]
 
     OW -- "OpenAI API<br/>HTTP / SSE" --> API
     OW -. "Ollama API<br/>HTTP" .-> OL
