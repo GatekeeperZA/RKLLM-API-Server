@@ -2,7 +2,7 @@
 
 **OpenAI-compatible API server for Rockchip NPU (RK3588/RK3576) running RKLLM models, designed as a drop-in backend for [Open WebUI](https://github.com/open-webui/open-webui).**
 
-Built for single-board computers like the **Orange Pi 5 Plus**, this server bridges the gap between the `librkllmrt.so` C runtime and any OpenAI-compatible frontend — enabling local, private LLM inference on ARM hardware with zero cloud dependency.
+Built for single-board computers like the **Orange Pi 5 Plus**, this server bridges the gap between the `rkllm` C++ runtime and any OpenAI-compatible frontend — enabling local, private LLM inference on ARM hardware with zero cloud dependency.
 
 ---
 
@@ -12,6 +12,8 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Installation](#installation)
+  - [RKNPU Driver 0.9.8](#2-rknpu-driver-098)
+  - [RKLLM Runtime v1.2.3](#3-rkllm-runtime-v123)
 - [Pre-Built Models](#pre-built-models)
 - [Model Setup](#model-setup)
 - [Running the Server](#running-the-server)
@@ -19,18 +21,13 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Open WebUI Configuration](#open-webui-configuration)
 - [SearXNG Configuration](#searxng-configuration)
 - [RAG Pipeline](#rag-pipeline)
+  - [Multi-Turn Conversation History](#multi-turn-conversation-history)
 - [Reasoning Models](#reasoning-models)
-- [KV Cache Strategy](#kv-cache-strategy)
 - [Configuration Reference](#configuration-reference)
 - [Logging](#logging)
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
-- [File Structure](#file-structure)
-- [V1 (Subprocess) vs V2 (ctypes) — Why We Migrated](#v1-subprocess-vs-v2-ctypes--why-we-migrated)
-- [Tested Hardware](#tested-hardware)
-- [Tested Models](#tested-models)
 - [License](#license)
-- [Acknowledgements](#acknowledgements)
 
 ---
 
@@ -38,24 +35,25 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 
 ### Core
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/models` endpoints work with any OpenAI client
-- **Direct NPU access** via ctypes binding to `librkllmrt.so` (no subprocess overhead)
-- **KV cache incremental mode** — follow-up turns only prefill the new message (~50ms vs ~500ms)
 - **Streaming & non-streaming** responses with proper SSE (Server-Sent Events) format
 - **Auto-detection** of all `.rkllm` models in `~/models` directory
 - **Context length auto-detection** from filename patterns (2k/4k/8k/16k/32k)
-- **Auto-generated aliases** — short names like `qwen`, `phi` resolve automatically
-- **Multi-turn conversation history** — full chat context preserved via KV cache across turns
+- **Auto-generated aliases** — short names like `qwen`, `deepseek` resolve automatically
+- **Multi-turn conversation history** — full chat context (user + assistant turns) sent to the model for coherent follow-ups
+- **Process reuse** for fast follow-up requests (no reload between turns)
 - **Model hot-switching** — request a different model and it loads automatically
 - **On-demand loading** via `/v1/models/select` for warm-up
 - **Explicit unloading** via `/v1/models/unload` to free NPU memory
 
 ### Robustness
 - **Request tracking** with automatic stale-request cleanup (prevents deadlocks)
-- **Idle auto-unload** — frees NPU memory after configurable idle period (default 5 min)
-- **Clean abort** — native `rkllm_abort()` for instant cancellation (no SIGKILL needed)
-- **Graceful shutdown** on SIGTERM/SIGINT with model cleanup
-- **RLock-based locking** — prevents model switch deadlock scenarios
-- **Error callback state** — detects C library errors and surfaces them as proper HTTP responses
+- **Process health monitoring** with auto-recovery (background thread)
+- **Idle auto-unload** — frees NPU memory after configurable idle period
+- **Graceful shutdown** on SIGTERM/SIGINT with process cleanup
+- **Bleed-through prevention** — process killed on interrupted generation to prevent leftover output contaminating the next response
+- **RLock-based locking** — fixes model switch deadlock scenarios
+- **SIGKILL for reliability** — aggressive unloading ensures NPU is fully released
+- **Residual data guard** — discards output arriving faster than NPU prefill time
 
 ### RAG (Retrieval-Augmented Generation)
 - **Automatic RAG detection** when Open WebUI injects web search results
@@ -85,47 +83,50 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 
 ## Architecture
 
-```
-┌──────────────┐     HTTP/SSE      ┌──────────────────────────────┐
-│  Open WebUI  │ ◄──────────────── │   api.py (Flask)             │
-│  or any      │ ─────────────────►│   gunicorn gthread           │
-│  OpenAI      │                   │                              │
-│  client      │                   │  ┌────────────────────────┐  │
-└──────────────┘                   │  │  Prompt Builder        │  │
-                                   │  │  RAG Detection/Clean   │  │
-        ┌──────────┐               │  └──────────┬─────────────┘  │
-        │ SearXNG  │ ◄──── Open    │             │                │
-        │ (search) │  WebUI injects│  ┌──────────▼─────────────┐  │
-        └──────────┘  results      │  │  KV Cache Tracker      │  │
-                                   │  │  (incremental / reset) │  │
-        ┌──────────┐               │  └──────────┬─────────────┘  │
-        │  Ollama  │               │             │ ctypes          │
-        │  (CPU)   │               │  ┌──────────▼─────────────┐  │
-        └──────────┘               │  │  librkllmrt.so v1.2.3  │  │
-         optional                  │  │  C callback → Queue    │  │
-                                   │  └──────────┬─────────────┘  │
-                                   │             │                │
-                                   │  ┌──────────▼─────────────┐  │
-                                   │  │  RK3588 NPU (3 cores)  │  │
-                                   │  │  6 TOPS per core       │  │
-                                   │  └────────────────────────┘  │
-                                   │                              │
-                                   │  ┌────────────────────────┐  │
-                                   │  │  ThinkTagParser        │  │
-                                   │  │  (reasoning_content)   │  │
-                                   │  └────────────────────────┘  │
-                                   └──────────────────────────────┘
+```mermaid
+graph TD
+    OW["🌐 Open WebUI"]
+
+    OW -- "OpenAI API<br/>HTTP / SSE" --> API
+    OW -. "Ollama API" .-> OL["🦙 Ollama · CPU Models"]
+    OW <-- "Search Results" --> SX["🔎 SearXNG"]
+
+    subgraph server [" RKLLM API Server · Flask "]
+        API["📡 /v1/chat/completions"]
+        BP["🔧 Prompt Builder<br/>RAG Detection · Web Cleaning · Score Selection"]
+        RC["💾 RAG Cache · LRU"]
+        TP["🧠 Think Tag Parser"]
+        PM["🔍 Process Monitor"]
+        API --> BP --> RC
+    end
+
+    API -- "stdin · plain text" --> RKLLM
+    RKLLM -- "stdout · tokens" --> TP
+    TP -- "SSE stream" --> OW
+    PM -. "health check<br/>kill / restart" .-> RKLLM
+
+    RKLLM["⚡ rkllm · C++ Binary<br/>Chat Template · Sampling"] --> NPU["🔲 RK3588 NPU<br/>6 TOPS × 3 cores"]
+
+    style OW fill:#4a9eff,stroke:#2d7cd4,color:#fff
+    style OL fill:#f5f5f5,stroke:#999,color:#333
+    style API fill:#2ecc71,stroke:#27ae60,color:#fff
+    style BP fill:#3498db,stroke:#2980b9,color:#fff
+    style RC fill:#9b59b6,stroke:#8e44ad,color:#fff
+    style TP fill:#1abc9c,stroke:#16a085,color:#fff
+    style PM fill:#e67e22,stroke:#d35400,color:#fff
+    style RKLLM fill:#e74c3c,stroke:#c0392b,color:#fff
+    style NPU fill:#2c3e50,stroke:#1a252f,color:#fff
+    style SX fill:#f39c12,stroke:#e67e22,color:#fff
+    style server fill:none,stroke:#555,stroke-width:2px,stroke-dasharray:5 5
 ```
 
 **Key design decisions:**
 
-1. **Plain text only** — The rkllm runtime applies chat templates internally using actual token IDs. Special tokens (`<|im_start|>`, `<start_of_turn>`, etc.) are stripped from the text vocabulary during model conversion. Sending them as literal text causes the model to see garbage.
+1. **Plain text only** — The `rkllm` binary applies chat templates internally using actual token IDs. Special tokens (`<|im_start|>`, `<start_of_turn>`, etc.) are stripped from the text vocabulary during model conversion. Sending them as literal text causes the model to see garbage.
 
-2. **Single worker** — The NPU can only load one model at a time. The server enforces `-w 1` (one gunicorn worker) and rejects concurrent generation with HTTP 503.
+2. **Single worker** — The NPU can only load one model at a time. The server enforces `-w 1` (one gunicorn worker) and rejects concurrent requests with HTTP 503.
 
-3. **ctypes + callback** — The C library's `rkllm_run()` is blocking, so it runs in a worker thread. A C callback pushes tokens to a `queue.Queue`, which the main thread reads and yields as SSE chunks. This keeps the KV cache in-process across turns.
-
-4. **gthread, not gevent** — `rkllm_run()` is a blocking C function that freezes gevent's event loop. Using `-k gthread` with real OS threads avoids this.
+3. **Kill on interrupt** — The `rkllm` binary uses synchronous `rkllm_run()` which cannot be cancelled. On client disconnect or timeout, the process is killed and restarted to prevent output contamination.
 
 ---
 
@@ -141,34 +142,36 @@ This project was developed and tested on:
 | **SoC** | Rockchip RK3588 (3 NPU cores) |
 | **OS** | [Armbian Pelochus 24.11.0](https://github.com/Pelochus/armbian-build-rknpu-updates/releases) — `Armbian-Pelochus_24.11.0-OrangePi5-plus_jammy_vendor.7z` |
 | **Kernel NPU Driver** | 0.9.8 (**included in the Pelochus image** — no driver build required) |
-| **RKLLM Runtime** | v1.2.3 (only the runtime library needs to be installed) |
+| **RKLLM Runtime** | v1.2.3 (only the runtime library + binary need to be installed) |
 
 > **Why Pelochus Armbian?** The standard Armbian images ship with an older RKNPU driver (0.9.6 or earlier). The [Pelochus builds](https://github.com/Pelochus/armbian-build-rknpu-updates/releases) bundle **RKNPU driver 0.9.8** in the kernel, so you only need to install the RKLLM runtime — no kernel module compilation required.
 
 ### Hardware
 - **Rockchip RK3588 or RK3576** SBC (Orange Pi 5 Plus, Rock 5B, etc.)
 - **NPU driver** installed and functional
-- Minimum **8 GB RAM** recommended (16 GB for larger models)
+- Minimum **8GB RAM** recommended (16GB for larger models)
 
 ### Software
 - **Linux** (ARM64) — tested on Ubuntu/Debian (Armbian)
 - **Python 3.8+**
-- **RKNPU driver ≥ 0.9.6** (0.9.8 recommended — see [Installation](#installation))
-- **RKLLM Runtime v1.2.3** — `librkllmrt.so` shared library (see [Installation](#installation))
+- **RKNPU driver ≥ 0.9.6** (0.9.8 recommended — see [Driver Setup](#rknpu-driver-098) below)
+- **RKLLM Runtime v1.2.3** — the C++ inference runtime (see [Runtime Setup](#rkllm-runtime-v123) below)
 - **RKLLM models** (`.rkllm` format) placed in `~/models/`
 
 ### Python Dependencies
 ```bash
-pip install flask flask-cors gunicorn
+pip install flask flask-cors gunicorn gevent
 ```
 
 ---
 
 ## Installation
 
-### Automated Setup (Recommended)
+### Automated Setup (Experimental)
 
-A zero-configuration setup script is included that handles **everything** — system packages, Python venv, RKLLM runtime installation, kernel module/driver verification, udev rules, systemd service, and NPU frequency fix:
+> **⚠️ Note:** This script has not been fully tested on a clean system yet. It is provided as a convenience and should work on Armbian/Ubuntu aarch64 systems, but please review the output carefully and report any issues.
+
+A zero-configuration setup script is included that handles **everything** — system packages, Python venv, RKLLM runtime compilation, kernel module/driver verification, udev rules, systemd service, and NPU frequency fix:
 
 ```bash
 git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
@@ -184,14 +187,14 @@ The script is **idempotent** — safe to run multiple times. It detects what's a
 **What it installs / verifies:**
 - System packages: `python3`, `python3-venv`, `python3-pip`, `build-essential`, `git`, `git-lfs`
 - RKNPU kernel module check (`lsmod`, `modinfo`, `/dev/rknpu`, udev rules, `render` group)
-- RKLLM Runtime: `librkllmrt.so` → `/usr/lib/`
-- Python venv (`.venv`) with `flask`, `flask-cors`, `gunicorn`
+- RKLLM Runtime: `librkllmrt.so` → `/usr/lib/`, `rkllm` binary → `/usr/local/bin/`
+- Python venv (`.venv`) with `flask`, `flask-cors`, `gunicorn`, `gevent`
 - Systemd services: `rkllm-api` (API server) + `fix-freq` (NPU/CPU frequency governor)
 
 After setup, download a model and start the service:
 ```bash
 # Download Qwen3-1.7B (recommended)
-mkdir -p ~/models/Qwen3-1.7B && cd ~/models/Qwen3-1.7B
+mkdir -p ~/models/Qwen3-1.7B-4K && cd ~/models/Qwen3-1.7B-4K
 git lfs install && git clone https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3 .
 
 # Start the server
@@ -216,7 +219,7 @@ git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
 cd RKLLM-API-Server
 
 # Install Python dependencies
-pip install flask flask-cors gunicorn
+pip install flask flask-cors gunicorn gevent
 
 # Create models directory
 mkdir -p ~/models
@@ -268,11 +271,15 @@ dmesg | tail -5 | grep -i rknpu
 
 > **Note:** Many Armbian and Orange Pi images already include RKNPU driver 0.9.8. Check before building. If `dmesg | grep rknpu` shows `0.9.8`, you're good.
 
-> **Recommended:** The [Pelochus Armbian builds](https://github.com/Pelochus/armbian-build-rknpu-updates/releases) ship with RKNPU driver 0.9.8 pre-installed — no manual driver compilation needed. Use `Armbian-Pelochus_24.11.0-OrangePi5-plus_jammy_vendor.7z` (or the latest release for your board) and skip straight to the runtime setup.
+> **Recommended:** The [Pelochus Armbian builds](https://github.com/Pelochus/armbian-build-rknpu-updates/releases) ship with RKNPU driver 0.9.8 pre-installed — no manual driver compilation needed. Use `Armbian-Pelochus_24.11.0-OrangePi5-plus_jammy_vendor.7z` (or the latest release for your board) and skip straight to the [Runtime Setup](#3-rkllm-runtime-v123).
+
+> **Alternative:** Some distributions update the driver via a board-specific kernel update: `sudo apt upgrade` may pull in a newer kernel with the driver included.
 
 #### 3. RKLLM Runtime v1.2.3
 
-The RKLLM runtime provides the `librkllmrt.so` shared library that this API server loads via ctypes.
+The RKLLM runtime provides the `librkllmrt.so` shared library and the demo binary that this API server uses. You need to:
+1. Install the shared library so the `rkllm` binary can find it
+2. Compile the `llm_demo` binary (the `rkllm` binary this server calls)
 
 ```bash
 # Clone the rknn-llm repo (if not already done)
@@ -288,6 +295,24 @@ ldconfig -p | grep rkllm
 # Should show: librkllmrt.so => /usr/lib/librkllmrt.so
 ```
 
+**Compile the `llm_demo` binary natively on your board (aarch64):**
+
+```bash
+cd examples/rkllm_api_demo/deploy
+
+# Compile (natively on the RK3588 board)
+g++ -O2 -o rkllm src/llm_demo.cpp \
+    -I../../../rkllm-runtime/Linux/librkllm_api/include \
+    -L../../../rkllm-runtime/Linux/librkllm_api/aarch64 \
+    -lrkllmrt -lpthread
+
+# Install to PATH
+sudo cp rkllm /usr/local/bin/
+rkllm --help  # or run with a model to test
+```
+
+> **For thinking models (Qwen3, DeepSeek-R1):** You must edit `src/llm_demo.cpp` to enable thinking mode before compiling. Add `rkllm_input.enable_thinking = true;` — see the [Qwen3 model card](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) for the exact code change.
+
 **Verify everything works:**
 ```bash
 # Check RKNPU driver
@@ -295,6 +320,11 @@ dmesg | grep -i rknpu
 
 # Check runtime library
 ldconfig -p | grep rkllm
+
+# Check binary
+which rkllm
+rkllm ~/models/Qwen3-1.7B-4K/Qwen3-1.7B-w8a8-rk3588.rkllm 2048 4096
+# Should print "rkllm init success" then wait for input
 ```
 
 #### 4. Fix NPU Frequency (Recommended)
@@ -311,7 +341,16 @@ sudo bash fix_freq_rk3588.sh
 sudo bash fix_freq_rk3576.sh
 ```
 
-> Run this after each reboot, or use the setup script which creates a systemd service for automatic frequency pinning.
+> Run this after each reboot, or add it to `/etc/rc.local` for persistence.
+
+#### 5. Enable Performance Logging (Optional)
+
+To see token speed and generation stats in the output:
+```bash
+export RKLLM_LOG_LEVEL=1
+```
+
+This API server sets `RKLLM_LOG_LEVEL=1` automatically for the subprocess (parses `[Token/s]`, `[Tokens]`, `[Seconds]` from the output).
 
 </details>
 
@@ -332,7 +371,7 @@ All models are converted with **RKLLM Toolkit v1.2.3**, targeting **RK3588 (3 NP
 
 > **⚠️ DeepSeek-R1 on NPU — Currently Not Usable**
 >
-> DeepSeek-R1 (including distilled variants like DeepSeek-R1-Distill-Qwen-1.5B) **does not work correctly** with RKLLM Runtime v1.2.3. The model converts without errors but produces garbage output — repeating `[PAD151935]` tokens instead of real text ([rknn-llm#424](https://github.com/airockchip/rknn-llm/issues/424)). The Airockchip team has acknowledged this is a known issue and stated it will be fixed in a future runtime version.
+> DeepSeek-R1 (including distilled variants like DeepSeek-R1-Distill-Qwen-1.5B) **does not work correctly** with RKLLM Runtime v1.2.3. The model converts without errors but produces garbage output — repeating `[PAD151935]` tokens instead of real text ([rknn-llm#424](https://github.com/airockchip/rknn-llm/issues/424)). The model is also sensitive to quantization, and multi-turn conversations fail silently ([rknn-llm#277](https://github.com/airockchip/rknn-llm/issues/277)). The Airockchip team has acknowledged this is a known issue and stated it will be fixed in a future runtime version.
 >
 > **For NPU reasoning, use Qwen3-1.7B instead** — it supports `<think>` tags, runs at ~13.6 tok/s on the NPU, and works reliably with RKLLM v1.2.3.
 >
@@ -346,9 +385,10 @@ sudo apt install git-lfs
 git lfs install
 
 # Qwen3-1.7B (thinking/reasoning model — recommended)
-mkdir -p ~/models/Qwen3-1.7B
-cd ~/models/Qwen3-1.7B
+mkdir -p ~/models/Qwen3-1.7B-4K
+cd ~/models/Qwen3-1.7B-4K
 git clone https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3 .
+# or download just the .rkllm file from the HuggingFace web UI
 
 # Phi-3-mini (3.8B — strong at math/code, MIT licensed)
 mkdir -p ~/models/Phi-3-mini-4k-instruct
@@ -358,9 +398,11 @@ git clone https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8 .
 
 ### Model Notes
 
-**Qwen3-1.7B** — Hybrid thinking model. Produces `<think>...</think>` reasoning blocks that this API server parses into `reasoning_content` for Open WebUI's collapsible thinking display. Supports English and Chinese.
+**Qwen3-1.7B** — Hybrid thinking model. Produces `<think>...</think>` reasoning blocks that this API server parses into `reasoning_content` for Open WebUI's collapsible thinking display. Requires RKLLM Runtime ≥ v1.2.1 (v1.2.3 recommended) and `enable_thinking = true` in the C++ binary. Supports English and Chinese.
 
 **Phi-3-mini-4k-instruct** — Microsoft's 3.8B parameter model excelling at reasoning, math (85.7% GSM8K), and code generation (57.3% HumanEval). English-primary. No thinking mode — this is a standard instruct model. MIT licensed.
+
+> **Thinking mode requirement:** The compiled `rkllm` binary must have `enable_thinking = true` set in the source code for Qwen3 thinking to work. See the [Qwen3 model card](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) for compilation instructions.
 
 ---
 
@@ -370,14 +412,12 @@ Place each `.rkllm` model in its own subfolder under `~/models/`:
 
 ```
 ~/models/
-├── Qwen3-1.7B/
+├── Qwen3-1.7B-4K/
 │   └── Qwen3-1.7B-w8a8-rk3588.rkllm
-├── Qwen3-4B-Instruct-2507/
-│   └── Qwen3-4B-Instruct-16k-w8a8-rk3588.rkllm
-├── Gemma-3-4B-IT/
-│   └── Gemma-3-4B-IT-w8a8-rk3588.rkllm
-└── Phi-3-Mini-4K-Instruct/
-    └── Phi-3-Mini-4K-Instruct-w8a8-rk3588.rkllm
+├── Phi-3-mini-4k-instruct/
+│   └── Phi-3-mini-4k-instruct-w8a8.rkllm
+└── DeepSeek-R1-Distill-Qwen-1.5B-4K/
+    └── DeepSeek-R1-Distill-Qwen-1.5B-4K.rkllm
 ```
 
 ### Context Length Detection
@@ -399,10 +439,9 @@ Model folder names are converted to IDs (lowercase, hyphens). Aliases are auto-g
 
 | Model ID | Auto-Aliases |
 |----------|-------------|
-| `qwen3-1.7b` | `qwen`, `qwen3` |
-| `qwen3-4b-instruct-2507` | `qwen3-4b`, `qwen3-4b-instruct` |
-| `gemma-3-4b-it` | `gemma`, `gemma-3`, `gemma-3-4b` |
-| `phi-3-mini-4k-instruct` | `phi`, `phi-3`, `phi-3-mini` |
+| `qwen3-1.7b-4k` | `qwen`, `qwen3` |
+| `phi-3-mini-4k-instruct` | `phi`, `phi-3` |
+| `deepseek-r1-distill-qwen-1.5b-4k` | `deepseek`, `deepseek-r1` |
 
 Aliases are only created when unambiguous (one model claims the alias). If two models share a prefix, that alias is skipped.
 
@@ -410,15 +449,13 @@ Aliases are only created when unambiguous (one model claims the alias). If two m
 
 ## Running the Server
 
-### Production (Recommended)
+### Production (recommended)
 
 ```bash
-gunicorn -w 1 -k gthread --threads 4 --timeout 300 -b 0.0.0.0:8000 api:app
+gunicorn -w 1 -k gevent --timeout 300 -b 0.0.0.0:8000 api:app
 ```
 
 > **Critical:** Always use `-w 1` (single worker). The NPU can only load one model at a time.
->
-> **Critical:** Always use `-k gthread`, NOT `-k gevent`. `rkllm_run()` is a blocking C call that freezes gevent's event loop.
 
 ### Development
 
@@ -430,8 +467,6 @@ This starts Flask's built-in server on `0.0.0.0:8000` with threading enabled.
 
 ### Systemd Service
 
-The setup script creates this automatically. Manual setup:
-
 ```ini
 [Unit]
 Description=RKLLM API Server
@@ -441,27 +476,13 @@ After=network.target
 Type=simple
 User=your-user
 WorkingDirectory=/path/to/RKLLM-API-Server
-ExecStart=/path/to/.venv/bin/gunicorn -w 1 -k gthread --threads 4 --timeout 300 -b 0.0.0.0:8000 api:app
+ExecStart=/usr/bin/gunicorn -w 1 -k gevent --timeout 300 -b 0.0.0.0:8000 api:app
 Restart=always
 RestartSec=5
 Environment=RKLLM_API_LOG_LEVEL=INFO
 
 [Install]
 WantedBy=multi-user.target
-```
-
-```bash
-# Start/stop/restart
-sudo systemctl start rkllm-api
-sudo systemctl stop rkllm-api
-sudo systemctl restart rkllm-api
-
-# View logs
-sudo journalctl -u rkllm-api -f
-
-# Enable/disable auto-start on boot
-sudo systemctl enable rkllm-api
-sudo systemctl disable rkllm-api
 ```
 
 ---
@@ -481,7 +502,7 @@ curl http://localhost:8000/v1/models
   "object": "list",
   "data": [
     {
-      "id": "qwen3-1.7b",
+      "id": "qwen2.5-1.5b-instruct-4k",
       "object": "model",
       "created": 1738972800,
       "owned_by": "rkllm"
@@ -499,7 +520,7 @@ OpenAI-compatible chat completions (streaming and non-streaming).
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen3-1.7b",
+    "model": "qwen",
     "messages": [{"role": "user", "content": "What is the capital of France?"}]
   }'
 
@@ -507,14 +528,13 @@ curl http://localhost:8000/v1/chat/completions \
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen3-1.7b",
+    "model": "qwen",
     "stream": true,
     "messages": [{"role": "user", "content": "What is the capital of France?"}]
   }'
 ```
 
 **Supported parameters:**
-
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `model` | string | *required* | Model ID or alias |
@@ -534,7 +554,7 @@ Pre-load a model without generating (warm-up).
 ```bash
 curl -X POST http://localhost:8000/v1/models/select \
   -H "Content-Type: application/json" \
-  -d '{"model": "qwen3-1.7b"}'
+  -d '{"model": "qwen"}'
 ```
 
 ### `POST /v1/models/unload`
@@ -556,8 +576,8 @@ curl http://localhost:8000/health
 ```json
 {
   "status": "ok",
-  "current_model": "qwen3-1.7b",
-  "model_loaded": true,
+  "current_model": "qwen2.5-1.5b-instruct-4k",
+  "process_healthy": true,
   "active_request": null,
   "models_available": 3
 }
@@ -613,7 +633,7 @@ ollama pull gemma2:2b
 ollama pull phi3:3.8b
 ```
 
-> **CPU models (Ollama) do NOT need the NPU-specific settings below.** The system prompt, disabled "Builtin Tools", and other restrictions apply only to small NPU models served by this RKLLM API.
+> **CPU models (Ollama) do NOT need the NPU-specific settings.** The system prompt, disabled "Builtin Tools", and other restrictions documented below apply only to small NPU models served by this RKLLM API. Ollama models are larger, handle function-calling natively, and manage their own system prompts — leave their Open WebUI per-model settings at defaults.
 
 ### System Prompt (Required for All NPU Models)
 
@@ -623,9 +643,9 @@ ollama pull phi3:3.8b
 Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}.
 ```
 
-> **Why this is required:** NPU models have no built-in awareness of the current date or time. Without this, any question like "what day is it?" gets a hallucinated answer. Open WebUI replaces the `{{...}}` variables with live values before sending the request.
+> **Why this is required:** NPU models have no built-in awareness of the current date or time. Without this, any question like "what day is it?", "what happened today?", or "what's the weather now?" gets a hallucinated answer. Open WebUI replaces the `{{...}}` variables with live values before sending the request. The API server detects this date-only prompt and intelligently includes/omits it based on whether the user's question is date-related (prevents the model from fixating on the date for unrelated questions).
 
-> **Do NOT add generic instructions** like "You are a helpful assistant" — these get sent as part of the user prompt and cause the model to respond with a greeting instead of answering the question.
+> **Do NOT add generic instructions** like "You are a helpful assistant" — these get sent to the rkllm binary as part of the user prompt and cause the model to respond with a greeting instead of answering the question. The API server automatically strips these if detected, but it's better to not include them at all.
 
 ### Web Search (Required for RAG/SearXNG)
 
@@ -636,8 +656,8 @@ Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}.
 | Search Engine | `searxng` | Self-hosted, JSON API |
 | SearXNG Query URL | `http://searxng:8080/search` | Docker service name |
 | Web Search Result Count | `3` (4k models) / `5` (16k models) | Balances coverage vs. context |
-| **Bypass Web Loader** | **ON** ⚠️ | **Required.** Snippets are cleaner than raw page scraping for small models |
-| **Bypass Embedding and Retrieval** | **ON** ⚠️ | **Required.** No embedding model available on ARM/NPU. Sends docs directly to the model |
+| **Bypass Web Loader** | **ON** ⚠️ | **Required.** Snippets are cleaner than raw page scraping for small models. SafeWebBaseLoader returns raw `get_text()` with all navigation/footer boilerplate |
+| **Bypass Embedding and Retrieval** | **ON** ⚠️ | **Required.** No embedding model available on ARM/NPU. Skips ChromaDB vector search and sends docs directly to the model |
 
 ### Documents / RAG Template (Required for SearXNG)
 
@@ -645,9 +665,9 @@ Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}.
 
 | Setting | Value | Reason |
 |---------|-------|--------|
-| **RAG Template** | `{{CONTEXT}}` | **Required.** Just the variable, nothing else. The default template wastes 300+ tokens of meta-instructions |
+| **RAG Template** | `{{CONTEXT}}` | **Required.** Just the variable, nothing else. The default template is 300+ tokens of meta-instructions that waste context and encourage the model to use "own knowledge" instead of the search results |
 
-> **Important:** The RAG Template must be exactly `{{CONTEXT}}` — no extra text. The API server builds its own optimized reading-comprehension prompt format internally.
+> **Important:** The RAG Template must be exactly `{{CONTEXT}}` — no extra text, no instructions. The API server builds its own optimized reading-comprehension prompt format internally. Any additional template text gets prepended to the search results and wastes tokens.
 
 ### Per-Model Capabilities (Required)
 
@@ -655,16 +675,18 @@ Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}.
 
 | Setting | Value | Reason |
 |---------|-------|--------|
-| **Builtin Tools** | **OFF** ⚠️ | **Required.** Small NPU models (1.5B-4B) cannot do function-calling. Leaving this on injects tool-use instructions that confuse the model |
-| File Context | **ON** | Enables document and search result injection |
+| **Builtin Tools** | **OFF** ⚠️ | **Required.** Small NPU models (1.5B-4B) cannot do function-calling or tool-use. Leaving this on causes Open WebUI to inject tool-use instructions that confuse the model |
+| File Context | **ON** | Enables document and search result injection into the conversation |
 
 ### Interface Settings (Recommended)
 
 **Admin > Settings > Interface > Generation Settings:**
 
+Disable **all** generation parameter controls (Temperature, Top-P, Top-K, etc.) in the chat interface. These sliders add unnecessary overhead — Open WebUI sends them with every request, and the `rkllm` binary manages its own sampling parameters internally. Leaving them enabled provides no benefit and can cause unexpected behaviour.
+
 | Setting | Value | Reason |
 |---------|-------|--------|
-| **Show Generation Settings** | **OFF** | The RKLLM runtime handles sampling internally. UI sliders are ignored by the API |
+| **Show Generation Settings** | **OFF** | The RKLLM runtime handles sampling internally. UI sliders are ignored by the API but add request overhead |
 
 ---
 
@@ -747,7 +769,14 @@ Assistant: The capital of France is Paris.
 User: What is its population?
 ```
 
-The model sees all previous turns and can answer follow-up questions in context (e.g., "its" refers to Paris). With KV cache incremental mode, only the new user message is prefilled — prior turns are already in the NPU's KV cache.
+The model sees all previous turns and can answer follow-up questions in context (e.g. "its" refers to Paris). This works because:
+
+- **Open WebUI** sends the full `messages[]` array with every request (no server-side session state needed)
+- **Normal mode** labels each turn with `User:` / `Assistant:` prefixes for multi-turn conversations
+- **RAG mode** uses only the last user question (the reference data replaces conversation history to maximize context for search results)
+- **Single-turn** conversations omit the role labels for a cleaner prompt
+
+> **Note:** The rkllm binary has no KV cache persistence between requests — each prompt is processed from scratch. Long conversations increase prefill time proportionally (visible in the `Prefill` stats in the logs).
 
 ### Response Cache
 
@@ -768,31 +797,9 @@ The server:
 - Parses these tags from the token stream using a state machine (handles tags split across chunks)
 - Sends `reasoning_content` in streaming deltas (Open WebUI displays these as collapsible thinking blocks)
 - Returns `reasoning_content` in non-streaming responses
-- **Context-dependent thinking for RAG**: On small context models (< 8k), thinking is disabled via `enable_thinking = false` to save tokens for the actual answer
+- **Context-dependent thinking for RAG**: On small context models (< 8k), thinking is disabled via `/no_think` to save tokens for the actual answer
 
 > **Note:** DeepSeek-R1 is currently **not usable on the NPU** with RKLLM Runtime v1.2.3 (produces `[PAD]` garbage tokens). Use **Qwen3-1.7B** for NPU reasoning, or run `deepseek-r1:7b` via Ollama on CPU. See the [Pre-Built Models](#pre-built-models) section for details.
-
----
-
-## KV Cache Strategy
-
-The NPU runtime maintains an internal KV cache. With `keep_history=1`, prior conversation turns are preserved, so follow-up messages only need to prefill the new tokens:
-
-| Scenario | Strategy | Prefill Time | What's Sent |
-|----------|----------|-------------|-------------|
-| New conversation | `clear_kv_cache()` + `keep_history=1` | ~90ms (full) | Full prompt |
-| Follow-up turn | `keep_history=1` | ~50ms (incremental) | Only new user message |
-| RAG query | `keep_history=0` | ~90ms (full) | RAG context + question |
-| Model switch | New model loaded | ~90ms (full) | Full prompt |
-
-### How It Works
-
-1. **First turn** — The server calls `rkllm_clear_kv_cache()` then sends the full prompt with `keep_history=1`. After generation, the KV cache contains the full conversation.
-2. **Follow-up turns** — The server computes the hash of the conversation prefix. If it matches the previous turn's hash (same conversation, same model), only the new user message is sent with `keep_history=1`. The NPU appends to the existing KV cache.
-3. **New conversation** — Hash mismatch triggers `rkllm_clear_kv_cache()` + full prompt resend.
-4. **RAG queries** — Always use `keep_history=0` (standalone, no history needed).
-
-This makes multi-turn conversations significantly faster — Turn 2+ take ~50ms to prefill regardless of total conversation length.
 
 ---
 
@@ -808,6 +815,7 @@ All configuration is at the top of `api.py`:
 | `GENERATION_TIMEOUT` | 600s | Max total generation time |
 | `FIRST_TOKEN_TIMEOUT` | 120s | Max wait for first token (includes prefill) |
 | `FALLBACK_SILENCE` | 12s | Max silence between tokens after first |
+| `MINIMUM_PREFILL_TIME` | 0.3s | Discard data arriving faster than this (residual guard) |
 
 ### Defaults
 
@@ -815,6 +823,15 @@ All configuration is at the top of `api.py`:
 |----------|---------|-------------|
 | `MAX_TOKENS_DEFAULT` | 2048 | Default max completion tokens |
 | `CONTEXT_LENGTH_DEFAULT` | 4096 | Fallback when not detected from filename |
+
+### I/O Buffers
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `READ_BUFFER_SIZE` | 4096 | `os.read()` buffer for stdout during generation |
+| `DRAIN_BUFFER_SIZE` | 8192 | `os.read()` buffer for `drain_stdout` |
+| `SELECT_TIMEOUT` | 0.5s | `select()` poll interval in generation loops |
+| `DRAIN_TIMEOUT` | 1.0s | Max silence before `drain_stdout` returns (two-phase: 0.3s initial, escalates to 1.0s when data found) |
 
 ### RAG Controls
 
@@ -833,15 +850,22 @@ All configuration is at the top of `api.py`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REQUEST_STALE_TIMEOUT` | 30s | Auto-clear tracked request after this idle time |
-| `MONITOR_INTERVAL` | 10s | Health check / idle monitoring frequency |
+| `MONITOR_INTERVAL` | 10s | Health check frequency |
 | `IDLE_UNLOAD_TIMEOUT` | 300s | Auto-unload model after idle (0 to disable) |
+
+### Protocol
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `USE_MULTILINE_PROTOCOL` | `False` | Send `\n__END__\n` delimited prompts (requires recompiled binary) |
 
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `RKLLM_LIB_PATH` | Path to `librkllmrt.so` (auto-detected from `/usr/lib/` by default) |
+| `RKLLM_BINARY` | Path to rkllm binary (default: `rkllm` from `$PATH`) |
 | `RKLLM_API_LOG_LEVEL` | Python API log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `RKLLM_LOG_LEVEL` | rkllm C runtime log level (integer 0-2, set to `1` for stats) |
 
 ---
 
@@ -856,15 +880,13 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 ### Log Examples
 
 ```
-2026-02-08 17:45:12 [INFO] Detected: qwen3-1.7b (context=4096)
-2026-02-08 17:45:12 [INFO] Models: ['qwen3-1.7b']
-2026-02-08 17:45:12 [INFO] Aliases: {'qwen': 'qwen3-1.7b', 'qwen3': 'qwen3-1.7b'}
+2026-02-08 17:45:12 [INFO] Detected: qwen2.5-1.5b-instruct-4k (context=4096)
+2026-02-08 17:45:12 [INFO] Models: ['qwen2.5-1.5b-instruct-4k']
+2026-02-08 17:45:12 [INFO] Aliases: {'qwen': 'qwen2.5-1.5b-instruct-4k', 'qwen2': 'qwen2.5-1.5b-instruct-4k'}
 2026-02-08 17:45:30 [INFO] >>> NEW REQUEST chatcmpl-a1b2c3d4e5f6
-2026-02-08 17:45:30 [INFO] Resolved alias 'qwen' -> 'qwen3-1.7b'
-2026-02-08 17:45:30 [INFO] Loading model: qwen3-1.7b
-2026-02-08 17:45:33 [INFO] Model loaded in 3.2s
-2026-02-08 17:45:33 [DEBUG] KV incremental: sending only new user message (hash match)
-2026-02-08 17:45:33 [DEBUG] First token in 0.05s
+2026-02-08 17:45:30 [INFO] Resolved alias 'qwen' -> 'qwen2.5-1.5b-instruct-4k'
+2026-02-08 17:45:30 [INFO] REUSING process for qwen2.5-1.5b-instruct-4k (PID: 1234)
+2026-02-08 17:45:31 [DEBUG] First token in 0.87s
 2026-02-08 17:45:45 [INFO] Request ENDED: chatcmpl-a1b2c3d4e5f6
 ```
 
@@ -890,7 +912,7 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 - Run `curl http://localhost:8000/v1/models` to see detected models
 
 ### "Failed to load model"
-- Check that `librkllmrt.so` is in `/usr/lib/`: `ldconfig -p | grep rkllm`
+- Check that the `rkllm` binary is in `$PATH`: `which rkllm`
 - Verify NPU driver is loaded: `dmesg | grep -i npu`
 - Check `api.log` for init failure messages — may indicate corrupt `.rkllm` file or version mismatch
 
@@ -902,15 +924,11 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 ### Streaming stops mid-response
 - Check `FALLBACK_SILENCE` timeout (default 12s) — increase if model is slow
 - Large prompts near context limit may cause long prefill — increase `FIRST_TOKEN_TIMEOUT`
-- Check `/health` endpoint for status
-
-### Server freezes on requests
-- Ensure you are using `-k gthread`, **not** `-k gevent`. `rkllm_run()` is a blocking C call that freezes gevent's event loop
-- Check `gunicorn` command: `gunicorn -w 1 -k gthread --threads 4 --timeout 300 -b 0.0.0.0:8000 api:app`
+- Check process health via `/health`
 
 ### RAG returns irrelevant answers
 - Verify SearXNG is returning JSON: add `json` to `search.formats` in SearXNG settings
-- Check if "Bypass Web Loader" is **ON** in Open WebUI
+- Check if "Bypass Web Loader" is **ON** (recommended for small models)
 - Set `RAG_QUALITY_FLOOR_THRESHOLD` higher to drop poor search results
 - Check logs for "RAG SKIP" and "Quality floor triggered" messages
 
@@ -921,100 +939,19 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 
 ---
 
-## File Structure
+## Project Structure
 
 ```
 RKLLM-API-Server/
-├── api.py                          # Main API server (ctypes, v2.0)
-├── setup.sh                        # Zero-config installer (761 lines)
-├── settings.yml                    # SearXNG configuration for Open WebUI
-├── README.md                       # This file
-├── archive/
-│   ├── api_v1_subprocess.py        # Original subprocess version (archived)
-│   └── CTYPES_MIGRATION_PLAN.md    # V1→V2 migration planning document
-└── .gitignore
+├── api.py           # Main API server (Flask + rkllm process management)
+├── setup.sh         # Zero-config installer (experimental)
+├── settings.yml     # SearXNG configuration (optimized for Open WebUI)
+├── .gitignore       # Excludes logs, __pycache__, etc.
+└── README.md        # This file
 ```
-
----
-
-## V1 (Subprocess) vs V2 (ctypes) — Why We Migrated
-
-The original server (`archive/api_v1_subprocess.py`) worked by spawning a separate C++ binary and communicating via stdin/stdout pipes. While functional, this architecture had significant limitations. The current version (`api.py`) uses direct ctypes bindings to the shared library, eliminating the process boundary entirely.
-
-### Architecture Comparison
-
-| Aspect | V1 — Subprocess | V2 — ctypes (current) |
-|--------|-----------------|----------------------|
-| **NPU communication** | Pipes stdin/stdout to a C++ binary | Direct C library calls via ctypes |
-| **Token delivery** | Parse stdout line-by-line | C callback pushes to `queue.Queue` |
-| **KV cache** | Lost on every turn (binary restarts) | Preserved across turns (`keep_history=1`) |
-| **Prefill (Turn 2+)** | ~500ms (re-process entire conversation) | ~50ms (only new user message) |
-| **Abort / cancel** | `SIGKILL` the process | `rkllm_abort()` — clean, instant |
-| **Performance stats** | Parsed from stdout text | Native `RKLLMResult.perf` struct |
-| **Thinking mode toggle** | Append `/no_think` to prompt text | `RKLLMInput.enable_thinking` flag |
-| **Error handling** | Detect process crash / timeout | C return codes + error callback state |
-| **Process management** | ~500 lines (spawn, monitor, kill, restart) | 0 lines (no process to manage) |
-| **Code size** | 2682 lines | 2376 lines (−306, despite adding features) |
-
-### Why the Change Matters
-
-**The biggest win is KV cache retention.** In the subprocess architecture, every turn killed and restarted the C++ binary, destroying the NPU's key-value cache. This meant the model had to re-prefill the entire conversation history from scratch on every single message — growing linearly with conversation length.
-
-With ctypes, the library stays loaded in-process. The KV cache persists between calls. On a 10-turn conversation, Turn 1 takes ~90ms to prefill. All subsequent turns take ~50ms regardless of conversation length, because only the new message is processed.
-
-**Performance impact (measured on Orange Pi 5 Plus, Qwen3-1.7B):**
-
-| Metric | V1 (Subprocess) | V2 (ctypes) | Improvement |
-|--------|-----------------|-------------|-------------|
-| Turn 1 prefill | ~90ms | ~90ms | Same |
-| Turn 2 prefill | ~500ms | ~50ms | **10x faster** |
-| Turn 5 prefill | ~1200ms | ~50ms | **24x faster** |
-| Turn 10 prefill | ~2000ms+ | ~50ms | **40x faster** |
-| Model switch | ~5s (kill + restart + reload) | ~3s (destroy + init) | ~40% faster |
-| Cancel generation | ~1s (SIGKILL + wait) | instant (`rkllm_abort()`) | Near-instant |
-
-### V1 Subprocess Code (Archived)
-
-The original subprocess version is preserved at [`archive/api_v1_subprocess.py`](archive/api_v1_subprocess.py) (2682 lines, fully functional). You can also access it via the git tag:
-
-```bash
-# View the last working subprocess version
-git checkout v1.0-subprocess -- api.py
-
-# Return to current ctypes version
-git checkout main -- api.py
-```
-
-The V1 code may be useful as a reference if:
-- You need to run on a system where ctypes binding is not possible
-- You want to see how stdout parsing / process management was implemented
-- You're porting to a different inference runtime that only provides a CLI binary
-
----
-
-## Tested Hardware
-
-| Board | RAM | NPU Driver | Runtime | Status |
-|-------|-----|-----------|---------|--------|
-| Orange Pi 5 Plus | 16 GB | 0.9.8 | v1.2.3 | Fully tested, production use |
-
-## Tested Models
-
-| Model | Quantization | Context | File Size | Speed | Status |
-|-------|-------------|---------|-----------|-------|--------|
-| Qwen3-1.7B | W8A8 | 4K | ~1.7 GB | ~13.6 tok/s | Fully tested |
-| Qwen3-4B-Instruct | W8A8 | 16K | ~4 GB | ~6 tok/s | Tested |
-| Gemma-3-4B-IT | W8A8 | 4K | ~4 GB | ~6 tok/s | Tested |
-| Phi-3-Mini-4K-Instruct | W8A8 | 4K | ~3.8 GB | ~6.8 tok/s | Tested |
 
 ---
 
 ## License
 
-This project is provided as-is for personal and educational use. The rkllm runtime and model files are subject to their respective licenses from Rockchip and model authors.
-
-## Acknowledgements
-
-- [airockchip/rknn-llm](https://github.com/airockchip/rknn-llm) — RKLLM runtime and toolkit
-- [Pelochus/armbian-build-rknpu-updates](https://github.com/Pelochus/armbian-build-rknpu-updates) — Armbian builds with RKNPU driver
-- [Open WebUI](https://github.com/open-webui/open-webui) — Web interface for LLM interaction
+This project is provided as-is for personal and educational use. The `rkllm` runtime and model files are subject to their respective licenses from Rockchip and model authors.
