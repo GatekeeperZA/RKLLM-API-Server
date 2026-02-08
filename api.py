@@ -568,6 +568,16 @@ class RKLLMWrapper:
         self.lib.rkllm_abort.argtypes = [ctypes.c_void_p]
         self.lib.rkllm_abort.restype = ctypes.c_int
 
+        # rkllm_clear_kv_cache(handle, keep_system_prompt, start_pos*, end_pos*) -> int
+        try:
+            self.lib.rkllm_clear_kv_cache.argtypes = [
+                ctypes.c_void_p, ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ]
+            self.lib.rkllm_clear_kv_cache.restype = ctypes.c_int
+        except AttributeError:
+            pass  # May not exist in older library versions
+
         # rkllm_set_chat_template(handle, system_prefix, user_prefix, assistant_prefix) -> int
         try:
             self.lib.rkllm_set_chat_template.argtypes = [
@@ -648,6 +658,23 @@ class RKLLMWrapper:
             return
         try:
             self.lib.rkllm_abort(self.handle)
+        except Exception:
+            pass
+
+    def clear_kv_cache(self):
+        """Clear the runtime's internal KV cache.
+
+        Call before a new conversation when using keep_history=1 so that
+        stale context from a prior conversation is discarded.  The next
+        rkllm_run with keep_history=1 starts from a clean slate AND
+        retains the new turn's state for incremental follow-ups.
+        """
+        if not self._model_loaded:
+            return
+        try:
+            self.lib.rkllm_clear_kv_cache(
+                self.handle, ctypes.c_int(0), None, None
+            )
         except Exception:
             pass
 
@@ -1839,9 +1866,14 @@ def chat_completions():
         # - RAG: always keep_history=0 (fresh context each time)
         # - Normal incremental: send only last user message, keep_history=1
         #   (runtime already has prior turns in KV cache)
-        # - Normal reset: full prompt, keep_history=0 (new conversation)
+        # - Normal reset: clear_kv_cache() + keep_history=1
+        #   IMPORTANT: keep_history=0 discards the KV cache after the run,
+        #   so Turn 2 would find an empty cache.  We use keep_history=1
+        #   with an explicit clear_kv_cache() call instead.
+        kv_is_reset = False
         if is_rag:
             keep_history = 0
+            kv_is_reset = True
             _reset_kv_tracking()
         else:
             incremental_msg = _check_kv_incremental(name, messages)
@@ -1852,9 +1884,16 @@ def chat_completions():
                 prompt = incremental_msg
                 keep_history = 1
             else:
-                logger.info(f"[{request_id}] KV RESET — new conversation or "
-                            f"history mismatch")
-                keep_history = 0
+                logger.info(f"[{request_id}] KV RESET — clearing KV cache for "
+                            f"new conversation")
+                # Clear stale KV cache from prior conversation, then use
+                # keep_history=1 so THIS turn's state IS retained for
+                # incremental follow-ups.  With keep_history=0 the runtime
+                # discards the cache after generation, breaking Turn 2.
+                if _rkllm_wrapper and _rkllm_wrapper.is_loaded:
+                    _rkllm_wrapper.clear_kv_cache()
+                keep_history = 1
+                kv_is_reset = True
                 _reset_kv_tracking()
 
         # Extract user question for cache key
@@ -1920,6 +1959,7 @@ def chat_completions():
                     messages=messages,
                     is_rag=is_rag,
                     rag_cache_info=rag_cache_info,
+                    kv_is_reset=kv_is_reset,
                 )),
                 mimetype='text/event-stream',
                 headers={
@@ -1936,6 +1976,7 @@ def chat_completions():
                 is_rag=is_rag,
                 messages=messages,
                 rag_cache_info=rag_cache_info,
+                kv_is_reset=kv_is_reset,
             )
 
     except Exception as e:
@@ -1952,7 +1993,8 @@ def chat_completions():
 def _generate_stream(prompt, request_id, model_name, created,
                      keep_history=1, enable_thinking=True,
                      include_usage=False, messages=None,
-                     is_rag=False, rag_cache_info=None):
+                     is_rag=False, rag_cache_info=None,
+                     kv_is_reset=False):
     """Generator that yields SSE chunks from rkllm token callback queue."""
     global _worker_thread
 
@@ -2113,7 +2155,7 @@ def _generate_stream(prompt, request_id, model_name, created,
 
         # Update KV cache tracking after successful generation
         if generation_clean and not is_rag and messages:
-            _update_kv_tracking(model_name, messages, is_reset=(keep_history == 0))
+            _update_kv_tracking(model_name, messages, is_reset=kv_is_reset)
 
     except GeneratorExit:
         logger.warning(f"[{request_id}] Client DISCONNECTED / stopped")
@@ -2150,7 +2192,8 @@ def _generate_stream(prompt, request_id, model_name, created,
 
 def _generate_complete(prompt, request_id, model_name, created,
                        keep_history=1, enable_thinking=True,
-                       is_rag=False, messages=None, rag_cache_info=None):
+                       is_rag=False, messages=None, rag_cache_info=None,
+                       kv_is_reset=False):
     """Collect all output and return a non-streaming JSON response."""
     global _worker_thread
 
@@ -2286,7 +2329,7 @@ def _generate_complete(prompt, request_id, model_name, created,
 
         # Update KV cache tracking after successful generation
         if generation_clean and not is_rag and messages:
-            _update_kv_tracking(model_name, messages, is_reset=(keep_history == 0))
+            _update_kv_tracking(model_name, messages, is_reset=kv_is_reset)
 
         if reasoning_content:
             logger.info(f"[{request_id}] Completed ({len(cleaned_content)} content + "
