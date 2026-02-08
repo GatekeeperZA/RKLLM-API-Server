@@ -82,29 +82,22 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 ## Architecture
 
 ```mermaid
-graph LR
-    OW["🌐 Open WebUI"]
-    OL["🦙 Ollama<br/>(CPU Models)"]
-    API["📡 API Endpoint<br/>/v1/chat/completions"]
-    BP["🔧 Prompt Builder<br/>RAG · Web Cleaning<br/>Score Selection"]
-    PM["🔍 Process Monitor<br/>Health · Recovery<br/>Idle Unload"]
-    RC["💾 RAG Cache<br/>LRU · TTL"]
-    TP["🧠 Think Parser<br/>‹think› Tags<br/>State Machine"]
-    RKLLM["⚡ rkllm  C++<br/>Chat Template<br/>Token Sampling"]
-    NPU["🔲 RK3588 NPU<br/>6 TOPS × 3 cores"]
-    SX["🔎 SearXNG"]
-
-    OW -- "OpenAI API<br/>HTTP / SSE" --> API
-    OW -. "Ollama API<br/>HTTP" .-> OL
-    OW -- "Search Query" --> SX
+graph TD
+    OW["🌐 Open WebUI"] -- "OpenAI API · HTTP/SSE" --> API
+    OW -. "Ollama API · HTTP" .-> OL["🦙 Ollama<br/>(CPU Models)"]
+    OW -- "Search Query" --> SX["🔎 SearXNG"]
     SX -- "Results" --> OW
-    API --> BP
-    BP --> RC
-    API -- "stdin · plain text" --> RKLLM
-    RKLLM -- "stdout · tokens + stats" --> TP
+
+    API["📡 API Endpoint<br/>/v1/chat/completions"] --> BP["🔧 Prompt Builder<br/>RAG · Web Cleaning<br/>Score Selection"]
+    BP --> RC["💾 RAG Cache<br/>LRU · TTL"]
+
+    API -- "stdin · plain text" --> RKLLM["⚡ rkllm C++<br/>Chat Template<br/>Token Sampling"]
+    RKLLM -- "stdout · tokens + stats" --> TP["🧠 Think Parser<br/>‹think› Tags<br/>State Machine"]
     TP -- "SSE chunks" --> API
-    PM -. "monitor · kill/restart" .-> RKLLM
-    RKLLM --> NPU
+
+    RKLLM --> NPU["🔲 RK3588 NPU<br/>6 TOPS × 3 cores"]
+
+    PM["🔍 Process Monitor<br/>Health · Recovery<br/>Idle Unload"] -. "monitor · kill/restart" .-> RKLLM
 
     style OW fill:#4a9eff,stroke:#2d7cd4,color:#fff
     style OL fill:#f5f5f5,stroke:#999,color:#333
