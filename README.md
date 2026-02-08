@@ -108,6 +108,20 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 
 ## Requirements
 
+### Tested System
+
+This project was developed and tested on:
+
+| Component | Details |
+|-----------|--------|
+| **Board** | Orange Pi 5 Plus (16 GB RAM) |
+| **SoC** | Rockchip RK3588 (3 NPU cores) |
+| **OS** | [Armbian Pelochus 24.11.0](https://github.com/Pelochus/armbian-build-rknpu-updates/releases) — `Armbian-Pelochus_24.11.0-OrangePi5-plus_jammy_vendor.7z` |
+| **Kernel NPU Driver** | 0.9.8 (**included in the Pelochus image** — no driver build required) |
+| **RKLLM Runtime** | v1.2.3 (only the runtime library + binary need to be installed) |
+
+> **Why Pelochus Armbian?** The standard Armbian images ship with an older RKNPU driver (0.9.6 or earlier). The [Pelochus builds](https://github.com/Pelochus/armbian-build-rknpu-updates/releases) bundle **RKNPU driver 0.9.8** in the kernel, so you only need to install the RKLLM runtime — no kernel module compilation required.
+
 ### Hardware
 - **Rockchip RK3588 or RK3576** SBC (Orange Pi 5 Plus, Rock 5B, etc.)
 - **NPU driver** installed and functional
@@ -187,6 +201,8 @@ dmesg | tail -5 | grep -i rknpu
 ```
 
 > **Note:** Many Armbian and Orange Pi images already include RKNPU driver 0.9.8. Check before building. If `dmesg | grep rknpu` shows `0.9.8`, you're good.
+
+> **Recommended:** The [Pelochus Armbian builds](https://github.com/Pelochus/armbian-build-rknpu-updates/releases) ship with RKNPU driver 0.9.8 pre-installed — no manual driver compilation needed. Use `Armbian-Pelochus_24.11.0-OrangePi5-plus_jammy_vendor.7z` (or the latest release for your board) and skip straight to the [Runtime Setup](#3-rkllm-runtime-v123).
 
 > **Alternative:** Some distributions update the driver via a board-specific kernel update: `sudo apt upgrade` may pull in a newer kernel with the driver included.
 
