@@ -1393,18 +1393,27 @@ def build_prompt(messages, model_name):
 def drain_stdout(proc, timeout=None):
     """Drain any buffered stdout from the process before sending a new prompt.
 
-    Reads in a loop until the pipe has been quiet for 'timeout' seconds.
-    Uses DRAIN_BUFFER_SIZE (8 KB) and DRAIN_TIMEOUT (1.0s) to ensure all
-    post-generation output (stats, prompt indicators, late flushes) is fully
-    consumed before we send the next prompt.  The 1s timeout is necessary
-    because rkllm prints 3+ stats lines with brief pauses between NPU flushes.
+    Two-phase approach to minimise latency on reused processes:
+      Phase 1: Short select (DRAIN_TIMEOUT_INITIAL = 0.3s).  If the pipe is
+               empty, return immediately — no unnecessary waiting.
+      Phase 2: If phase 1 found data, continue draining with the longer
+               DRAIN_TIMEOUT (1.0s) to capture all stats lines / late flushes
+               that arrive with brief pauses between NPU buffer flush cycles.
+
+    The MINIMUM_PREFILL_TIME guard in the generation loops already handles
+    any residual data that slips past, so the short initial timeout is safe.
     """
     if timeout is None:
-        timeout = DRAIN_TIMEOUT
+        initial_timeout = 0.3
+        continuation_timeout = DRAIN_TIMEOUT
+    else:
+        initial_timeout = timeout
+        continuation_timeout = timeout
     drained = 0
+    current_timeout = initial_timeout
     while True:
         try:
-            ready, _, _ = select.select([proc.stdout], [], [], timeout)
+            ready, _, _ = select.select([proc.stdout], [], [], current_timeout)
         except (ValueError, OSError):
             break
         if ready:
@@ -1412,6 +1421,8 @@ def drain_stdout(proc, timeout=None):
                 data = os.read(proc.stdout.fileno(), DRAIN_BUFFER_SIZE)
                 if data:
                     drained += len(data)
+                    # Found data — switch to longer timeout for remaining flushes
+                    current_timeout = continuation_timeout
                 else:
                     break
             except Exception:
@@ -1826,13 +1837,14 @@ def chat_completions():
     if max_tokens is None:
         max_tokens = MAX_TOKENS_DEFAULT
 
-    # Log warning for sampling parameters that rkllm ignores.
+    # Log ignored sampling parameters (debug level to avoid per-request noise).
     # The rkllm binary applies its own sampling config (compiled into the model);
     # these OpenAI-standard params have no effect but users may expect them to.
-    for param_name, default_val in _SAMPLING_DEFAULTS.items():
-        val = body.get(param_name)
-        if val is not None and val != default_val:
-            logger.info(f"[{request_id}] Note: '{param_name}={val}' ignored — rkllm uses model-compiled sampling")
+    ignored_params = {k: body[k] for k, default in _SAMPLING_DEFAULTS.items()
+                      if body.get(k) is not None and body[k] != default}
+    if ignored_params:
+        summary = ', '.join(f'{k}={v}' for k, v in ignored_params.items())
+        logger.debug(f"[{request_id}] Ignored sampling params: {summary} (rkllm uses model-compiled sampling)")
 
     logger.info(f"Request {request_id} model: '{requested_model}' stream: {stream}")
 
