@@ -18,7 +18,7 @@ Preserved unchanged from subprocess version:
 - SSE helpers, all API routes, OpenAI-compatible response format
 
 Rollback: git checkout v1.0-subprocess -- api.py
-Backup:   api_subprocess_backup.py (2322 lines, verified intact)
+Archive:  archive/api_v1_subprocess.py (2682 lines, fully functional)
 
 Usage:
     gunicorn -w 1 -k gthread --threads 4 --timeout 300 -b 0.0.0.0:8000 api:app
