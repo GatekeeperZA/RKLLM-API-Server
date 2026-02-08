@@ -20,7 +20,7 @@ use_default_settings:
       - wikipedia
 
 server:
-  secret_key: "852170001a"
+  secret_key: "yourpass"
   limiter: false              # No rate limiting (local-only API)
   image_proxy: false          # Not needed — Open WebUI fetches text only
   request_timeout: 5          # Max wait for all engines (seconds)
