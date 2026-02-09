@@ -18,6 +18,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [API Endpoints](#api-endpoints)
 - [Open WebUI Configuration](#open-webui-configuration)
   - [Docker Setup](#docker-setup)
+  - [Embedding Model](#embedding-model-recommendation)
   - [Document RAG Settings](#document-rag-settings-recommended-for-pdfdocument-upload)
   - [VL / Image Upload Settings](#vl--image-upload-settings)
 - [SearXNG Configuration](#searxng-configuration)
@@ -659,6 +660,7 @@ docker run -d \
   -v open-webui:/app/backend/data \
   -e ENABLE_RETRIEVAL_QUERY_GENERATION=False \
   -e RAG_SYSTEM_CONTEXT=True \
+  -e RAG_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5 \
   -e ANONYMIZED_TELEMETRY=false \
   -e DO_NOT_TRACK=true \
   ghcr.io/open-webui/open-webui:main
@@ -670,6 +672,7 @@ docker run -d \
 |----------|-------|--------|
 | `ENABLE_RETRIEVAL_QUERY_GENERATION` | `False` | Prevents Open WebUI from sending a separate LLM call to generate search queries for RAG — the server handles this via meta-task shortcircuits instead |
 | `RAG_SYSTEM_CONTEXT` | `True` | Injects retrieved document/search content into the system message where the server's RAG pipeline can detect and process it |
+| `RAG_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Best retrieval-quality embedding model that runs efficiently on ARM CPU (see [Embedding Model](#embedding-model-recommendation) below) |
 | `ANONYMIZED_TELEMETRY` | `false` | Disables telemetry (optional, recommended for privacy) |
 | `DO_NOT_TRACK` | `true` | Disables tracking (optional, recommended for privacy) |
 
@@ -758,6 +761,24 @@ Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}.
 | **RAG Template** | `{{CONTEXT}}` | **Required.** Just the variable, nothing else. The default template wastes 300+ tokens of meta-instructions |
 
 > **Important:** The RAG Template must be exactly `{{CONTEXT}}` — no extra text. The API server builds its own optimized reading-comprehension prompt format internally.
+
+### Embedding Model Recommendation
+
+The embedding model determines how well Open WebUI finds the right document chunks when you ask a question. This runs on CPU (not NPU), so it needs to be small enough for ARM hardware.
+
+**Recommended: `BAAI/bge-small-en-v1.5`** — set via the Docker `RAG_EMBEDDING_MODEL` env var above.
+
+| Model | Params | MTEB Avg | Retrieval Score | RAM | Verdict |
+|-------|--------|---------|----------------|-----|--------|
+| **BAAI/bge-small-en-v1.5** | 33M | **62.17** | **51.68** | ~150 MB | **Best for RAG on ARM** |
+| sentence-transformers/all-MiniLM-L6-v2 | 22.7M | 56.08 | 41.95 | ~90 MB | Decent but lower retrieval quality |
+| minishlab/potion-base-8M | 8M | 50.54 | 31.71 | ~30 MB | Ultra-fast but poor retrieval — wrong chunks = worse answers |
+| TaylorAI/bge-micro-v2 | ~4M | ~45 | ~28 | ~16 MB | Too small for reliable RAG |
+| BAAI/bge-base-en-v1.5 | 109M | 63.55 | 53.25 | ~450 MB | Marginal gain, 3× more RAM — overkill for ARM |
+
+> **Why not a faster/smaller model?** Embedding speed is not the bottleneck — embedding 5 chunks takes <100ms even with transformer models on ARM CPU. The NPU generation at 13 tok/s is the actual bottleneck. Trading retrieval quality for embedding speed is a bad trade: the model gets worse context and gives worse answers.
+
+> **Changing the model:** If you switch embedding models, go to **Admin > Settings > Documents > Danger Zone** and click **Reindex Knowledge Base Vectors** to re-embed all existing documents with the new model.
 
 ### Document RAG Settings (Recommended for PDF/Document Upload)
 
