@@ -31,6 +31,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [V1 (Subprocess) vs V2 (ctypes) — Why We Migrated](#v1-subprocess-vs-v2-ctypes--why-we-migrated)
 - [Tested Hardware](#tested-hardware)
 - [Tested Models](#tested-models)
+- [Benchmarks](#benchmarks)
 - [Git Tags & Branches](#git-tags--branches)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
@@ -1075,6 +1076,20 @@ python tests/vl_test.py stream       # Streaming tests only
 
 Both suites target `http://192.168.2.180:8000` by default — edit the `API` constant at the top to match your server IP.
 
+### Benchmark Tool (`tests/benchmark_test.py`)
+
+Automated NPU benchmark tool that measures cold load time, warm TTFT, generation speed (tok/s), and NPU memory usage. Fetches real perf stats from the server log via SSH.
+
+```bash
+python tests/benchmark_test.py                                     # Benchmark all models
+python tests/benchmark_test.py --models qwen3-1.7b phi-3-mini-4k-instruct  # Specific models only
+python tests/benchmark_test.py --skip-vl                            # Skip VL model tests
+python tests/benchmark_test.py --runs 3                             # Average over 3 runs
+python tests/benchmark_test.py --remote-log                         # Fetch NPU perf via SSH
+```
+
+Results are saved to `tests/benchmark_results.json` and printed as formatted markdown tables.
+
 ---
 
 ## File Structure
@@ -1087,7 +1102,9 @@ RKLLM-API-Server/
 ├── README.md                       # This file
 ├── tests/
 │   ├── diagnostic_test.py          # Section-by-section diagnostic (17 sections, 108 tests)
-│   └── vl_test.py                  # Integration test suite (17 categories, 68 tests)
+│   ├── vl_test.py                  # Integration test suite (17 categories, 68 tests)
+│   ├── benchmark_test.py           # NPU model benchmark tool (tok/s, TTFT, memory)
+│   └── benchmark_results.json      # Latest benchmark results
 ├── archive/
 │   ├── api_v1_subprocess.py        # Original subprocess version (archived)
 │   └── CTYPES_MIGRATION_PLAN.md    # V1→V2 migration planning document
@@ -1164,10 +1181,12 @@ The V1 code may be useful as a reference if:
 
 | Model | Quantization | Context | File Size | Speed | Status |
 |-------|-------------|---------|-----------|-------|--------|
-| Qwen3-1.7B | W8A8 | 4K | ~1.7 GB | ~13.6 tok/s | Fully tested |
+| Qwen3-1.7B | W8A8 | 4K | ~1.7 GB | **13.0 tok/s** avg | Fully benchmarked |
+| Phi-3-Mini-4K-Instruct | W8A8 | 4K | ~3.8 GB | **6.8 tok/s** avg | Fully benchmarked |
 | Qwen3-4B-Instruct | W8A8 | 16K | ~4 GB | ~6 tok/s | Tested |
 | Gemma-3-4B-IT | W8A8 | 4K | ~4 GB | ~6 tok/s | Tested |
-| Phi-3-Mini-4K-Instruct | W8A8 | 4K | ~3.8 GB | ~6.8 tok/s | Tested |
+
+> Pre-built RKLLM models available on HuggingFace: [Qwen3-1.7B-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) · [Phi-3-mini-4k-instruct-w8a8](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8)
 
 ### VL (Vision-Language) Models
 
@@ -1180,7 +1199,49 @@ The V1 code may be useful as a reference if:
 | InternVL3-1B | W8A8 | 448×448 | ~TBD | ~TBD | Supported |
 | MiniCPM-V-2.6 | W8A8 | 448×448 | ~TBD | ~TBD | Supported |
 
-> Encoder times and decode speeds from [RKLLM official benchmarks](https://github.com/airockchip/rknn-llm/blob/main/benchmark.md) on RK3588 W8A8 with all 3 NPU cores.
+> VL encoder times and decode speeds from [RKLLM official benchmarks](https://github.com/airockchip/rknn-llm/blob/main/benchmark.md) on RK3588 W8A8 with all 3 NPU cores.
+
+---
+
+## Benchmarks
+
+Measured on **Orange Pi 5 Plus (16 GB)** — RK3588, 3 NPU cores, RKNPU driver 0.9.8, `librkllmrt.so` v1.2.3. All measurements are server-side NPU timing from the `RKLLMResult.perf` struct (not client-side estimates). Both text and VL models remain loaded in NPU memory simultaneously during normal operation.
+
+### Qwen3-1.7B (W8A8, ctx=4096)
+
+| Prompt | Prefill | Prefill Tokens | Generate Time | Output Tokens | tok/s | Cold TTFT |
+|--------|---------|---------------|--------------|--------------|-------|----------|
+| Short Q&A | 95 ms | 15 | 39.6s | 539 | **13.6** | 4.1s |
+| Medium explanation | 128 ms | 26 | 145.3s | 1,829 | **12.6** | 4.1s |
+| Long generation | 176 ms | 49 | 134.6s | 1,701 | **12.6** | 4.1s |
+| Reasoning (step-by-step) | 140 ms | 33 | 67.0s | 889 | **13.3** | 4.2s |
+| **Average** | **135 ms** | **31** | — | **1,240** | **13.0** | **4.1s** |
+
+- **Model load time:** 2.8s
+- **NPU memory:** 2,343 MB (standalone) · 7,308 MB (with VL model co-loaded)
+- **HuggingFace:** [GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3)
+
+### Phi-3-Mini-4K-Instruct (W8A8, ctx=4096)
+
+| Prompt | Prefill | Prefill Tokens | Generate Time | Output Tokens | tok/s | Cold TTFT |
+|--------|---------|---------------|--------------|--------------|-------|----------|
+| Short Q&A | 204 ms | 10 | 9.4s | 68 | **7.2** | 6.8s |
+| Medium explanation | 258 ms | 25 | 141.3s | 913 | **6.5** | 6.9s |
+| Long generation | 454 ms | 47 | 149.9s | 963 | **6.4** | 6.6s |
+| Reasoning (step-by-step) | 263 ms | 29 | 29.4s | 207 | **7.0** | 6.9s |
+| **Average** | **295 ms** | **28** | — | **538** | **6.8** | **6.8s** |
+
+- **Model load time:** 4.5s (avg)
+- **NPU memory:** 7,308 MB (with text model co-loaded)
+- **HuggingFace:** [GatekeeperZA/Phi-3-mini-4k-instruct-w8a8](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8)
+
+### Key Observations
+
+- **Qwen3-1.7B generates ~2× faster** than Phi-3-Mini despite similar quantization — smaller parameter count means fewer operations per token
+- **Prefill scales linearly** with input token count (~6–10 ms per token for Qwen3, ~10–15 ms for Phi-3)
+- **Cold TTFT includes model load** — Qwen3 loads in 2.8s, Phi-3 in ~4.5s. Warm TTFT (model already loaded) is ~1.3s for Qwen3 and ~2.0s for Phi-3
+- **Generation speed is stable** across prompt lengths — the NPU maintains consistent tok/s regardless of output length
+- **Reasoning prompts generate fewer tokens** but at slightly higher tok/s (less KV cache pressure from shorter context)
 
 ---
 
@@ -1191,7 +1252,7 @@ The V1 code may be useful as a reference if:
 | `v1.0-subprocess-stable` | Last working subprocess version (V1) |
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
-| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + document RAG + full test suites (108/108 pass) |
+| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + document RAG + NPU benchmarks + full test suites (108/108 pass) |
 
 ---
 
