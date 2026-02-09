@@ -386,8 +386,11 @@ def generate_aliases(model_ids):
 
 ALIASES = generate_aliases(MODELS.keys())
 
+_vl_count = sum(1 for c in MODELS.values() if 'vl_config' in c)
 logger.info(f"Models: {list(MODELS.keys())}")
 logger.info(f"Aliases: {ALIASES}")
+if _vl_count:
+    logger.info(f"VL deps: {'available (numpy, Pillow)' if _VL_DEPS_AVAILABLE else 'MISSING — install numpy Pillow for VL support'}")
 
 # =============================================================================
 # RKLLM CTYPES DEFINITIONS  (SDK ≥ v1.2.0 — see header docstring)
@@ -2470,8 +2473,12 @@ def chat_completions():
         _vl_images, _vl_text_prompt = _extract_images_from_messages(messages)
         if not _vl_images:
             _vl_has_images = False
-            logger.debug(f"[{request_id}] Image detection: content had image_url parts "
-                        f"but no decodable images found")
+            logger.warning(f"[{request_id}] Image parts found but no images could be decoded "
+                          f"(check base64 encoding)")
+            return make_error_response(
+                "Image content detected but all images failed to decode. "
+                "Ensure images are valid base64-encoded data URIs "
+                "(e.g., data:image/png;base64,...).", 400, "invalid_request")
         else:
             logger.info(f"[{request_id}] VL AUTO-ROUTE: {len(_vl_images)} image(s) detected, "
                        f"text='{_vl_text_prompt[:80]}...' -- routing to VL model")
@@ -2595,7 +2602,7 @@ def chat_completions():
             if stream:
                 return Response(
                     stream_with_context(_generate_stream(
-                        vl_prompt, request_id, name, created,
+                        vl_prompt, request_id, vl_name, created,
                         keep_history=0, enable_thinking=False,
                         include_usage=include_usage, messages=messages,
                         is_rag=False, rag_cache_info=None,
@@ -2607,7 +2614,7 @@ def chat_completions():
                 )
             else:
                 return _generate_complete(
-                    vl_prompt, request_id, name, created,
+                    vl_prompt, request_id, vl_name, created,
                     keep_history=0, enable_thinking=False,
                     is_rag=False, messages=messages,
                     rag_cache_info=None, kv_is_reset=True, vl_data=vl_data,
