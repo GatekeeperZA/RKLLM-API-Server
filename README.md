@@ -656,6 +656,7 @@ Open WebUI runs as a Docker container on the same Orange Pi (or any machine on t
 docker run -d \
   --name open-webui \
   --restart always \
+  --add-host=host.docker.internal:host-gateway \
   -p 3000:8080 \
   -v open-webui:/app/backend/data \
   -e ENABLE_RETRIEVAL_QUERY_GENERATION=False \
@@ -693,6 +694,8 @@ docker run -d \
 | `DO_NOT_TRACK` | `true` | Disables tracking (optional, recommended for privacy) |
 
 > **Port mapping:** `3000:8080` — access Open WebUI at `http://<device-ip>:3000`. Change `3000` to any port you prefer.
+
+> **`--add-host` flag (Linux-specific, required):** On Linux, Docker does not resolve `host.docker.internal` by default — this is a Docker Desktop feature for macOS/Windows only. The `--add-host=host.docker.internal:host-gateway` flag maps it to the host's gateway IP, allowing the container to reach services running on the host (the RKLLM API server, Ollama, etc.). Without this flag, Open WebUI's default Ollama connection (`http://host.docker.internal:11434`) and any OpenAI connections using `host.docker.internal` will fail with `ClientConnectorDNSError: Cannot connect to host host.docker.internal`.
 
 > **Note:** All RAG/retrieval variables are set at the Docker level so they persist across container recreations. These are `PersistentConfig` variables — once the UI saves a value, it takes precedence over the env var. The env vars serve as correct defaults for fresh installs or config resets.
 
