@@ -17,7 +17,9 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Running the Server](#running-the-server)
 - [API Endpoints](#api-endpoints)
 - [Open WebUI Configuration](#open-webui-configuration)
+  - [Docker Setup](#docker-setup)
   - [Document RAG Settings](#document-rag-settings-recommended-for-pdfdocument-upload)
+  - [VL / Image Upload Settings](#vl--image-upload-settings)
 - [SearXNG Configuration](#searxng-configuration)
 - [RAG Pipeline](#rag-pipeline)
 - [Reasoning Models](#reasoning-models)
@@ -645,6 +647,36 @@ curl http://localhost:8000/health
 
 ## Open WebUI Configuration
 
+### Docker Setup
+
+Open WebUI runs as a Docker container on the same Orange Pi (or any machine on the network). The following `docker run` command includes all environment variables needed for the RKLLM API server, RAG, and VL/OCR to work correctly:
+
+```bash
+docker run -d \
+  --name open-webui \
+  --restart always \
+  -p 3000:8080 \
+  -v open-webui:/app/backend/data \
+  -e ENABLE_RETRIEVAL_QUERY_GENERATION=False \
+  -e RAG_SYSTEM_CONTEXT=True \
+  -e ANONYMIZED_TELEMETRY=false \
+  -e DO_NOT_TRACK=true \
+  ghcr.io/open-webui/open-webui:main
+```
+
+**Environment variables explained:**
+
+| Variable | Value | Reason |
+|----------|-------|--------|
+| `ENABLE_RETRIEVAL_QUERY_GENERATION` | `False` | Prevents Open WebUI from sending a separate LLM call to generate search queries for RAG — the server handles this via meta-task shortcircuits instead |
+| `RAG_SYSTEM_CONTEXT` | `True` | Injects retrieved document/search content into the system message where the server's RAG pipeline can detect and process it |
+| `ANONYMIZED_TELEMETRY` | `false` | Disables telemetry (optional, recommended for privacy) |
+| `DO_NOT_TRACK` | `true` | Disables tracking (optional, recommended for privacy) |
+
+> **Port mapping:** `3000:8080` — access Open WebUI at `http://<device-ip>:3000`. Change `3000` to any port you prefer.
+
+> **Note:** `ENABLE_RETRIEVAL_QUERY_GENERATION=False` is set as a Docker env var because changing it in the UI uses PersistentConfig which may not stick across restarts. Setting it at the Docker level ensures it persists.
+
 ### Connection
 
 In Open WebUI **Admin > Settings > Connections**, add the API as an OpenAI-compatible endpoint:
@@ -748,6 +780,29 @@ These settings control how Open WebUI chunks, embeds, and retrieves uploaded doc
 > **RAG Template** should be `{{CONTEXT}}` (set in the Documents section above) — the API server builds its own optimized prompt internally.
 
 > **Image Compression:** If uploading documents with images, set the compression resolution to `448x448` to match typical VL encoder input sizes.
+
+### VL / Image Upload Settings
+
+For vision-language (VL) models like DeepSeekOCR-3B to work with Open WebUI image uploads and OCR:
+
+**Admin > Settings > Images:**
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| **Image Generation (Engine)** | **OFF** (leave unset) | Do NOT enable image generation — it interferes with image upload routing. VL/OCR is handled by the chat API, not the image generation pipeline |
+
+**Workspace > Models > Edit** (for each VL-capable model):
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| **Vision** capability | **ON** | Tells Open WebUI this model accepts images. Without this, the image upload button won't appear in chat |
+| **Builtin Tools** | **OFF** | Small VL models cannot do function-calling |
+
+**How VL works:** When you upload an image in chat, Open WebUI sends it as a base64-encoded `image_url` in the OpenAI multimodal content array format. The RKLLM API server auto-detects image content and routes the request to the VL model pipeline (vision encoder → NPU embedding → LLM decoder). No special configuration is needed beyond enabling the Vision capability on the model.
+
+**Supported image formats:** JPEG, PNG, WebP, BMP, GIF (first frame). Images are automatically resized to the VL encoder's input resolution (e.g., 448×448 for DeepSeekOCR-3B).
+
+> **Tip:** For OCR tasks (extracting text from screenshots, documents, photos), use a model with OCR training like DeepSeekOCR-3B. Select it from the model dropdown before uploading the image.
 
 ### Per-Model Capabilities (Required)
 
