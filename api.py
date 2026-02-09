@@ -169,6 +169,24 @@ _SAMPLING_DEFAULTS = {
 # Context-dependent thinking for RAG queries.
 DISABLE_THINK_FOR_RAG_BELOW_CTX = 8192
 
+# Open WebUI internal task signatures — these are meta-tasks (search query
+# generation, title generation, tag generation, etc.) sent by Open WebUI
+# before/after the actual user request.  Thinking mode wastes 20+ seconds
+# on these trivial JSON/text generation tasks, so we auto-disable it.
+_OPENWEBUI_META_TASK_SIGNATURES = (
+    'generate search queries',
+    'generating search queries',
+    'search_queries',
+    'generate 1-3 broad',
+    'create a concise, 3-5 word',
+    'title for the chat',
+    'title for the prompt',
+    'generate 1-3 tags',
+    'categorize the chat',
+    'autocomplete generation',
+    'emoji as a title',
+)
+
 # RAG quality controls
 RAG_MIN_QUALITY_SCORE = 2
 RAG_MAX_PARAGRAPHS = 10
@@ -1954,7 +1972,17 @@ def build_prompt(messages, model_name):
                 parts.append(content)
 
         prompt = "\n".join(parts)
-        enable_thinking = True  # Always allow thinking in normal mode
+        enable_thinking = True  # Default: allow thinking in normal mode
+
+        # --- Open WebUI meta-task detection ---
+        # Open WebUI sends internal tasks (search query gen, title gen, tag gen)
+        # as regular chat completions. These are simple JSON/text tasks where
+        # thinking mode wastes 20+ seconds and can confuse result parsing.
+        _user_lower = user_question.lower()
+        _is_meta = any(sig in _user_lower for sig in _OPENWEBUI_META_TASK_SIGNATURES)
+        if _is_meta:
+            enable_thinking = False
+            logger.info(f"Meta-task detected — thinking disabled for speed")
 
     logger.debug(f"Prompt built ({len(prompt)} chars, ctx={ctx}, "
                  f"rag={'yes' if rag_parts else 'no'})")
