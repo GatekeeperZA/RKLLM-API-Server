@@ -661,6 +661,14 @@ docker run -d \
   -e ENABLE_RETRIEVAL_QUERY_GENERATION=False \
   -e RAG_SYSTEM_CONTEXT=True \
   -e RAG_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5 \
+  -e RAG_RERANKING_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2 \
+  -e ENABLE_RAG_HYBRID_SEARCH=True \
+  -e RAG_HYBRID_BM25_WEIGHT=0.3 \
+  -e ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=True \
+  -e ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER=True \
+  -e CHUNK_OVERLAP=0 \
+  -e CHUNK_MIN_SIZE_TARGET=400 \
+  -e RAG_TOP_K=5 \
   -e ANONYMIZED_TELEMETRY=false \
   -e DO_NOT_TRACK=true \
   ghcr.io/open-webui/open-webui:main
@@ -671,14 +679,24 @@ docker run -d \
 | Variable | Value | Reason |
 |----------|-------|--------|
 | `ENABLE_RETRIEVAL_QUERY_GENERATION` | `False` | Prevents Open WebUI from sending a separate LLM call to generate search queries for RAG — the server handles this via meta-task shortcircuits instead |
-| `RAG_SYSTEM_CONTEXT` | `True` | Injects retrieved document/search content into the system message where the server's RAG pipeline can detect and process it |
+| `RAG_SYSTEM_CONTEXT` | `True` | Injects retrieved document/search content into the system message instead of user message, enabling KV prefix caching for faster follow-up turns |
 | `RAG_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Best retrieval-quality embedding model that runs efficiently on ARM CPU (see [Embedding Model](#embedding-model-recommendation) below) |
+| `RAG_RERANKING_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Lightweight cross-encoder reranker (22M params, ~88MB RAM) — re-scores Top K results for much better precision. Open WebUI's sigmoid normalization is specifically designed for MS MARCO models |
+| `ENABLE_RAG_HYBRID_SEARCH` | `True` | Combines semantic (vector) + keyword (BM25) search for significantly better retrieval than vector-only |
+| `RAG_HYBRID_BM25_WEIGHT` | `0.3` | 30% keyword / 70% semantic — semantic-leaning balance. Semantic search is stronger with a good embedding model |
+| `ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS` | `True` | Enriches BM25 index with document filenames, titles, and section headers — improves keyword recall for metadata-based queries |
+| `ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER` | `True` | Splits documents by Markdown headers (H1-H6) first, preserving document structure. The character splitter only runs as a secondary pass on oversized sections |
+| `CHUNK_OVERLAP` | `0` | Zero overlap — Chroma Research showed overlap actively hurts retrieval IoU by returning redundant tokens. With Hybrid Search, overlap is unnecessary |
+| `CHUNK_MIN_SIZE_TARGET` | `400` | Merges tiny fragments (<400 chars) with neighbors, preventing low-quality micro-chunks. Works with Markdown Header Splitter to reduce chunk count by up to 90% |
+| `RAG_TOP_K` | `5` | Retrieves 5 candidate chunks, then reranker narrows to best 3 (Top K Reranker default). Good funnel ratio for 4K context models |
 | `ANONYMIZED_TELEMETRY` | `false` | Disables telemetry (optional, recommended for privacy) |
 | `DO_NOT_TRACK` | `true` | Disables tracking (optional, recommended for privacy) |
 
 > **Port mapping:** `3000:8080` — access Open WebUI at `http://<device-ip>:3000`. Change `3000` to any port you prefer.
 
-> **Note:** `ENABLE_RETRIEVAL_QUERY_GENERATION=False` is set as a Docker env var because changing it in the UI uses PersistentConfig which may not stick across restarts. Setting it at the Docker level ensures it persists.
+> **Note:** All RAG/retrieval variables are set at the Docker level so they persist across container recreations. These are `PersistentConfig` variables — once the UI saves a value, it takes precedence over the env var. The env vars serve as correct defaults for fresh installs or config resets.
+
+> **Settings not hardcoded** (match Open WebUI defaults): `CHUNK_SIZE=1000`, `RAG_TEXT_SPLITTER=character`, `RAG_TOP_K_RERANKER=3`, `RAG_RELEVANCE_THRESHOLD=0.0`.
 
 ### Connection
 
@@ -784,23 +802,30 @@ The embedding model determines how well Open WebUI finds the right document chun
 
 **Admin > Settings > Documents:**
 
-These settings control how Open WebUI chunks, embeds, and retrieves uploaded documents. The defaults are too aggressive for small models — these values are tuned for 1.5-4B parameter models on constrained hardware:
+These settings control how Open WebUI chunks, embeds, and retrieves uploaded documents. Most are hardcoded via Docker env vars (see [Docker Setup](#docker-setup)) so they persist across container recreations. The values below are tuned for 1.5-4B parameter models on constrained ARM hardware, backed by [Chroma Research](https://research.trychroma.com/evaluating-chunking) and Open WebUI best practices:
 
-| Setting | Value | Reason |
-|---------|-------|--------|
-| **Chunk Size** | `1500` | Larger chunks give the model more context per retrieval hit |
-| **Chunk Overlap** | `200` | Prevents important information from being split between chunks |
-| **Min Chunk Size** | `200` | Filters out tiny useless fragments |
-| **Top K** | `5` | Retrieves 5 chunks — balances coverage vs context limit |
-| **Full Context Mode** | **OFF** | Injecting the entire document overflows the 4K context window |
-| **Hybrid Search** | **ON** ⚠️ | **Recommended.** Combines semantic + keyword search for much better retrieval |
-| **Enrich Hybrid Search Text** | **ON** | Adds surrounding context to search results |
-| **BM25 Weight** | `0.5` | Equal weighting of keyword (BM25) and semantic search |
-| **Relevance Threshold** | `0` | Let the model see all retrieved chunks rather than filtering too aggressively |
+| Setting | Value | Hardcoded | Reason |
+|---------|-------|-----------|--------|
+| **Text Splitter** | `Default (Character)` | default | RecursiveCharacterTextSplitter outperforms TokenTextSplitter (Chroma Research). Tokenizer-agnostic — no mismatch between tiktoken and BERT tokenizer |
+| **Markdown Header Splitter** | **ON** | `ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER=True` | Splits by H1-H6 headers first, preserving document structure. Character splitter only runs on oversized sections |
+| **Chunk Size** | `1000` | default | ~200-250 tokens. Chroma Research found 200 tokens optimal; 1000 chars is a good character equivalent |
+| **Chunk Overlap** | `0` | `CHUNK_OVERLAP=0` | Overlap actively hurts retrieval IoU (Chroma Research). With Hybrid Search + BM25, overlap is unnecessary |
+| **Min Chunk Size Target** | `400` | `CHUNK_MIN_SIZE_TARGET=400` | Merges tiny fragments with neighbors, reducing chunk count by up to 90% while improving accuracy |
+| **Embedding Model** | `BAAI/bge-small-en-v1.5` | `RAG_EMBEDDING_MODEL` | 62.17 MTEB avg, 33M params, ~150MB RAM (see [Embedding Model](#embedding-model-recommendation)) |
+| **Reranking Model** | `cross-encoder/ms-marco-MiniLM-L-6-v2` | `RAG_RERANKING_MODEL` | 22M params, ~88MB RAM. Re-scores Top K candidates for much better precision. Sigmoid normalization built-in for MS MARCO models |
+| **Top K** | `5` | `RAG_TOP_K=5` | Retrieves 5 chunks, reranker narrows to best 3. Good funnel ratio |
+| **Top K Reranker** | `3` | default | Keeps the 3 highest-scored chunks after reranking |
+| **Full Context Mode** | **OFF** | default | Injecting the entire document overflows the 4K context window |
+| **Hybrid Search** | **ON** | `ENABLE_RAG_HYBRID_SEARCH=True` | Combines semantic (vector) + keyword (BM25) search |
+| **Enrich Hybrid Search Text** | **ON** | `ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=True` | Enriches BM25 index with filenames, titles, and section headers |
+| **BM25 Weight** | `0.3` | `RAG_HYBRID_BM25_WEIGHT=0.3` | 30% keyword / 70% semantic — semantic-leaning since bge-small-en-v1.5 is strong |
+| **Relevance Threshold** | `0` | default | Let the reranker handle filtering. Increase to 0.1-0.2 if low-quality results appear |
 
-> **RAG Template** should be `{{CONTEXT}}` (set in the Documents section above) — the API server builds its own optimized prompt internally.
+> **RAG Template:** Use the **default template** (clear the field) — it includes inline citation support with `[id]` format and comprehensive guidelines. The API server's RAG pipeline works with the default template.
 
-> **Image Compression:** If uploading documents with images, set the compression resolution to `448x448` to match typical VL encoder input sizes.
+> **Image Compression:** Set to `448x448` to match the VL encoder input resolution (DeepSeekOCR-3B).
+
+> **After changing settings:** Click **"Reindex Knowledge Base Vectors"** at the bottom of the Documents page to rebuild all embeddings with the new chunking/embedding configuration.
 
 ### VL / Image Upload Settings
 
