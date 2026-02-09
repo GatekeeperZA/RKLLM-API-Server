@@ -17,6 +17,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Running the Server](#running-the-server)
 - [API Endpoints](#api-endpoints)
 - [Open WebUI Configuration](#open-webui-configuration)
+  - [Document RAG Settings](#document-rag-settings-recommended-for-pdfdocument-upload)
 - [SearXNG Configuration](#searxng-configuration)
 - [RAG Pipeline](#rag-pipeline)
 - [Reasoning Models](#reasoning-models)
@@ -60,7 +61,9 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Error callback state** — detects C library errors and surfaces them as proper HTTP responses
 
 ### RAG (Retrieval-Augmented Generation)
-- **Automatic RAG detection** when Open WebUI injects web search results
+- **Automatic RAG detection** when Open WebUI injects web search or document results
+- **Document/PDF RAG** — works with Open WebUI's document upload and embedding pipeline
+- **Summarization detection** — detects "summarize" queries and adds stronger multi-paragraph instructions
 - **Smart prompt restructuring** — reading comprehension format optimized for small models
 - **4-pass web content cleaning** — strips navigation, boilerplate, cookie banners
 - **Score-based paragraph selection** — jusText-inspired content quality scoring
@@ -75,6 +78,13 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **`reasoning_content`** field in both streaming deltas and non-streaming responses
 - **Streaming state machine** handles tags split across output chunks
 - **Open WebUI integration** — reasoning appears as collapsible thinking blocks
+
+### Open WebUI Meta-Task Shortcuts
+- **Query generation shortcircuit** — Open WebUI asks the model to generate search queries for retrieval; instead of wasting 5s of inference, the server extracts the user's actual question from the chat history and returns it as the query instantly (~0ms)
+- **Title generation shortcircuit** — extracts the first user message as the chat title (~0ms instead of 5-10s inference)
+- **Tag generation shortcircuit** — returns a default tag instantly (~0ms instead of 5-10s inference)
+- **Meta-task thinking disabled** — auto-detects Open WebUI internal tasks (query gen, title gen, tags, autocomplete) and disables `<think>` reasoning to avoid wasting 20+ seconds on trivial tasks
+- **No JSON leakage** — query generation shortcircuit prevents raw JSON from appearing in the chat display
 
 ### Standards Compliance
 - **`stream_options.include_usage`** — streaming token counts per OpenAI spec
@@ -716,6 +726,28 @@ Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}.
 
 > **Important:** The RAG Template must be exactly `{{CONTEXT}}` — no extra text. The API server builds its own optimized reading-comprehension prompt format internally.
 
+### Document RAG Settings (Recommended for PDF/Document Upload)
+
+**Admin > Settings > Documents:**
+
+These settings control how Open WebUI chunks, embeds, and retrieves uploaded documents. The defaults are too aggressive for small models — these values are tuned for 1.5-4B parameter models on constrained hardware:
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| **Chunk Size** | `1500` | Larger chunks give the model more context per retrieval hit |
+| **Chunk Overlap** | `200` | Prevents important information from being split between chunks |
+| **Min Chunk Size** | `200` | Filters out tiny useless fragments |
+| **Top K** | `5` | Retrieves 5 chunks — balances coverage vs context limit |
+| **Full Context Mode** | **OFF** | Injecting the entire document overflows the 4K context window |
+| **Hybrid Search** | **ON** ⚠️ | **Recommended.** Combines semantic + keyword search for much better retrieval |
+| **Enrich Hybrid Search Text** | **ON** | Adds surrounding context to search results |
+| **BM25 Weight** | `0.5` | Equal weighting of keyword (BM25) and semantic search |
+| **Relevance Threshold** | `0` | Let the model see all retrieved chunks rather than filtering too aggressively |
+
+> **RAG Template** should be `{{CONTEXT}}` (set in the Documents section above) — the API server builds its own optimized prompt internally.
+
+> **Image Compression:** If uploading documents with images, set the compression resolution to `448x448` to match typical VL encoder input sizes.
+
 ### Per-Model Capabilities (Required)
 
 **Workspace > Models > Edit > Capabilities** — configure for **each** NPU model:
@@ -767,7 +799,7 @@ docker compose down && docker compose up -d
 
 ## RAG Pipeline
 
-When Open WebUI performs a web search, the results are injected into the system message as `<source>` tags. The server detects this and activates a specialized RAG pipeline:
+When Open WebUI performs a web search or retrieves document chunks, the results are injected into the system message as `<source>` tags (or via a custom RAG template). The server detects this and activates a specialized RAG pipeline:
 
 ### Processing Steps
 
@@ -791,6 +823,7 @@ When Open WebUI performs a web search, the results are injected into the system 
 
    According to the above, {question}. Answer in detail with specific facts and examples
    ```
+8. **Summarization boost** — When the query contains "summarize", "summary", "overview", or "outline", a stronger instruction is appended: *"Cover all major points, sections, and key details. Use multiple paragraphs."*
 
 ### Follow-Up Detection (3 Layers)
 
@@ -1157,7 +1190,7 @@ The V1 code may be useful as a reference if:
 | `v1.0-subprocess-stable` | Last working subprocess version (V1) |
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
-| `main` | Current: ctypes + VL multimodal + full test suites (108/108 pass) |
+| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + document RAG + full test suites (108/108 pass) |
 
 ---
 
