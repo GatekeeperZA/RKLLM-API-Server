@@ -81,6 +81,16 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Request body size limit** (16 MB)
 - **Proper error responses** matching OpenAI error format
 
+### Vision-Language (VL) / Multimodal
+- **Dual-model architecture** — text model (e.g. Qwen3-1.7B) + VL model (e.g. DeepSeekOCR-3B) loaded simultaneously
+- **Automatic image routing** — requests with images route to VL model, text-only to text model
+- **Base64 image support** — accepts `image_url` with `data:image/...;base64,...` format (Open WebUI compatible)
+- **Direct NPU vision encoding** via ctypes binding to `librknnrt.so` (no Python RKNN toolkit needed)
+- **Image preprocessing** — auto square-pad (128,128,128 background) and resize to encoder input size
+- **Multiple VL model support** — auto-detects `.rknn` vision encoder alongside `.rkllm` decoder
+- **Configurable special tokens** — `VL_MODEL_CONFIGS` maps model families to their image tokens
+- **Seamless Open WebUI experience** — paste/upload images in chat, responses stream normally
+
 ---
 
 ## Architecture
@@ -381,6 +391,40 @@ Place each `.rkllm` model in its own subfolder under `~/models/`:
 └── Phi-3-Mini-4K-Instruct/
     └── Phi-3-Mini-4K-Instruct-w8a8-rk3588.rkllm
 ```
+
+### VL (Vision-Language) Model Setup
+
+VL models require **two** files in the same folder: a `.rkllm` decoder and a `.rknn` vision encoder.
+
+```
+~/models/
+├── Qwen3-1.7B/                          # Text-only model
+│   └── Qwen3-1.7B-w8a8-rk3588.rkllm
+└── DeepSeekOCR-3B/                       # VL model (text + vision)
+    ├── DeepSeekOCR-3B-w8a8-rk3588.rkllm  # LLM decoder
+    └── DeepSeekOCR-3B-vision-encoder.rknn # Vision encoder
+```
+
+**How it works:**
+1. The server auto-detects `.rknn` files alongside `.rkllm` files
+2. The folder name is matched against `VL_MODEL_CONFIGS` (supports DeepSeekOCR, Qwen2-VL, Qwen2.5-VL, Qwen3-VL, InternVL3, MiniCPM)
+3. When a chat request includes an image (base64 `image_url`), it auto-routes to the VL model
+4. Text-only requests continue using the text model normally
+
+**Supported VL models** (model folder name must contain):
+| Pattern | Model Family |
+|---------|-------------|
+| `deepseekocr` | DeepSeekOCR (recommended for OCR tasks) |
+| `qwen3-vl` | Qwen3-VL |
+| `qwen2.5-vl` | Qwen2.5-VL |
+| `qwen2-vl` | Qwen2-VL |
+| `internvl3` | InternVL3 |
+| `minicpm` | MiniCPM-V |
+
+**Requirements:**
+- `numpy` and `Pillow` Python packages (installed by `setup.sh`)
+- `librknnrt.so` (RKNN runtime library, usually at `/usr/lib/librknnrt.so`)
+- Sufficient RAM for both models (~5.5 GB for Qwen3-1.7B + DeepSeekOCR-3B)
 
 ### Context Length Detection
 

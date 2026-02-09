@@ -444,9 +444,10 @@ source "$VENV_DIR/bin/activate"
 
 pip install --upgrade pip --quiet
 pip install flask flask-cors gunicorn --quiet
+pip install numpy Pillow --quiet  # VL (vision-language) dependencies
 
 success "Python dependencies installed:"
-pip list --format=columns | grep -iE "flask|gunicorn" | while read -r line; do
+pip list --format=columns | grep -iE "flask|gunicorn|numpy|pillow" | while read -r line; do
     echo "    $line"
 done
 

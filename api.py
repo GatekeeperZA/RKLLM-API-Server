@@ -49,11 +49,21 @@ import re
 import json
 import uuid
 import hashlib
+import base64
+import io
+import struct as pystruct
 from collections import OrderedDict
 from threading import Lock, RLock, Thread, Event
 import atexit
 import sys
 import signal
+
+try:
+    import numpy as np
+    from PIL import Image
+    _VL_DEPS_AVAILABLE = True
+except ImportError:
+    _VL_DEPS_AVAILABLE = False
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
@@ -77,6 +87,65 @@ if not RKLLM_LIB_PATH:
             break
     if not RKLLM_LIB_PATH:
         RKLLM_LIB_PATH = 'librkllmrt.so'  # Let ctypes search LD_LIBRARY_PATH
+
+# Path to rknn runtime library (for vision encoder) — auto-detected
+RKNN_LIB_PATH = os.environ.get('RKNN_LIB_PATH', '')
+if not RKNN_LIB_PATH:
+    for _candidate in ['/usr/lib/librknnrt.so', 'lib/librknnrt.so',
+                        '/usr/local/lib/librknnrt.so', 'librknnrt.so']:
+        if os.path.exists(_candidate):
+            RKNN_LIB_PATH = _candidate
+            break
+    if not RKNN_LIB_PATH:
+        RKNN_LIB_PATH = 'librknnrt.so'
+
+# VL model configuration: maps model folder name patterns to their special tokens.
+# These tokens tell rkllm where image embeddings go in the prompt.
+# Key: substring matched against the model folder name (lowercase).
+VL_MODEL_CONFIGS = {
+    'deepseekocr': {
+        'img_start': '',
+        'img_end': '',
+        'img_content': '<\uff5c\u2581pad\u2581\uff5c>',  # <\uff5c\u2581pad\u2581\uff5c>
+        'base_domain_id': 1,
+        'image_tag': '<image>',
+    },
+    'qwen3-vl': {
+        'img_start': '<|vision_start|>',
+        'img_end': '<|vision_end|>',
+        'img_content': '<|image_pad|>',
+        'base_domain_id': 1,
+        'image_tag': '<image>',
+    },
+    'qwen2.5-vl': {
+        'img_start': '<|vision_start|>',
+        'img_end': '<|vision_end|>',
+        'img_content': '<|image_pad|>',
+        'base_domain_id': 1,
+        'image_tag': '<image>',
+    },
+    'qwen2-vl': {
+        'img_start': '<|vision_start|>',
+        'img_end': '<|vision_end|>',
+        'img_content': '<|image_pad|>',
+        'base_domain_id': 1,
+        'image_tag': '<image>',
+    },
+    'internvl3': {
+        'img_start': '<img>',
+        'img_end': '</img>',
+        'img_content': '<IMG_CONTEXT>',
+        'base_domain_id': 1,
+        'image_tag': '<image>',
+    },
+    'minicpm': {
+        'img_start': '<image>',
+        'img_end': '</image>',
+        'img_content': 'slice_placeholder',
+        'base_domain_id': 1,
+        'image_tag': '<image>',
+    },
+}
 
 # Timeouts
 GENERATION_TIMEOUT = 600
@@ -245,14 +314,39 @@ if os.path.exists(MODELS_ROOT):
 
         context_len = detect_context_length(rkllm_file, default=CONTEXT_LENGTH_DEFAULT)
 
+        # Check for vision encoder (.rknn) in same folder -> VL model
+        rknn_files = sorted(f for f in files if f.endswith(".rknn"))
+        vision_encoder_path = None
+        vl_config = None
+        if rknn_files:
+            vision_encoder_path = os.path.join(root, rknn_files[0])
+            if len(rknn_files) > 1:
+                logger.warning(f"Multiple .rknn files in {root}: {rknn_files} -- using '{rknn_files[0]}'")
+            # Match VL config by folder name
+            for vl_key, vl_cfg in VL_MODEL_CONFIGS.items():
+                if vl_key in model_id:
+                    vl_config = vl_cfg
+                    break
+            if vl_config is None:
+                logger.warning(f"VL model {model_id}: .rknn found but no VL_MODEL_CONFIGS match -- "
+                              f"treating as text-only (add config for '{model_id}' to VL_MODEL_CONFIGS)")
+                vision_encoder_path = None
+
         config = {
             "path": rkllm_file,
             "context_length": context_len,
             "max_tokens": MAX_TOKENS_DEFAULT,
         }
 
+        if vision_encoder_path and vl_config:
+            config["vision_encoder_path"] = vision_encoder_path
+            config["vl_config"] = vl_config
+            logger.info(f"Detected VL: {model_id} (context={context_len}, "
+                       f"encoder={os.path.basename(vision_encoder_path)})")
+        else:
+            logger.info(f"Detected: {model_id} (context={context_len})")
+
         MODELS[model_id] = config
-        logger.info(f"Detected: {model_id} (context={context_len})")
 
 # =============================================================================
 # ALIASES
@@ -543,6 +637,333 @@ def _rkllm_callback_impl(result_ptr, userdata, state):
 _rkllm_callback = callback_type(_rkllm_callback_impl)
 
 
+# =============================================================================
+# RKNN VISION ENCODER (for VL models)
+# =============================================================================
+# Mirrors the C++ image_enc.cc from airockchip/rknn-llm multimodal_model_demo.
+# Uses librknnrt.so via ctypes to run the .rknn vision encoder on the NPU.
+#
+# Flow: image (uint8 RGB HWC) -> rknn_inputs_set -> rknn_run -> rknn_outputs_get
+#       -> float32 embedding array -> feed to rkllm via RKLLM_INPUT_MULTIMODAL
+
+# RKNN constants (from rknn_api.h)
+RKNN_SUCC = 0
+RKNN_TENSOR_UINT8 = 2
+RKNN_TENSOR_FLOAT32 = 5
+RKNN_TENSOR_NHWC = 0
+RKNN_TENSOR_NCHW = 1
+RKNN_NPU_CORE_AUTO = 0x08
+RKNN_NPU_CORE_0_1_2 = 0x07    # All 3 NPU cores
+RKNN_QUERY_IN_OUT_NUM = 0
+RKNN_QUERY_INPUT_ATTR = 1
+RKNN_QUERY_OUTPUT_ATTR = 2
+
+
+class RKNNInputOutputNum(ctypes.Structure):
+    _fields_ = [
+        ("n_input", ctypes.c_uint32),
+        ("n_output", ctypes.c_uint32),
+    ]
+
+
+class RKNNTensorAttr(ctypes.Structure):
+    _fields_ = [
+        ("index", ctypes.c_uint32),
+        ("n_dims", ctypes.c_uint32),
+        ("dims", ctypes.c_uint32 * 16),
+        ("name", ctypes.c_char * 256),
+        ("n_elems", ctypes.c_uint32),
+        ("size", ctypes.c_uint32),
+        ("fmt", ctypes.c_int),
+        ("type", ctypes.c_int),
+        ("qnt_type", ctypes.c_int),
+        ("fl", ctypes.c_int8),
+        ("zp", ctypes.c_int32),
+        ("scale", ctypes.c_float),
+        ("w_stride", ctypes.c_uint32),
+        ("size_with_stride", ctypes.c_uint32),
+        ("pass_through", ctypes.c_uint8),
+        ("h_stride", ctypes.c_uint32),
+    ]
+
+
+class RKNNInput(ctypes.Structure):
+    _fields_ = [
+        ("index", ctypes.c_uint32),
+        ("buf", ctypes.c_void_p),
+        ("size", ctypes.c_uint32),
+        ("pass_through", ctypes.c_uint8),
+        ("type", ctypes.c_int),
+        ("fmt", ctypes.c_int),
+    ]
+
+
+class RKNNOutput(ctypes.Structure):
+    _fields_ = [
+        ("want_float", ctypes.c_uint8),
+        ("is_prealloc", ctypes.c_uint8),
+        ("index", ctypes.c_uint32),
+        ("buf", ctypes.c_void_p),
+        ("size", ctypes.c_uint32),
+    ]
+
+
+class RKNNVisionEncoder:
+    """Wraps librknnrt.so to run a .rknn vision encoder model on the NPU."""
+
+    def __init__(self, lib_path):
+        self.lib = ctypes.CDLL(lib_path)
+        self._setup_functions()
+        self.ctx = ctypes.c_uint64(0)
+        self._loaded = False
+        self.model_width = 0
+        self.model_height = 0
+        self.model_channel = 0
+        self.model_image_token = 0
+        self.model_embed_size = 0
+        self.n_output = 0
+
+    def _setup_functions(self):
+        self.lib.rknn_init.argtypes = [
+            ctypes.POINTER(ctypes.c_uint64), ctypes.c_void_p,
+            ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+        ]
+        self.lib.rknn_init.restype = ctypes.c_int
+        self.lib.rknn_set_core_mask.argtypes = [ctypes.c_uint64, ctypes.c_int]
+        self.lib.rknn_set_core_mask.restype = ctypes.c_int
+        self.lib.rknn_query.argtypes = [
+            ctypes.c_uint64, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
+        ]
+        self.lib.rknn_query.restype = ctypes.c_int
+        self.lib.rknn_inputs_set.argtypes = [
+            ctypes.c_uint64, ctypes.c_uint32, ctypes.POINTER(RKNNInput),
+        ]
+        self.lib.rknn_inputs_set.restype = ctypes.c_int
+        self.lib.rknn_run.argtypes = [ctypes.c_uint64, ctypes.c_void_p]
+        self.lib.rknn_run.restype = ctypes.c_int
+        self.lib.rknn_outputs_get.argtypes = [
+            ctypes.c_uint64, ctypes.c_uint32,
+            ctypes.POINTER(RKNNOutput), ctypes.c_void_p,
+        ]
+        self.lib.rknn_outputs_get.restype = ctypes.c_int
+        self.lib.rknn_outputs_release.argtypes = [
+            ctypes.c_uint64, ctypes.c_uint32, ctypes.POINTER(RKNNOutput),
+        ]
+        self.lib.rknn_outputs_release.restype = ctypes.c_int
+        self.lib.rknn_destroy.argtypes = [ctypes.c_uint64]
+        self.lib.rknn_destroy.restype = ctypes.c_int
+
+    def init_model(self, model_path, core_num=3):
+        """Load a .rknn vision encoder model. Returns True on success."""
+        self.ctx = ctypes.c_uint64(0)
+        ret = self.lib.rknn_init(
+            ctypes.byref(self.ctx), ctypes.c_char_p(model_path.encode('utf-8')),
+            0, 0, None,
+        )
+        if ret != RKNN_SUCC:
+            logger.error(f"rknn_init failed: ret={ret} model={model_path}")
+            return False
+
+        mask = RKNN_NPU_CORE_0_1_2 if core_num >= 3 else RKNN_NPU_CORE_AUTO
+        self.lib.rknn_set_core_mask(self.ctx, mask)
+
+        io_num = RKNNInputOutputNum()
+        ret = self.lib.rknn_query(self.ctx, RKNN_QUERY_IN_OUT_NUM,
+                                  ctypes.byref(io_num), ctypes.sizeof(io_num))
+        if ret != RKNN_SUCC:
+            logger.error(f"rknn_query IN_OUT_NUM failed: ret={ret}")
+            self.destroy()
+            return False
+        self.n_output = io_num.n_output
+        logger.info(f"Vision encoder: {io_num.n_input} inputs, {io_num.n_output} outputs")
+
+        input_attr = RKNNTensorAttr()
+        ctypes.memset(ctypes.byref(input_attr), 0, ctypes.sizeof(input_attr))
+        input_attr.index = 0
+        ret = self.lib.rknn_query(self.ctx, RKNN_QUERY_INPUT_ATTR,
+                                  ctypes.byref(input_attr), ctypes.sizeof(input_attr))
+        if ret != RKNN_SUCC:
+            logger.error(f"rknn_query INPUT_ATTR failed: ret={ret}")
+            self.destroy()
+            return False
+
+        if input_attr.fmt == RKNN_TENSOR_NCHW:
+            self.model_channel = input_attr.dims[1]
+            self.model_height = input_attr.dims[2]
+            self.model_width = input_attr.dims[3]
+        else:
+            self.model_height = input_attr.dims[1]
+            self.model_width = input_attr.dims[2]
+            self.model_channel = input_attr.dims[3]
+        logger.info(f"Vision encoder input: {self.model_width}x{self.model_height}x{self.model_channel}")
+
+        output_attr = RKNNTensorAttr()
+        ctypes.memset(ctypes.byref(output_attr), 0, ctypes.sizeof(output_attr))
+        output_attr.index = 0
+        ret = self.lib.rknn_query(self.ctx, RKNN_QUERY_OUTPUT_ATTR,
+                                  ctypes.byref(output_attr), ctypes.sizeof(output_attr))
+        if ret != RKNN_SUCC:
+            logger.error(f"rknn_query OUTPUT_ATTR failed: ret={ret}")
+            self.destroy()
+            return False
+
+        for i in range(4):
+            if output_attr.dims[i] > 1:
+                self.model_image_token = output_attr.dims[i]
+                self.model_embed_size = output_attr.dims[i + 1]
+                break
+        logger.info(f"Vision encoder output: image_token={self.model_image_token}, "
+                    f"embed_size={self.model_embed_size}, n_output={self.n_output}")
+
+        self._loaded = True
+        return True
+
+    def run(self, image_data_uint8):
+        """Run vision encoder. Returns numpy float32 array of embeddings, or None."""
+        if not self._loaded:
+            return None
+
+        rknn_input = RKNNInput()
+        ctypes.memset(ctypes.byref(rknn_input), 0, ctypes.sizeof(rknn_input))
+        rknn_input.index = 0
+        rknn_input.type = RKNN_TENSOR_UINT8
+        rknn_input.fmt = RKNN_TENSOR_NHWC
+        rknn_input.size = self.model_width * self.model_height * self.model_channel
+        rknn_input.buf = image_data_uint8.ctypes.data_as(ctypes.c_void_p)
+
+        ret = self.lib.rknn_inputs_set(self.ctx, 1, ctypes.byref(rknn_input))
+        if ret != RKNN_SUCC:
+            logger.error(f"rknn_inputs_set failed: ret={ret}")
+            return None
+
+        ret = self.lib.rknn_run(self.ctx, None)
+        if ret != RKNN_SUCC:
+            logger.error(f"rknn_run failed: ret={ret}")
+            return None
+
+        outputs = (RKNNOutput * self.n_output)()
+        for j in range(self.n_output):
+            ctypes.memset(ctypes.byref(outputs[j]), 0, ctypes.sizeof(RKNNOutput))
+            outputs[j].want_float = 1
+
+        ret = self.lib.rknn_outputs_get(self.ctx, self.n_output, outputs, None)
+        if ret != RKNN_SUCC:
+            logger.error(f"rknn_outputs_get failed: ret={ret}")
+            return None
+
+        embed_len = self.model_image_token * self.model_embed_size * self.n_output
+        result = np.zeros(embed_len, dtype=np.float32)
+
+        if self.n_output == 1:
+            ctypes.memmove(result.ctypes.data, outputs[0].buf, outputs[0].size)
+        else:
+            for i in range(self.model_image_token):
+                for j in range(self.n_output):
+                    offset = (i * self.n_output * self.model_embed_size +
+                              j * self.model_embed_size)
+                    src = ctypes.cast(outputs[j].buf, ctypes.POINTER(ctypes.c_float))
+                    src_offset = i * self.model_embed_size
+                    ctypes.memmove(
+                        ctypes.cast(result.ctypes.data + offset * 4, ctypes.c_void_p),
+                        ctypes.cast(ctypes.addressof(src.contents) + src_offset * 4, ctypes.c_void_p),
+                        self.model_embed_size * 4,
+                    )
+
+        self.lib.rknn_outputs_release(self.ctx, self.n_output, outputs)
+        return result
+
+    def destroy(self):
+        if self._loaded:
+            try:
+                self.lib.rknn_destroy(self.ctx)
+            except Exception:
+                pass
+            self._loaded = False
+            self.ctx = ctypes.c_uint64(0)
+
+    @property
+    def is_loaded(self):
+        return self._loaded
+
+
+# =============================================================================
+# IMAGE HELPER FUNCTIONS
+# =============================================================================
+
+
+def _extract_images_from_messages(messages):
+    """Extract image data from OpenAI-format multimodal messages.
+
+    Returns (list_of_image_bytes, text_prompt).
+    Only processes the LAST user message that contains images.
+    """
+    images = []
+    text_parts = []
+
+    for msg in reversed(messages):
+        if msg.get('role') != 'user':
+            continue
+        content = msg.get('content')
+        if not isinstance(content, list):
+            continue
+
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get('type') == 'image_url':
+                url = part.get('image_url', {}).get('url', '')
+                if url.startswith('data:'):
+                    try:
+                        _, b64data = url.split(',', 1)
+                        img_bytes = base64.b64decode(b64data)
+                        images.append(img_bytes)
+                    except Exception as e:
+                        logger.warning(f"Failed to decode base64 image: {e}")
+                elif url.startswith('http'):
+                    logger.warning(f"URL-based images not supported (only base64): {url[:80]}...")
+            elif part.get('type') == 'text':
+                text = part.get('text', '').strip()
+                if text:
+                    text_parts.append(text)
+
+        if images:
+            break
+
+    text_prompt = ' '.join(text_parts) if text_parts else "Describe this image."
+    return images, text_prompt
+
+
+def _has_images_in_messages(messages):
+    """Quick check: do any messages contain image content?"""
+    for msg in messages:
+        content = msg.get('content')
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'image_url':
+                    return True
+    return False
+
+
+def _preprocess_image(image_bytes, target_width, target_height):
+    """Preprocess image for vision encoder: decode, RGB, expand-to-square, resize."""
+    if not _VL_DEPS_AVAILABLE:
+        raise RuntimeError("VL dependencies not available (numpy, Pillow)")
+
+    img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+
+    w, h = img.size
+    if w != h:
+        size = max(w, h)
+        square = Image.new('RGB', (size, size), (128, 128, 128))
+        paste_x = (size - w) // 2
+        paste_y = (size - h) // 2
+        square.paste(img, (paste_x, paste_y))
+        img = square
+
+    img = img.resize((target_width, target_height), Image.LANCZOS)
+    return np.array(img, dtype=np.uint8)
+
+
 class RKLLMWrapper:
     """Wraps librkllmrt.so for direct ctypes access to the rkllm C API.
 
@@ -602,8 +1023,13 @@ class RKLLMWrapper:
         except AttributeError:
             pass  # May not exist in all library versions
 
-    def init_model(self, model_path, ctx_len, max_tokens):
-        """Initialize a model.  Returns True on success."""
+    def init_model(self, model_path, ctx_len, max_tokens, vl_config=None):
+        """Initialize a model.  Returns True on success.
+
+        Args:
+            vl_config: if provided, dict with img_start/img_end/img_content/base_domain_id
+                       for VL model initialization.
+        """
         param = RKLLMParam()
         param.model_path = model_path.encode('utf-8')
         param.max_context_len = ctx_len
@@ -620,10 +1046,16 @@ class RKLLMWrapper:
         param.mirostat_eta = 0.1
         param.skip_special_token = True
         param.is_async = False
-        param.img_start = b""
-        param.img_end = b""
-        param.img_content = b""
-        param.extend_param.base_domain_id = 0
+        if vl_config:
+            param.img_start = vl_config.get('img_start', '').encode('utf-8')
+            param.img_end = vl_config.get('img_end', '').encode('utf-8')
+            param.img_content = vl_config.get('img_content', '').encode('utf-8')
+            param.extend_param.base_domain_id = vl_config.get('base_domain_id', 1)
+        else:
+            param.img_start = b""
+            param.img_end = b""
+            param.img_content = b""
+            param.extend_param.base_domain_id = 0
         param.extend_param.embed_flash = 1
         param.extend_param.n_batch = 1
         param.extend_param.use_cross_attn = 0
@@ -654,6 +1086,42 @@ class RKLLMWrapper:
         rkllm_input.enable_thinking = ctypes.c_bool(enable_thinking)
         rkllm_input.input_type = RKLLM_INPUT_PROMPT
         rkllm_input.input_data.prompt_input = ctypes.c_char_p(prompt.encode('utf-8'))
+
+        infer_param = RKLLMInferParam()
+        ctypes.memset(ctypes.byref(infer_param), 0, ctypes.sizeof(RKLLMInferParam))
+        infer_param.mode = RKLLM_INFER_GENERATE
+        infer_param.keep_history = keep_history
+
+        return self.lib.rkllm_run(
+            self.handle,
+            ctypes.byref(rkllm_input),
+            ctypes.byref(infer_param),
+            None,
+        )
+
+    def run_multimodal(self, prompt, image_embed, n_image_tokens, n_image,
+                        image_width, image_height, role="user", keep_history=0):
+        """Run multimodal inference (BLOCKING) with image embeddings.
+
+        Returns the rkllm_run return code (0 = success).
+        """
+        if not self._model_loaded:
+            return -1
+
+        # Keep reference to prevent GC during rkllm_run
+        embed_ptr = image_embed.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        rkllm_input = RKLLMInput()
+        ctypes.memset(ctypes.byref(rkllm_input), 0, ctypes.sizeof(RKLLMInput))
+        rkllm_input.role = role.encode('utf-8')
+        rkllm_input.enable_thinking = ctypes.c_bool(False)
+        rkllm_input.input_type = RKLLM_INPUT_MULTIMODAL
+        rkllm_input.input_data.multimodal_input.prompt = prompt.encode('utf-8')
+        rkllm_input.input_data.multimodal_input.image_embed = embed_ptr
+        rkllm_input.input_data.multimodal_input.n_image_tokens = n_image_tokens
+        rkllm_input.input_data.multimodal_input.n_image = n_image
+        rkllm_input.input_data.multimodal_input.image_width = image_width
+        rkllm_input.input_data.multimodal_input.image_height = image_height
 
         infer_param = RKLLMInferParam()
         ctypes.memset(ctypes.byref(infer_param), 0, ctypes.sizeof(RKLLMInferParam))
@@ -727,6 +1195,11 @@ _rkllm_wrapper = None     # RKLLMWrapper instance (singleton — one NPU)
 _worker_thread = None      # Current inference worker thread
 CURRENT_MODEL = None
 PROCESS_LOCK = RLock()
+
+# VL model state (separate from text model — dual model architecture)
+_vision_encoder = None       # RKNNVisionEncoder instance (persistent)
+_vl_rkllm_wrapper = None     # RKLLMWrapper for VL LLM decoder
+VL_CURRENT_MODEL = None      # Name of loaded VL model (None = not loaded)
 
 SHUTDOWN_EVENT = Event()
 GENERATION_COMPLETE = Event()
@@ -1588,6 +2061,99 @@ def unload_current(reason="requested"):
 
 
 # =============================================================================
+# VL MODEL MANAGEMENT
+# =============================================================================
+
+
+def _find_vl_model():
+    """Find the first available VL model. Returns (name, config) or (None, None)."""
+    for name, config in MODELS.items():
+        if 'vl_config' in config and 'vision_encoder_path' in config:
+            return name, config
+    return None, None
+
+
+def _load_vl_model(vl_name, vl_config):
+    """Load VL model (vision encoder + LLM decoder). Returns True on success."""
+    global _vision_encoder, _vl_rkllm_wrapper, VL_CURRENT_MODEL
+
+    if not _VL_DEPS_AVAILABLE:
+        logger.error("VL dependencies not available -- install numpy and Pillow")
+        return False
+
+    with PROCESS_LOCK:
+        if (VL_CURRENT_MODEL == vl_name
+                and _vl_rkllm_wrapper and _vl_rkllm_wrapper.is_loaded
+                and _vision_encoder and _vision_encoder.is_loaded):
+            logger.info(f"REUSING loaded VL model {vl_name}")
+            return True
+
+        load_start = time.time()
+        logger.info(f"Loading VL model {vl_name}...")
+
+        if _vision_encoder is None or not _vision_encoder.is_loaded:
+            try:
+                _vision_encoder = RKNNVisionEncoder(RKNN_LIB_PATH)
+                encoder_path = vl_config['vision_encoder_path']
+                if not _vision_encoder.init_model(encoder_path):
+                    logger.error(f"Vision encoder failed to load: {encoder_path}")
+                    _vision_encoder = None
+                    return False
+                logger.info(f"Vision encoder loaded: {os.path.basename(encoder_path)} "
+                           f"({_vision_encoder.model_width}x{_vision_encoder.model_height}, "
+                           f"tokens={_vision_encoder.model_image_token}, "
+                           f"embed={_vision_encoder.model_embed_size})")
+            except OSError as e:
+                logger.error(f"Failed to load RKNN library from {RKNN_LIB_PATH}: {e}")
+                _vision_encoder = None
+                return False
+
+        if VL_CURRENT_MODEL and VL_CURRENT_MODEL != vl_name:
+            if _vl_rkllm_wrapper and _vl_rkllm_wrapper.is_loaded:
+                logger.info(f"VL model switch: unloading {VL_CURRENT_MODEL}")
+                _vl_rkllm_wrapper.destroy()
+
+        if _vl_rkllm_wrapper is None:
+            try:
+                _vl_rkllm_wrapper = RKLLMWrapper(RKLLM_LIB_PATH)
+            except OSError as e:
+                logger.error(f"Failed to load rkllm library for VL: {e}")
+                return False
+
+        if not _vl_rkllm_wrapper.is_loaded:
+            model_path = vl_config['path']
+            ctx_len = vl_config.get('context_length', CONTEXT_LENGTH_DEFAULT)
+            max_tokens = vl_config.get('max_tokens', MAX_TOKENS_DEFAULT)
+            vl_cfg = vl_config.get('vl_config')
+            if not _vl_rkllm_wrapper.init_model(model_path, ctx_len, max_tokens, vl_config=vl_cfg):
+                logger.error(f"VL model {vl_name} failed to initialize")
+                return False
+
+        elapsed = time.time() - load_start
+        VL_CURRENT_MODEL = vl_name
+        logger.info(f"VL model {vl_name} LOADED in {elapsed:.1f}s")
+        return True
+
+
+def _unload_vl_model(reason="requested"):
+    """Unload VL model resources."""
+    global _vision_encoder, _vl_rkllm_wrapper, VL_CURRENT_MODEL
+
+    with PROCESS_LOCK:
+        if _vl_rkllm_wrapper and _vl_rkllm_wrapper.is_loaded:
+            logger.info(f"Unloading VL model {VL_CURRENT_MODEL} -- reason: {reason}")
+            _vl_rkllm_wrapper.abort()
+            _vl_rkllm_wrapper.destroy()
+
+        if _vision_encoder and _vision_encoder.is_loaded:
+            _vision_encoder.destroy()
+            _vision_encoder = None
+
+        VL_CURRENT_MODEL = None
+        logger.info("VL model unloaded")
+
+
+# =============================================================================
 # MODEL MONITOR
 # =============================================================================
 
@@ -1623,7 +2189,7 @@ _monitor_thread.start()
 
 
 def shutdown():
-    """Clean shutdown - destroy model, stop monitor."""
+    """Clean shutdown - destroy text model, VL model, stop monitor."""
     logger.info("Shutting down RKLLM API...")
     SHUTDOWN_EVENT.set()
     ABORT_EVENT.set()
@@ -1631,6 +2197,10 @@ def shutdown():
         unload_current("shutdown")
     except Exception as e:
         logger.error(f"Error during shutdown unload: {e}")
+    try:
+        _unload_vl_model("shutdown")
+    except Exception as e:
+        logger.error(f"Error during VL shutdown unload: {e}")
     logger.info("Shutdown complete")
 
 
@@ -1851,10 +2421,18 @@ def unload_model():
 def health():
     """Health check endpoint."""
     active = get_active_request_info()
+    vl_info = None
+    if VL_CURRENT_MODEL:
+        vl_info = {
+            "model": VL_CURRENT_MODEL,
+            "encoder_loaded": _vision_encoder is not None and _vision_encoder.is_loaded,
+            "llm_loaded": _vl_rkllm_wrapper is not None and _vl_rkllm_wrapper.is_loaded,
+        }
     return jsonify({
         "status": "ok",
         "current_model": CURRENT_MODEL,
         "model_loaded": is_model_loaded(),
+        "vl_model": vl_info,
         "active_request": active,
         "models_available": len(MODELS),
     })
@@ -1879,6 +2457,20 @@ def chat_completions():
 
     # Validate message elements are dicts (rejects e.g. messages: ["hello"])
     messages = [m for m in messages if isinstance(m, dict)]
+
+    # === VL AUTO-ROUTING: Check for images BEFORE normalizing content ===
+    _vl_has_images = _has_images_in_messages(messages)
+    _vl_images = None
+    _vl_text_prompt = None
+    if _vl_has_images:
+        _vl_images, _vl_text_prompt = _extract_images_from_messages(messages)
+        if not _vl_images:
+            _vl_has_images = False
+            logger.debug(f"[{request_id}] Image detection: content had image_url parts "
+                        f"but no decodable images found")
+        else:
+            logger.info(f"[{request_id}] VL AUTO-ROUTE: {len(_vl_images)} image(s) detected, "
+                       f"text='{_vl_text_prompt[:80]}...' -- routing to VL model")
 
     # Normalize message content: OpenAI allows content to be a list of
     # multimodal parts (e.g., [{"type":"text","text":"..."}]).  Convert to
@@ -1944,6 +2536,82 @@ def chat_completions():
     created = int(time.time())
 
     try:
+        # =================================================================
+        # VL PATH -- image detected, route to vision-language model
+        # =================================================================
+        if _vl_has_images and _vl_images:
+            vl_name, vl_config = _find_vl_model()
+            if vl_name is None:
+                end_request(request_id)
+                return make_error_response(
+                    "Image detected but no VL model available. "
+                    "Place a VL model (.rkllm + .rknn) in ~/models/", 500)
+
+            logger.info(f"[{request_id}] VL path: loading {vl_name}")
+            if not _load_vl_model(vl_name, vl_config):
+                end_request(request_id)
+                return make_error_response(f"Failed to load VL model '{vl_name}'", 500)
+            update_request_activity()
+
+            try:
+                image_np = _preprocess_image(
+                    _vl_images[0],
+                    _vision_encoder.model_width,
+                    _vision_encoder.model_height,
+                )
+            except Exception as e:
+                logger.error(f"[{request_id}] Image preprocessing failed: {e}")
+                end_request(request_id)
+                return make_error_response(f"Image preprocessing failed: {e}", 400)
+            update_request_activity()
+
+            logger.info(f"[{request_id}] Running vision encoder...")
+            with PROCESS_LOCK:
+                image_embed = _vision_encoder.run(image_np)
+            if image_embed is None:
+                end_request(request_id)
+                return make_error_response("Vision encoder inference failed", 500)
+            update_request_activity()
+            logger.info(f"[{request_id}] Vision encoder done: "
+                       f"{len(image_embed)} floats "
+                       f"({_vision_encoder.model_image_token} tokens x "
+                       f"{_vision_encoder.model_embed_size} embed)")
+
+            vl_image_tag = vl_config.get('vl_config', {}).get('image_tag', '<image>')
+            vl_prompt = f"{vl_image_tag}{_vl_text_prompt}"
+
+            vl_data = {
+                'image_embed': image_embed,
+                'n_image_tokens': _vision_encoder.model_image_token,
+                'n_image': 1,
+                'image_width': _vision_encoder.model_width,
+                'image_height': _vision_encoder.model_height,
+            }
+
+            if stream:
+                return Response(
+                    stream_with_context(_generate_stream(
+                        vl_prompt, request_id, name, created,
+                        keep_history=0, enable_thinking=False,
+                        include_usage=include_usage, messages=messages,
+                        is_rag=False, rag_cache_info=None,
+                        kv_is_reset=True, vl_data=vl_data,
+                    )),
+                    mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+                             'Connection': 'keep-alive'},
+                )
+            else:
+                return _generate_complete(
+                    vl_prompt, request_id, name, created,
+                    keep_history=0, enable_thinking=False,
+                    is_rag=False, messages=messages,
+                    rag_cache_info=None, kv_is_reset=True, vl_data=vl_data,
+                )
+
+        # =================================================================
+        # TEXT PATH -- normal text-only request (existing logic unchanged)
+        # =================================================================
         # Load model
         logger.info(f"Loading model {name} for request {request_id}")
         if not load_model(name, config):
@@ -2094,12 +2762,16 @@ def _generate_stream(prompt, request_id, model_name, created,
                      keep_history=1, enable_thinking=True,
                      include_usage=False, messages=None,
                      is_rag=False, rag_cache_info=None,
-                     kv_is_reset=False):
+                     kv_is_reset=False, vl_data=None):
     """Generator that yields SSE chunks from rkllm token callback queue."""
     global _worker_thread
 
+    _is_vl = vl_data is not None
+    _active_wrapper = _vl_rkllm_wrapper if _is_vl else _rkllm_wrapper
+
     logger.info(f"[{request_id}] Starting STREAMING generation "
-                f"(rag={is_rag}, keep_history={keep_history}, thinking={enable_thinking})")
+                f"(rag={is_rag}, keep_history={keep_history}, thinking={enable_thinking}"
+                f"{', VL=True' if _is_vl else ''})")
 
     # Clear any stale items from the token queue
     while not _token_queue.empty():
@@ -2115,9 +2787,17 @@ def _generate_stream(prompt, request_id, model_name, created,
     # Start rkllm_run in a worker thread (it blocks until generation completes)
     def _worker():
         try:
-            ret = _rkllm_wrapper.run(prompt, role="user",
-                                     keep_history=keep_history,
-                                     enable_thinking=enable_thinking)
+            if _is_vl:
+                ret = _active_wrapper.run_multimodal(
+                    prompt, vl_data['image_embed'],
+                    vl_data['n_image_tokens'], vl_data['n_image'],
+                    vl_data['image_width'], vl_data['image_height'],
+                    role="user", keep_history=keep_history,
+                )
+            else:
+                ret = _active_wrapper.run(prompt, role="user",
+                                          keep_history=keep_history,
+                                          enable_thinking=enable_thinking)
             if ret != 0:
                 logger.error(f"[{request_id}] rkllm_run returned error code {ret}")
                 _token_queue.put(("error", f"rkllm_run returned {ret}"))
@@ -2148,13 +2828,13 @@ def _generate_stream(prompt, request_id, model_name, created,
             # Check abort
             if ABORT_EVENT.is_set():
                 logger.info(f"[{request_id}] Abort signal received")
-                _rkllm_wrapper.abort()
+                _active_wrapper.abort()
                 break
 
             # Check overall timeout
             if time.time() - generation_start > GENERATION_TIMEOUT:
                 logger.warning(f"[{request_id}] Generation timeout ({GENERATION_TIMEOUT}s)")
-                _rkllm_wrapper.abort()
+                _active_wrapper.abort()
                 break
 
             # Determine queue read timeout
@@ -2169,7 +2849,7 @@ def _generate_stream(prompt, request_id, model_name, created,
             except queue.Empty:
                 label = "first token" if not got_first_token else "silence"
                 logger.warning(f"[{request_id}] Timeout waiting for {label}")
-                _rkllm_wrapper.abort()
+                _active_wrapper.abort()
                 break
 
             if msg_type == "token":
@@ -2272,8 +2952,8 @@ def _generate_stream(prompt, request_id, model_name, created,
 
     except GeneratorExit:
         logger.warning(f"[{request_id}] Client DISCONNECTED / stopped")
-        if _rkllm_wrapper:
-            _rkllm_wrapper.abort()
+        if _active_wrapper:
+            _active_wrapper.abort()
     except Exception as e:
         logger.error(f"[{request_id}] Stream error: {e}", exc_info=True)
         try:
@@ -2287,8 +2967,8 @@ def _generate_stream(prompt, request_id, model_name, created,
         # Ensure worker thread is cleaned up
         with PROCESS_LOCK:
             if _worker_thread and _worker_thread.is_alive():
-                if _rkllm_wrapper:
-                    _rkllm_wrapper.abort()
+                if _active_wrapper:
+                    _active_wrapper.abort()
                 _worker_thread.join(timeout=5)
                 _worker_thread = None
         GENERATION_COMPLETE.set()
@@ -2307,12 +2987,16 @@ def _generate_stream(prompt, request_id, model_name, created,
 def _generate_complete(prompt, request_id, model_name, created,
                        keep_history=1, enable_thinking=True,
                        is_rag=False, messages=None, rag_cache_info=None,
-                       kv_is_reset=False):
+                       kv_is_reset=False, vl_data=None):
     """Collect all output and return a non-streaming JSON response."""
     global _worker_thread
 
+    _is_vl = vl_data is not None
+    _active_wrapper = _vl_rkllm_wrapper if _is_vl else _rkllm_wrapper
+
     logger.info(f"[{request_id}] Starting NON-STREAMING generation "
-                f"(rag={is_rag}, keep_history={keep_history}, thinking={enable_thinking})")
+                f"(rag={is_rag}, keep_history={keep_history}, thinking={enable_thinking}"
+                f"{', VL=True' if _is_vl else ''})")
 
     # Clear stale queue items
     while not _token_queue.empty():
@@ -2324,9 +3008,17 @@ def _generate_complete(prompt, request_id, model_name, created,
     # Start worker thread
     def _worker():
         try:
-            ret = _rkllm_wrapper.run(prompt, role="user",
-                                     keep_history=keep_history,
-                                     enable_thinking=enable_thinking)
+            if _is_vl:
+                ret = _active_wrapper.run_multimodal(
+                    prompt, vl_data['image_embed'],
+                    vl_data['n_image_tokens'], vl_data['n_image'],
+                    vl_data['image_width'], vl_data['image_height'],
+                    role="user", keep_history=keep_history,
+                )
+            else:
+                ret = _active_wrapper.run(prompt, role="user",
+                                          keep_history=keep_history,
+                                          enable_thinking=enable_thinking)
             if ret != 0:
                 logger.error(f"[{request_id}] rkllm_run returned error code {ret}")
                 _token_queue.put(("error", f"rkllm_run returned {ret}"))
@@ -2348,12 +3040,12 @@ def _generate_complete(prompt, request_id, model_name, created,
         GENERATION_COMPLETE.clear()
         while True:
             if ABORT_EVENT.is_set():
-                _rkllm_wrapper.abort()
+                _active_wrapper.abort()
                 break
 
             if time.time() - generation_start > GENERATION_TIMEOUT:
                 logger.warning(f"[{request_id}] Generation timeout")
-                _rkllm_wrapper.abort()
+                _active_wrapper.abort()
                 break
 
             if not got_first_token:
@@ -2366,7 +3058,7 @@ def _generate_complete(prompt, request_id, model_name, created,
                 msg_type, msg_data = _token_queue.get(timeout=get_timeout)
             except queue.Empty:
                 logger.warning(f"[{request_id}] Silence timeout")
-                _rkllm_wrapper.abort()
+                _active_wrapper.abort()
                 break
 
             if msg_type == "token":
@@ -2472,8 +3164,8 @@ def _generate_complete(prompt, request_id, model_name, created,
         # Ensure worker cleanup
         with PROCESS_LOCK:
             if _worker_thread and _worker_thread.is_alive():
-                if _rkllm_wrapper:
-                    _rkllm_wrapper.abort()
+                if _active_wrapper:
+                    _active_wrapper.abort()
                 _worker_thread.join(timeout=5)
                 _worker_thread = None
         GENERATION_COMPLETE.set()
@@ -2490,13 +3182,21 @@ if __name__ == "__main__":
         except (OSError, ValueError):
             pass
 
+    _vl_models = [n for n, c in MODELS.items() if 'vl_config' in c]
+    _text_models = [n for n, c in MODELS.items() if 'vl_config' not in c]
+
     logger.info("=" * 60)
     logger.info("RKLLM API starting (ctypes direct API)")
-    logger.info(f"  Library: {RKLLM_LIB_PATH}")
-    logger.info(f"  Models : {len(MODELS)} detected")
-    logger.info(f"  Aliases: {len(ALIASES)} generated")
-    logger.info(f"  Port   : 8000")
+    logger.info(f"  RKLLM Library : {RKLLM_LIB_PATH}")
+    logger.info(f"  RKNN Library  : {RKNN_LIB_PATH}")
+    logger.info(f"  Text models   : {len(_text_models)} detected")
+    logger.info(f"  VL models     : {len(_vl_models)} detected")
+    logger.info(f"  VL deps       : {'available' if _VL_DEPS_AVAILABLE else 'MISSING (install numpy Pillow)'}")
+    logger.info(f"  Aliases       : {len(ALIASES)} generated")
+    logger.info(f"  Port          : 8000")
     logger.info("=" * 60)
-    logger.info(f"Models: {list(MODELS.keys())}")
+    logger.info(f"Text models: {_text_models}")
+    if _vl_models:
+        logger.info(f"VL models: {_vl_models} (auto-routing enabled)")
     logger.info(f"Aliases: {ALIASES}")
     app.run(host="0.0.0.0", port=8000, threaded=True)
