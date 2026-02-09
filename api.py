@@ -2303,7 +2303,6 @@ def _generate_complete(prompt, request_id, model_name, created,
 
     logger.info(f"[{request_id}] Starting NON-STREAMING generation "
                 f"(rag={is_rag}, keep_history={keep_history}, thinking={enable_thinking})")
-    GENERATION_COMPLETE.clear()
 
     # Clear stale queue items
     while not _token_queue.empty():
@@ -2336,6 +2335,7 @@ def _generate_complete(prompt, request_id, model_name, created,
     stats_data = {}
 
     try:
+        GENERATION_COMPLETE.clear()
         while True:
             if ABORT_EVENT.is_set():
                 _rkllm_wrapper.abort()
