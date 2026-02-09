@@ -154,8 +154,10 @@ This project was developed and tested on:
 - **Linux** (ARM64) — tested on Ubuntu/Debian (Armbian)
 - **Python 3.8+**
 - **RKNPU driver ≥ 0.9.6** (0.9.8 recommended — see [Installation](#installation))
-- **RKLLM Runtime v1.2.3** — `librkllmrt.so` shared library (see [Installation](#installation))
+- **RKLLM Runtime ≥ v1.2.0** (tested with v1.2.3) — `librkllmrt.so` shared library (see [Installation](#installation))
 - **RKLLM models** (`.rkllm` format) placed in `~/models/`
+
+> **SDK Version Coupling:** The ctypes struct definitions in `api.py` target the RKLLM SDK v1.2.x C header (`rkllm.h`). Older SDK versions used a flat 112-byte reserved blob in `RKLLMExtendParam` and lacked fields like `n_keep`, `n_batch`, `use_cross_attn`, and `enable_thinking`. Running this server against an older `librkllmrt.so` (pre-1.2) will cause **silent struct-offset misalignment** — the parameter block passed to `rkllm_init()` would be corrupted, producing wrong sampling behaviour rather than a crash. Always use the runtime from the [v1.2.x release](https://github.com/airockchip/rknn-llm) or later.
 
 ### Python Dependencies
 ```bash
@@ -270,9 +272,9 @@ dmesg | tail -5 | grep -i rknpu
 
 > **Recommended:** The [Pelochus Armbian builds](https://github.com/Pelochus/armbian-build-rknpu-updates/releases) ship with RKNPU driver 0.9.8 pre-installed — no manual driver compilation needed. Use `Armbian-Pelochus_24.11.0-OrangePi5-plus_jammy_vendor.7z` (or the latest release for your board) and skip straight to the runtime setup.
 
-#### 3. RKLLM Runtime v1.2.3
+#### 3. RKLLM Runtime ≥ v1.2.0 (tested with v1.2.3)
 
-The RKLLM runtime provides the `librkllmrt.so` shared library that this API server loads via ctypes.
+The RKLLM runtime provides the `librkllmrt.so` shared library that this API server loads via ctypes. The ctypes struct layouts in `api.py` require **SDK v1.2.0 or later** — see [Requirements](#requirements) for details on version coupling.
 
 ```bash
 # Clone the rknn-llm repo (if not already done)

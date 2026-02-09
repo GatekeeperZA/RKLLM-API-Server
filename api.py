@@ -20,6 +20,15 @@ Preserved unchanged from subprocess version:
 Rollback: git checkout v1.0-subprocess -- api.py
 Archive:  archive/api_v1_subprocess.py (2682 lines, fully functional)
 
+MINIMUM SDK: librkllmrt.so ≥ v1.2.0 (RKLLM Runtime from airockchip/rknn-llm)
+    The ctypes struct definitions (RKLLMExtendParam, RKLLMParam, RKLLMInput,
+    etc.) match the rkllm.h C header shipped with SDK v1.2.x.  Older versions
+    used a 112-byte reserved blob in RKLLMExtendParam and lacked fields like
+    n_keep, n_batch, use_cross_attn, and enable_thinking.  Running against an
+    older librkllmrt.so will cause silent struct-offset misalignment — the
+    parameter block passed to rkllm_init() would be corrupted, producing wrong
+    sampling behaviour rather than a crash.  Tested against v1.2.3.
+
 Usage:
     gunicorn -w 1 -k gthread --threads 4 --timeout 300 -b 0.0.0.0:8000 api:app
 
@@ -287,10 +296,11 @@ logger.info(f"Models: {list(MODELS.keys())}")
 logger.info(f"Aliases: {ALIASES}")
 
 # =============================================================================
-# RKLLM CTYPES DEFINITIONS
+# RKLLM CTYPES DEFINITIONS  (SDK ≥ v1.2.0 — see header docstring)
 # =============================================================================
-# All struct definitions match the official airockchip/rknn-llm Python demos
-# (flask_server.py / gradio_server.py) and the rkllm.h C header.
+# All struct definitions match the rkllm.h C header from airockchip/rknn-llm
+# SDK v1.2.x (verified against the Linux header and the official Python demos).
+# Do NOT use with librkllmrt.so older than v1.2.0 — struct offsets will be wrong.
 
 RKLLM_Handle_t = ctypes.c_void_p
 
