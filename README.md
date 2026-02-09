@@ -1026,14 +1026,14 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 
 Two comprehensive test suites verify every code path against a live server. Both use only Python stdlib (`urllib`, `json`, `base64`) — no extra dependencies.
 
-### Diagnostic Test (`diagnostic_test.py`)
+### Diagnostic Test (`tests/diagnostic_test.py`)
 
 Section-by-section diagnostic covering 17 areas of the codebase — **108 tests total**. Designed for copy-paste output analysis.
 
 ```bash
-python diagnostic_test.py                # Run all 17 sections
-python diagnostic_test.py --skip-vl      # Skip VL tests (faster)
-python diagnostic_test.py --section 4    # Run only section 4
+python tests/diagnostic_test.py                # Run all 17 sections
+python tests/diagnostic_test.py --skip-vl      # Skip VL tests (faster)
+python tests/diagnostic_test.py --section 4    # Run only section 4
 ```
 
 | Section | Coverage |
@@ -1056,22 +1056,22 @@ python diagnostic_test.py --section 4    # Run only section 4
 | 16 | Route variants (`/chat/completions` vs `/v1/...`), edge cases |
 | 17 | Final system state consistency |
 
-### Integration Test (`vl_test.py`)
+### Integration Test (`tests/vl_test.py`)
 
 Focused integration tests across 17 categories — **68 assertions**. Tests text generation, VL multimodal, streaming, error handling, model lifecycle, and concurrent rejection.
 
 ```bash
-python vl_test.py all          # Run all tests
-python vl_test.py complete     # Non-streaming tests only
-python vl_test.py stream       # Streaming tests only
+python tests/vl_test.py all          # Run all tests
+python tests/vl_test.py complete     # Non-streaming tests only
+python tests/vl_test.py stream       # Streaming tests only
 ```
 
 ### Test Results (Orange Pi 5 Plus, Feb 2026)
 
 | Suite | Total | Pass | Fail | Time |
 |---|---|---|---|---|
-| `diagnostic_test.py` | 108 | 108 | 0 | ~12 min |
-| `vl_test.py` | 68 | 68 | 0 | ~8 min |
+| `tests/diagnostic_test.py` | 108 | 108 | 0 | ~12 min |
+| `tests/vl_test.py` | 68 | 68 | 0 | ~8 min |
 
 Both suites target `http://192.168.2.180:8000` by default — edit the `API` constant at the top to match your server IP.
 
@@ -1082,11 +1082,12 @@ Both suites target `http://192.168.2.180:8000` by default — edit the `API` con
 ```
 RKLLM-API-Server/
 ├── api.py                          # Main API server (ctypes, v2.0)
-├── diagnostic_test.py              # Section-by-section diagnostic (17 sections, 108 tests)
-├── vl_test.py                      # Integration test suite (17 categories, 68 tests)
 ├── setup.sh                        # Zero-config installer (761 lines)
 ├── settings.yml                    # SearXNG configuration for Open WebUI
 ├── README.md                       # This file
+├── tests/
+│   ├── diagnostic_test.py          # Section-by-section diagnostic (17 sections, 108 tests)
+│   └── vl_test.py                  # Integration test suite (17 categories, 68 tests)
 ├── archive/
 │   ├── api_v1_subprocess.py        # Original subprocess version (archived)
 │   └── CTYPES_MIGRATION_PLAN.md    # V1→V2 migration planning document
