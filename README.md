@@ -29,6 +29,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [V1 (Subprocess) vs V2 (ctypes) — Why We Migrated](#v1-subprocess-vs-v2-ctypes--why-we-migrated)
 - [Tested Hardware](#tested-hardware)
 - [Tested Models](#tested-models)
+- [Git Tags & Branches](#git-tags--branches)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
 
@@ -96,35 +97,40 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 ## Architecture
 
 ```
-┌──────────────┐     HTTP/SSE      ┌──────────────────────────────┐
-│  Open WebUI  │ ◄──────────────── │   api.py (Flask)             │
-│  or any      │ ─────────────────►│   gunicorn gthread           │
-│  OpenAI      │                   │                              │
-│  client      │                   │  ┌────────────────────────┐  │
-└──────────────┘                   │  │  Prompt Builder        │  │
-                                   │  │  RAG Detection/Clean   │  │
-        ┌──────────┐               │  └──────────┬─────────────┘  │
-        │ SearXNG  │ ◄──── Open    │             │                │
-        │ (search) │  WebUI injects│  ┌──────────▼─────────────┐  │
-        └──────────┘  results      │  │  KV Cache Tracker      │  │
-                                   │  │  (incremental / reset) │  │
-        ┌──────────┐               │  └──────────┬─────────────┘  │
-        │  Ollama  │               │             │ ctypes          │
-        │  (CPU)   │               │  ┌──────────▼─────────────┐  │
-        └──────────┘               │  │  librkllmrt.so v1.2.3  │  │
-         optional                  │  │  C callback → Queue    │  │
-                                   │  └──────────┬─────────────┘  │
-                                   │             │                │
-                                   │  ┌──────────▼─────────────┐  │
-                                   │  │  RK3588 NPU (3 cores)  │  │
-                                   │  │  6 TOPS per core       │  │
-                                   │  └────────────────────────┘  │
-                                   │                              │
-                                   │  ┌────────────────────────┐  │
-                                   │  │  ThinkTagParser        │  │
-                                   │  │  (reasoning_content)   │  │
-                                   │  └────────────────────────┘  │
-                                   └──────────────────────────────┘
+┌──────────────┐     HTTP/SSE      ┌──────────────────────────────────┐
+│  Open WebUI  │ ◄──────────────── │   api.py (Flask + gunicorn)      │
+│  or any      │ ─────────────────►│   gthread, -w 1                  │
+│  OpenAI      │                   │                                  │
+│  client      │                   │  ┌──────────────────────────┐    │
+└──────────────┘                   │  │  VL Auto-Router          │    │
+                                   │  │  (image → VL, text → LLM)│    │
+        ┌──────────┐               │  └────┬─────────────┬───────┘    │
+        │ SearXNG  │ ◄──── Open    │       │ text        │ image      │
+        │ (search) │  WebUI injects│       ▼             ▼            │
+        └──────────┘  results      │  ┌─────────┐  ┌─────────────┐   │
+                                   │  │ Prompt  │  │ Vision Enc. │   │
+        ┌──────────┐               │  │ Builder │  │ librknnrt.so│   │
+        │  Ollama  │               │  │ + RAG   │  │ (.rknn NPU) │   │
+        │  (CPU)   │               │  └────┬────┘  └──────┬──────┘   │
+        └──────────┘               │       │              │           │
+         optional                  │       ▼              ▼           │
+                                   │  ┌──────────────────────────┐   │
+                                   │  │  librkllmrt.so v1.2.3    │   │
+                                   │  │  Text: RKLLMWrapper      │   │
+                                   │  │  VL:   RKLLMWrapper #2   │   │
+                                   │  │  C callback → Queue      │   │
+                                   │  └────────────┬─────────────┘   │
+                                   │               │                 │
+                                   │  ┌────────────▼─────────────┐   │
+                                   │  │  RK3588 NPU (3 cores)    │   │
+                                   │  │  6 TOPS per core         │   │
+                                   │  └──────────────────────────┘   │
+                                   │                                  │
+                                   │  ┌──────────────────────────┐   │
+                                   │  │  ThinkTagParser          │   │
+                                   │  │  (reasoning_content)     │   │
+                                   │  └──────────────────────────┘   │
+                                   └──────────────────────────────────┘
 ```
 
 **Key design decisions:**
@@ -136,6 +142,8 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 3. **ctypes + callback** — The C library's `rkllm_run()` is blocking, so it runs in a worker thread. A C callback pushes tokens to a `queue.Queue`, which the main thread reads and yields as SSE chunks. This keeps the KV cache in-process across turns.
 
 4. **gthread, not gevent** — `rkllm_run()` is a blocking C function that freezes gevent's event loop. Using `-k gthread` with real OS threads avoids this.
+
+5. **Dual-model VL** — Text and VL models are loaded simultaneously into separate `RKLLMWrapper` instances. The vision encoder runs on a third ctypes binding (`librknnrt.so`). Image requests are auto-routed to the VL pipeline; text requests use the primary model. A shared `_token_queue` serialized by `PROCESS_LOCK` prevents interleaving.
 
 ---
 
@@ -166,12 +174,17 @@ This project was developed and tested on:
 - **RKNPU driver ≥ 0.9.6** (0.9.8 recommended — see [Installation](#installation))
 - **RKLLM Runtime ≥ v1.2.0** (tested with v1.2.3) — `librkllmrt.so` shared library (see [Installation](#installation))
 - **RKLLM models** (`.rkllm` format) placed in `~/models/`
+- **RKNN Runtime** (optional) — `librknnrt.so` shared library (only needed for VL/multimodal models with `.rknn` vision encoders)
 
 > **SDK Version Coupling:** The ctypes struct definitions in `api.py` target the RKLLM SDK v1.2.x C header (`rkllm.h`). Older SDK versions used a flat 112-byte reserved blob in `RKLLMExtendParam` and lacked fields like `n_keep`, `n_batch`, `use_cross_attn`, and `enable_thinking`. Running this server against an older `librkllmrt.so` (pre-1.2) will cause **silent struct-offset misalignment** — the parameter block passed to `rkllm_init()` would be corrupted, producing wrong sampling behaviour rather than a crash. Always use the runtime from the [v1.2.x release](https://github.com/airockchip/rknn-llm) or later.
 
 ### Python Dependencies
 ```bash
+# Core (required)
 pip install flask flask-cors gunicorn
+
+# VL / multimodal support (optional — needed only for vision-language models)
+pip install numpy Pillow
 ```
 
 ---
@@ -604,10 +617,17 @@ curl http://localhost:8000/health
   "status": "ok",
   "current_model": "qwen3-1.7b",
   "model_loaded": true,
+  "vl_model": {
+    "model": "deepseekocr-3b",
+    "encoder_loaded": true,
+    "llm_loaded": true
+  },
   "active_request": null,
   "models_available": 3
 }
 ```
+
+> The `vl_model` field is `null` when no VL model is loaded.
 
 ---
 
@@ -887,6 +907,7 @@ All configuration is at the top of `api.py`:
 | Variable | Description |
 |----------|-------------|
 | `RKLLM_LIB_PATH` | Path to `librkllmrt.so` (auto-detected from `/usr/lib/` by default) |
+| `RKNN_LIB_PATH` | Path to `librknnrt.so` for VL vision encoder (auto-detected from `/usr/lib/` by default) |
 | `RKLLM_API_LOG_LEVEL` | Python API log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 ---
@@ -1000,7 +1021,8 @@ The original server (`archive/api_v1_subprocess.py`) worked by spawning a separa
 | **Thinking mode toggle** | Append `/no_think` to prompt text | `RKLLMInput.enable_thinking` flag |
 | **Error handling** | Detect process crash / timeout | C return codes + error callback state |
 | **Process management** | ~500 lines (spawn, monitor, kill, restart) | 0 lines (no process to manage) |
-| **Code size** | 2682 lines | 2376 lines (−306, despite adding features) |
+| **VL / multimodal** | Not supported | Dual-model architecture with RKNN vision encoder |
+| **Code size** | 2682 lines | ~3200 lines (text + VL + RAG) |
 
 ### Why the Change Matters
 
@@ -1046,12 +1068,38 @@ The V1 code may be useful as a reference if:
 
 ## Tested Models
 
+### Text Models
+
 | Model | Quantization | Context | File Size | Speed | Status |
 |-------|-------------|---------|-----------|-------|--------|
 | Qwen3-1.7B | W8A8 | 4K | ~1.7 GB | ~13.6 tok/s | Fully tested |
 | Qwen3-4B-Instruct | W8A8 | 16K | ~4 GB | ~6 tok/s | Tested |
 | Gemma-3-4B-IT | W8A8 | 4K | ~4 GB | ~6 tok/s | Tested |
 | Phi-3-Mini-4K-Instruct | W8A8 | 4K | ~3.8 GB | ~6.8 tok/s | Tested |
+
+### VL (Vision-Language) Models
+
+| Model | Quantization | Img Encoder | Decode Speed | Encoder Time | Status |
+|-------|-------------|-------------|-------------|-------------|--------|
+| DeepSeekOCR-3B | W8A8 | 448×448 | ~31.8 tok/s | ~2.1s | Supported |
+| Qwen2.5-VL-3B | W8A8 | 392×392 | ~8.7 tok/s | ~2.9s | Supported |
+| Qwen2-VL-2B | W8A8 | 392×392 | ~16.6 tok/s | ~3.3s | Supported |
+| Qwen3-VL-2B | W8A8 | varies | ~TBD | ~TBD | Supported |
+| InternVL3-1B | W8A8 | 448×448 | ~TBD | ~TBD | Supported |
+| MiniCPM-V-2.6 | W8A8 | 448×448 | ~TBD | ~TBD | Supported |
+
+> Encoder times and decode speeds from [RKLLM official benchmarks](https://github.com/airockchip/rknn-llm/blob/main/benchmark.md) on RK3588 W8A8 with all 3 NPU cores.
+
+---
+
+## Git Tags & Branches
+
+| Tag / Branch | Description |
+|---|---|
+| `v1.0-subprocess-stable` | Last working subprocess version (V1) |
+| `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
+| `subprocess-legacy` | Branch preserving the subprocess architecture |
+| `main` | Current: ctypes + VL multimodal support |
 
 ---
 
@@ -1061,6 +1109,7 @@ This project is provided as-is for personal and educational use. The rkllm runti
 
 ## Acknowledgements
 
-- [airockchip/rknn-llm](https://github.com/airockchip/rknn-llm) — RKLLM runtime and toolkit
+- [airockchip/rknn-llm](https://github.com/airockchip/rknn-llm) — RKLLM runtime, toolkit, and multimodal demo
+- [airockchip/rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) — RKNN runtime (`librknnrt.so`) for vision encoder NPU inference
 - [Pelochus/armbian-build-rknpu-updates](https://github.com/Pelochus/armbian-build-rknpu-updates) — Armbian builds with RKNPU driver
 - [Open WebUI](https://github.com/open-webui/open-webui) — Web interface for LLM interaction
