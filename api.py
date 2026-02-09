@@ -2577,6 +2577,118 @@ def chat_completions():
     if not messages:
         return make_error_response("No messages provided", 400, "invalid_request")
 
+    # === SHORTCIRCUIT helper: return instant response without inference ===
+    def _make_shortcircuit_response(content, label):
+        """Return a chat completion response instantly, no model needed."""
+        logger.info(f"[{request_id}] SHORTCIRCUIT {label}")
+        if stream:
+            def _sc_gen():
+                c = {
+                    "id": request_id, "object": "chat.completion.chunk",
+                    "created": int(time.time()), "model": requested_model,
+                    "choices": [{"index": 0, "delta": {"role": "assistant",
+                                 "content": content}, "finish_reason": None}]
+                }
+                yield f"data: {json.dumps(c)}\n\n"
+                d = {
+                    "id": request_id, "object": "chat.completion.chunk",
+                    "created": int(time.time()), "model": requested_model,
+                    "choices": [{"index": 0, "delta": {},
+                                 "finish_reason": "stop"}]
+                }
+                yield f"data: {json.dumps(d)}\n\n"
+                yield "data: [DONE]\n\n"
+            return Response(
+                stream_with_context(_sc_gen()),
+                mimetype='text/event-stream',
+                headers={'Cache-Control': 'no-cache',
+                         'X-Accel-Buffering': 'no',
+                         'Connection': 'keep-alive'},
+            )
+        return jsonify({
+            "id": request_id, "object": "chat.completion",
+            "created": int(time.time()), "model": requested_model,
+            "choices": [{"index": 0, "message": {"role": "assistant",
+                         "content": content}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 1,
+                      "total_tokens": 1}
+        })
+
+    # ---- Detect Open WebUI meta-task type from last user message ----
+    _last_user_content = ''
+    for msg in reversed(messages):
+        if msg.get('role') == 'user':
+            _last_user_content = msg.get('content', '')
+            break
+    _luc_lower = _last_user_content.lower()
+
+    # === SHORTCIRCUIT: Retrieval query generation ===
+    # Open WebUI asks the model to generate search queries for document
+    # retrieval.  On small models this wastes ~5s and the JSON output
+    # often leaks into the chat display.  Extract the real question from
+    # the chat history and return it directly as the query.
+    _is_query_gen = (
+        'generate search queries' in _luc_lower
+        or 'generating search queries' in _luc_lower
+        or ('search queries' in _luc_lower and '"queries"' in _luc_lower)
+        or ('generate 1-3 broad' in _luc_lower and 'search' in _luc_lower)
+    )
+    if _is_query_gen:
+        import re as _re_sc
+        _m = _re_sc.search(
+            r'(?:USER|user):\s*(.+?)(?:\s*</chat_history>|\s*$)',
+            _last_user_content, _re_sc.DOTALL
+        )
+        _real_q = _m.group(1).strip() if _m else 'general query'
+        return _make_shortcircuit_response(
+            json.dumps({"queries": [_real_q]}),
+            f"query gen — search query: '{_real_q[:80]}'"
+        )
+
+    # === SHORTCIRCUIT: Title generation ===
+    # Open WebUI asks for a concise 3-5 word chat title.
+    _is_title_gen = (
+        ('title' in _luc_lower and 'chat' in _luc_lower
+         and ('3-5 word' in _luc_lower or 'concise' in _luc_lower))
+        or 'emoji as a title' in _luc_lower
+        or 'title for the prompt' in _luc_lower
+    )
+    if _is_title_gen:
+        _first_user_msg = ''
+        for msg in messages:
+            if msg.get('role') == 'user' and not any(
+                sig in msg.get('content', '').lower()
+                for sig in ('title for the chat', 'emoji as a title',
+                            'title for the prompt', '3-5 word')
+            ):
+                _first_user_msg = msg.get('content', '')[:60].strip()
+                break
+        if not _first_user_msg:
+            import re as _re_tt
+            _m2 = _re_tt.search(
+                r'(?:USER|user):\s*(.+?)(?:\s*(?:ASSISTANT|assistant)'
+                r'|\s*</chat_history>|\s*$)',
+                _last_user_content, _re_tt.DOTALL
+            )
+            _first_user_msg = (_m2.group(1).strip()[:60]
+                               if _m2 else 'New Chat')
+        _title = _first_user_msg.split('\n')[0].strip()
+        if len(_title) > 50:
+            _title = _title[:47] + '...'
+        return _make_shortcircuit_response(_title,
+                                           f"title gen — '{_title}'")
+
+    # === SHORTCIRCUIT: Tag generation ===
+    # Open WebUI asks the model to generate 1-3 tags.
+    _is_tag_gen = (
+        ('generate 1-3 tags' in _luc_lower
+         or 'categorize the chat' in _luc_lower)
+        and 'tag' in _luc_lower
+    )
+    if _is_tag_gen:
+        return _make_shortcircuit_response('general',
+                                           "tag gen — 'general'")
+
     # Resolve model
     name, config = resolve_model(requested_model)
     logger.info(f"Resolved '{requested_model}' -> '{name}'. Current: {CURRENT_MODEL}")
