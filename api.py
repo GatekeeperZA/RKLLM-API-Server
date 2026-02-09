@@ -187,6 +187,15 @@ _OPENWEBUI_META_TASK_SIGNATURES = (
     'emoji as a title',
 )
 
+# Home Assistant detection — HA sends a system prompt with specific signatures.
+# Thinking mode adds latency and reasoning tokens that are wasted on
+# smart-home commands, so we auto-disable it for HA requests.
+_HOME_ASSISTANT_SIGNATURES = (
+    'smart home manager of home assistant',
+    'available devices:',
+    'execute_services function',
+)
+
 # RAG quality controls
 RAG_MIN_QUALITY_SCORE = 2
 RAG_MAX_PARAGRAPHS = 10
@@ -2004,6 +2013,15 @@ def build_prompt(messages, model_name):
         if _is_meta:
             enable_thinking = False
             logger.info(f"Meta-task detected — thinking disabled for speed")
+
+        # --- Home Assistant request detection ---
+        # HA's Extended OpenAI Conversation sends a system prompt with
+        # smart-home device lists.  Disable thinking to cut latency in half.
+        if enable_thinking and system_text:
+            _sys_lower = system_text.lower()
+            if any(sig in _sys_lower for sig in _HOME_ASSISTANT_SIGNATURES):
+                enable_thinking = False
+                logger.info("Home Assistant request detected — thinking disabled for speed")
 
     logger.debug(f"Prompt built ({len(prompt)} chars, ctx={ctx}, "
                  f"rag={'yes' if rag_parts else 'no'})")

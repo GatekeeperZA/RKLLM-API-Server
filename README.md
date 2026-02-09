@@ -21,6 +21,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
   - [Embedding Model](#embedding-model-recommendation)
   - [Document RAG Settings](#document-rag-settings-recommended-for-pdfdocument-upload)
   - [VL / Image Upload Settings](#vl--image-upload-settings)
+- [Home Assistant Integration](#home-assistant-integration)
 - [SearXNG Configuration](#searxng-configuration)
 - [RAG Pipeline](#rag-pipeline)
 - [Reasoning Models](#reasoning-models)
@@ -89,6 +90,11 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Tag generation shortcircuit** — returns a default tag instantly (~0ms instead of 5-10s inference)
 - **Meta-task thinking disabled** — auto-detects Open WebUI internal tasks (query gen, title gen, tags, autocomplete) and disables `<think>` reasoning to avoid wasting 20+ seconds on trivial tasks
 - **No JSON leakage** — query generation shortcircuit prevents raw JSON from appearing in the chat display
+
+### Home Assistant
+- **Auto-detection** — recognizes Home Assistant requests by system prompt signatures (`smart home manager`, `Available Devices:`, `execute_services`)
+- **Thinking auto-disabled** — skips `<think>` reasoning for HA requests, cutting response time in half
+- **Compatible with Extended OpenAI Conversation** (HACS) — works as a drop-in conversation agent for Assist
 
 ### Standards Compliance
 - **`stream_options.include_usage`** — streaming token counts per OpenAI spec
@@ -903,6 +909,62 @@ For vision-language (VL) models like DeepSeekOCR-3B to work with Open WebUI imag
 | Setting | Value | Reason |
 |---------|-------|--------|
 | **Show Generation Settings** | **OFF** | The RKLLM runtime handles sampling internally. UI sliders are ignored by the API |
+
+---
+
+## Home Assistant Integration
+
+The API server works as a conversation agent for **Home Assistant** via the [Extended OpenAI Conversation](https://github.com/jekalmin/extended_openai_conversation) HACS integration. This enables voice and text control of smart home devices using your local NPU.
+
+### Setup
+
+1. Install **HACS** in Home Assistant if not already installed
+2. Install **Extended OpenAI Conversation** from HACS
+3. Add the integration in **Settings > Devices & Services**:
+
+| Field | Value |
+|---|---|
+| **Name** | `RKLLM Orange Pi` (or any name) |
+| **API Key** | `sk-no-key-required` (any dummy value) |
+| **Base Url** | `http://<ORANGE_PI_IP>:8000/v1` |
+| **Skip Authentication** | Checked |
+| **Api Provider** | `OpenAI` |
+
+4. Configure the conversation agent:
+
+| Setting | Recommended Value |
+|---|---|
+| **chat_model** | `qwen3-1.7b` (fast) or `qwen3-4b-instruct-2507` (smarter) |
+| **Max tokens** | `2048` |
+| **Temperature** | `0.3` (low for reliable device control) |
+| **Top P** | `0.9` |
+| **Max function calls** | `3` |
+| **Context Threshold** | `3500` (for 1.7B) or `13000` (for 4B) |
+
+5. Create a Voice Assistant in **Settings > Voice Assistants** using the new conversation agent
+6. Expose entities in the **Expose** tab (start with 5-10 lights/switches)
+
+### Model Choice
+
+| Model | Prefill | Generate | Total | Best For |
+|---|---|---|---|---|
+| **qwen3-1.7b** | ~3s | ~0.5s | **~3.5s** | Simple commands, fast response |
+| **qwen3-4b-instruct-2507** | ~19s | ~8s | **~27s** | Complex queries, more entities |
+
+The 1.7B model is recommended for HA — simple commands like "turn off the living room light" work reliably and respond in under 5 seconds. Keep exposed entities under 20 to stay within the 4096 context window.
+
+### Automatic Optimizations
+
+The API server automatically detects Home Assistant requests and:
+- **Disables thinking** — skips `<think>` reasoning tokens, cutting latency significantly
+- **Detection** is based on system prompt signatures (`smart home manager of home assistant`, `available devices:`, `execute_services function`)
+- This does **not** affect Open WebUI or other clients
+
+### Limitations
+
+- **Complex multi-step commands** may fail on 1.7B (e.g., "turn off all lights except the kitchen")
+- **Entity count** affects prompt size — more entities = slower prefill and less room for response
+- **No native tool calling** — relies on Extended OpenAI Conversation's prompt-based function calling
 
 ---
 
