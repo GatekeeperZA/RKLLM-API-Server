@@ -1921,11 +1921,32 @@ def build_prompt(messages, model_name):
         abstention = ". If not answered above, say you don't know" if enable_thinking else ''
         logger.info(f"RAG thinking: ctx={ctx}, threshold={DISABLE_THINK_FOR_RAG_BELOW_CTX}, "
                     f"thinking={'enabled' if enable_thinking else 'disabled'}")
+
+        # Clean trailing punctuation from user question to avoid double-period
+        _clean_q = user_question.rstrip(' .!?;:')
+
+        # Detect summarization-style queries for stronger prompting
+        _summ_keywords = ('summarize', 'summary', 'summarise', 'overview',
+                          'outline', 'describe', 'explain', 'what is this',
+                          'what does this', 'tell me about', 'break down')
+        _is_summary = any(kw in _clean_q.lower() for kw in _summ_keywords)
+
+        if _is_summary:
+            _instruction = (
+                "Provide a thorough and comprehensive answer. "
+                "Cover all major points, sections, and key details from the document. "
+                "Use multiple paragraphs"
+            )
+        else:
+            _instruction = (
+                "Answer in detail with specific facts and examples"
+            )
+
         prompt = (
             f"{reference_data}\n\n"
-            f"According to the above, {user_question}. "
-            f"Answer in detail with specific facts and examples"
-            f"{abstention}"
+            f"According to the above, {_clean_q}. "
+            f"{_instruction}"
+            f"{abstention}."
         )
         logger.debug(f"RAG prompt built ({len(prompt)} chars, ctx={ctx})")
         if len(prompt) > 500:
