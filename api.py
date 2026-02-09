@@ -646,14 +646,18 @@ _rkllm_callback = callback_type(_rkllm_callback_impl)
 # Flow: image (uint8 RGB HWC) -> rknn_inputs_set -> rknn_run -> rknn_outputs_get
 #       -> float32 embedding array -> feed to rkllm via RKLLM_INPUT_MULTIMODAL
 
-# RKNN constants (from rknn_api.h)
+# RKNN constants (from rknn_api.h — verified against rknpu2 v2.x official header)
 RKNN_SUCC = 0
-RKNN_TENSOR_UINT8 = 2
-RKNN_TENSOR_FLOAT32 = 5
-RKNN_TENSOR_NHWC = 0
-RKNN_TENSOR_NCHW = 1
-RKNN_NPU_CORE_AUTO = 0x08
-RKNN_NPU_CORE_0_1_2 = 0x07    # All 3 NPU cores
+# rknn_tensor_type enum: FLOAT32=0, FLOAT16=1, INT8=2, UINT8=3, INT16=4, UINT16=5
+RKNN_TENSOR_FLOAT32 = 0
+RKNN_TENSOR_UINT8 = 3
+# rknn_tensor_format enum: NCHW=0, NHWC=1, NC1HWC2=2
+RKNN_TENSOR_NCHW = 0
+RKNN_TENSOR_NHWC = 1
+# rknn_core_mask enum: AUTO=0, CORE_0=1, CORE_1=2, CORE_2=4, 0_1=3, 0_1_2=7
+RKNN_NPU_CORE_AUTO = 0
+RKNN_NPU_CORE_0_1_2 = 7       # All 3 NPU cores (CORE_0|CORE_1|CORE_2)
+# rknn_query_cmd enum
 RKNN_QUERY_IN_OUT_NUM = 0
 RKNN_QUERY_INPUT_ATTR = 1
 RKNN_QUERY_OUTPUT_ATTR = 2
