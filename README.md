@@ -25,6 +25,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Logging](#logging)
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
+- [Testing](#testing)
 - [File Structure](#file-structure)
 - [V1 (Subprocess) vs V2 (ctypes) — Why We Migrated](#v1-subprocess-vs-v2-ctypes--why-we-migrated)
 - [Tested Hardware](#tested-hardware)
@@ -988,11 +989,68 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 
 ---
 
+## Testing
+
+Two comprehensive test suites verify every code path against a live server. Both use only Python stdlib (`urllib`, `json`, `base64`) — no extra dependencies.
+
+### Diagnostic Test (`diagnostic_test.py`)
+
+Section-by-section diagnostic covering 17 areas of the codebase — **108 tests total**. Designed for copy-paste output analysis.
+
+```bash
+python diagnostic_test.py                # Run all 17 sections
+python diagnostic_test.py --skip-vl      # Skip VL tests (faster)
+python diagnostic_test.py --section 4    # Run only section 4
+```
+
+| Section | Coverage |
+|---|---|
+| 1 | Server connectivity & health endpoint structure |
+| 2 | Model detection, `/v1/models` listing, response format |
+| 3 | Alias generation & model name resolution |
+| 4 | Error handling: bad body, empty messages, invalid types, bad base64 |
+| 5 | Text generation (non-streaming): response structure, usage stats |
+| 6 | Text generation (streaming): SSE format, chunk structure, `include_usage` |
+| 7 | Think tag parsing (`reasoning_content` in SSE) |
+| 8 | KV cache tracking & incremental mode (multi-turn memory) |
+| 9 | Model select, unload, switch, idle state |
+| 10 | Concurrent request rejection (single-NPU guard) |
+| 11 | RAG pipeline: `<source>` extraction, boilerplate cleaning, skip detection |
+| 12 | RAG response cache (generate vs cached timing) |
+| 13 | Content normalization (multimodal arrays with text only) |
+| 14 | VL auto-routing, image processing, streaming, model name in response |
+| 15 | Text-after-VL (dual-model isolation) |
+| 16 | Route variants (`/chat/completions` vs `/v1/...`), edge cases |
+| 17 | Final system state consistency |
+
+### Integration Test (`vl_test.py`)
+
+Focused integration tests across 17 categories — **68 assertions**. Tests text generation, VL multimodal, streaming, error handling, model lifecycle, and concurrent rejection.
+
+```bash
+python vl_test.py all          # Run all tests
+python vl_test.py complete     # Non-streaming tests only
+python vl_test.py stream       # Streaming tests only
+```
+
+### Test Results (Orange Pi 5 Plus, Feb 2026)
+
+| Suite | Total | Pass | Fail | Time |
+|---|---|---|---|---|
+| `diagnostic_test.py` | 108 | 108 | 0 | ~12 min |
+| `vl_test.py` | 68 | 68 | 0 | ~8 min |
+
+Both suites target `http://192.168.2.180:8000` by default — edit the `API` constant at the top to match your server IP.
+
+---
+
 ## File Structure
 
 ```
 RKLLM-API-Server/
 ├── api.py                          # Main API server (ctypes, v2.0)
+├── diagnostic_test.py              # Section-by-section diagnostic (17 sections, 108 tests)
+├── vl_test.py                      # Integration test suite (17 categories, 68 tests)
 ├── setup.sh                        # Zero-config installer (761 lines)
 ├── settings.yml                    # SearXNG configuration for Open WebUI
 ├── README.md                       # This file
@@ -1099,7 +1157,7 @@ The V1 code may be useful as a reference if:
 | `v1.0-subprocess-stable` | Last working subprocess version (V1) |
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
-| `main` | Current: ctypes + VL multimodal support |
+| `main` | Current: ctypes + VL multimodal + full test suites (108/108 pass) |
 
 ---
 
