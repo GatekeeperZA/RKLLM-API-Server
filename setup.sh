@@ -7,7 +7,7 @@
 # What this script does:
 #   1. Installs system packages (python3, venv, build-essential, git, git-lfs)
 #   2. Checks RKNPU driver status
-#   3. Installs RKLLM Runtime v1.2.3 (library + binary) if not already present
+#   3. Installs RKLLM Runtime ≥ v1.2.0 (library + binary) if not already present
 #   4. Creates a Python virtual environment with all dependencies
 #   5. Creates ~/models directory for .rkllm model files
 #   6. Applies NPU frequency fix for consistent performance
@@ -270,7 +270,7 @@ fi
 # STEP 4: RKLLM RUNTIME (librkllmrt.so + rkllm binary)
 # =============================================================================
 
-separator "Step 3/7 — Installing RKLLM Runtime v1.2.3"
+separator "Step 3/7 — Installing RKLLM Runtime (≥ v1.2.0)"
 
 # --- Detect existing rkllm binary (may be at /usr/bin or /usr/local/bin) ---
 RKLLM_BIN=""
@@ -443,10 +443,10 @@ info "Installing Python dependencies in venv..."
 source "$VENV_DIR/bin/activate"
 
 pip install --upgrade pip --quiet
-pip install flask flask-cors gunicorn gevent --quiet
+pip install flask flask-cors gunicorn --quiet
 
 success "Python dependencies installed:"
-pip list --format=columns | grep -iE "flask|gunicorn|gevent" | while read -r line; do
+pip list --format=columns | grep -iE "flask|gunicorn" | while read -r line; do
     echo "    $line"
 done
 
@@ -627,7 +627,8 @@ Environment="RKLLM_API_LOG_LEVEL=INFO"
 # Run with gunicorn (single worker — NPU loads one model at a time)
 ExecStart=$VENV_DIR/bin/gunicorn \\
     -w 1 \\
-    -k gevent \\
+    -k gthread \\
+    --threads 4 \\
     --timeout $GUNICORN_TIMEOUT \\
     -b ${BIND_ADDRESS}:${BIND_PORT} \\
     --access-logfile - \\
@@ -756,5 +757,5 @@ echo "  └───────────────────────
 echo ""
 echo "  Manual start (without systemd):"
 echo "    source $VENV_DIR/bin/activate"
-echo "    gunicorn -w 1 -k gevent --timeout 300 -b 0.0.0.0:$BIND_PORT api:app"
+echo "    gunicorn -w 1 -k gthread --threads 4 --timeout 300 -b 0.0.0.0:$BIND_PORT api:app"
 echo ""
