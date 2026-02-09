@@ -659,6 +659,8 @@ docker run -d \
   --add-host=host.docker.internal:host-gateway \
   -p 3000:8080 \
   -v open-webui:/app/backend/data \
+  -e OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1 \
+  -e OPENAI_API_KEY=sk-unused \
   -e ENABLE_RETRIEVAL_QUERY_GENERATION=False \
   -e RAG_SYSTEM_CONTEXT=True \
   -e RAG_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5 \
@@ -670,12 +672,27 @@ docker run -d \
   -e CHUNK_OVERLAP=0 \
   -e CHUNK_MIN_SIZE_TARGET=400 \
   -e RAG_TOP_K=5 \
+  -e ENABLE_WEB_SEARCH=True \
+  -e WEB_SEARCH_ENGINE=searxng \
+  -e SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query> \
+  -e WEB_SEARCH_RESULT_COUNT=3 \
+  -e BYPASS_WEB_SEARCH_WEB_LOADER=True \
+  -e BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=True \
   -e ANONYMIZED_TELEMETRY=false \
   -e DO_NOT_TRACK=true \
   ghcr.io/open-webui/open-webui:main
 ```
 
 **Environment variables explained:**
+
+**Connection:**
+
+| Variable | Value | Reason |
+|----------|-------|--------|
+| `OPENAI_API_BASE_URL` | `http://host.docker.internal:8000/v1` | Auto-connects to the RKLLM API server on the host. No manual UI setup needed — models appear immediately |
+| `OPENAI_API_KEY` | `sk-unused` | The RKLLM server has no auth, but Open WebUI requires a non-empty key for OpenAI-compatible endpoints |
+
+**RAG Pipeline:**
 
 | Variable | Value | Reason |
 |----------|-------|--------|
@@ -690,6 +707,22 @@ docker run -d \
 | `CHUNK_OVERLAP` | `0` | Zero overlap — Chroma Research showed overlap actively hurts retrieval IoU by returning redundant tokens. With Hybrid Search, overlap is unnecessary |
 | `CHUNK_MIN_SIZE_TARGET` | `400` | Merges tiny fragments (<400 chars) with neighbors, preventing low-quality micro-chunks. Works with Markdown Header Splitter to reduce chunk count by up to 90% |
 | `RAG_TOP_K` | `5` | Retrieves 5 candidate chunks, then reranker narrows to best 3 (Top K Reranker default). Good funnel ratio for 4K context models |
+
+**Web Search (SearXNG):**
+
+| Variable | Value | Reason |
+|----------|-------|--------|
+| `ENABLE_WEB_SEARCH` | `True` | Enables the web search toggle in the chat UI |
+| `WEB_SEARCH_ENGINE` | `searxng` | Uses the self-hosted SearXNG instance for privacy and JSON API support |
+| `SEARXNG_QUERY_URL` | `http://searxng:8080/search?q=<query>` | SearXNG Docker service URL. Change `searxng` to your container name or IP if different |
+| `WEB_SEARCH_RESULT_COUNT` | `3` | Number of search results to fetch. 3 is good for 4K context models; increase to 5 for 16K models |
+| `BYPASS_WEB_SEARCH_WEB_LOADER` | `True` | Uses search engine snippets instead of scraping full pages — cleaner, faster, and more reliable for small models |
+| `BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL` | `True` | Sends search snippets directly to the model without embedding/retrieving — the API server builds its own optimized prompt internally |
+
+**Privacy:**
+
+| Variable | Value | Reason |
+|----------|-------|--------|
 | `ANONYMIZED_TELEMETRY` | `false` | Disables telemetry (optional, recommended for privacy) |
 | `DO_NOT_TRACK` | `true` | Disables tracking (optional, recommended for privacy) |
 
@@ -703,12 +736,14 @@ docker run -d \
 
 ### Connection
 
-In Open WebUI **Admin > Settings > Connections**, add the API as an OpenAI-compatible endpoint:
+The RKLLM API server connection is **auto-configured** via `OPENAI_API_BASE_URL` and `OPENAI_API_KEY` env vars — no manual setup needed. Models appear in the dropdown immediately after container startup.
+
+If you need to change the connection later: **Admin > Settings > Connections** > edit the OpenAI-compatible endpoint:
 
 | Setting | Value |
 |---------|-------|
-| API Base URL | `http://<device-ip>:8000/v1` |
-| API Key | *(any non-empty string — the server has no auth)* |
+| API Base URL | `http://host.docker.internal:8000/v1` (default via env var) |
+| API Key | `sk-unused` (default via env var) |
 
 ### Using Ollama Alongside (CPU Models)
 
@@ -761,27 +796,26 @@ Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}.
 
 > **Do NOT add generic instructions** like "You are a helpful assistant" — these get sent as part of the user prompt and cause the model to respond with a greeting instead of answering the question.
 
-### Web Search (Required for RAG/SearXNG)
+### Web Search (SearXNG)
 
-**Admin > Settings > Web Search:**
+Web search is **auto-configured** via Docker env vars — no manual UI setup needed. The search icon appears in the chat UI immediately.
 
-| Setting | Value | Reason |
-|---------|-------|--------|
-| Search Engine | `searxng` | Self-hosted, JSON API |
-| SearXNG Query URL | `http://searxng:8080/search` | Docker service name |
-| Web Search Result Count | `3` (4k models) / `5` (16k models) | Balances coverage vs. context |
-| **Bypass Web Loader** | **ON** ⚠️ | **Required.** Snippets are cleaner than raw page scraping for small models |
-| **Bypass Embedding and Retrieval** | **ON** ⚠️ | **Required.** No embedding model available on ARM/NPU. Sends docs directly to the model |
+> **Prerequisite:** SearXNG must be running as a Docker container named `searxng` on the same host (see [SearXNG Configuration](#searxng-configuration) below). If your SearXNG container has a different name or IP, update the `SEARXNG_QUERY_URL` env var.
 
-### Documents / RAG Template (Required for SearXNG)
+All web search settings are hardcoded (see [Docker Setup](#docker-setup) env var table above). To verify or adjust: **Admin > Settings > Web Search.**
 
-**Admin > Settings > Documents:**
+| Setting | Value | Hardcoded |
+|---------|-------|----------|
+| Web Search | **ON** | `ENABLE_WEB_SEARCH=True` |
+| Search Engine | `searxng` | `WEB_SEARCH_ENGINE=searxng` |
+| SearXNG Query URL | `http://searxng:8080/search?q=<query>` | `SEARXNG_QUERY_URL` |
+| Result Count | `3` | `WEB_SEARCH_RESULT_COUNT=3` |
+| Bypass Web Loader | **ON** | `BYPASS_WEB_SEARCH_WEB_LOADER=True` |
+| Bypass Embedding & Retrieval | **ON** | `BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=True` |
 
-| Setting | Value | Reason |
-|---------|-------|--------|
-| **RAG Template** | `{{CONTEXT}}` | **Required.** Just the variable, nothing else. The default template wastes 300+ tokens of meta-instructions |
+> **Why Bypass Web Loader?** Search engine snippets are cleaner and faster than raw page scraping. Small models handle structured snippets better than noisy full-page HTML.
 
-> **Important:** The RAG Template must be exactly `{{CONTEXT}}` — no extra text. The API server builds its own optimized reading-comprehension prompt format internally.
+> **Why Bypass Embedding & Retrieval?** The API server builds its own optimized reading-comprehension prompt internally. Sending snippets directly avoids unnecessary embedding overhead.
 
 ### Embedding Model Recommendation
 
