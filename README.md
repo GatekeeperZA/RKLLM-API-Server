@@ -799,14 +799,14 @@ Set a **user-level** system prompt that applies globally to all models:
 **Settings** (gear icon, bottom-left) **> General > System Prompt:**
 
 ```
-You are a helpful assistant for {{USER_NAME}}. Today is {{CURRENT_DATE}}, {{CURRENT_TIME}}. Use the user's name and details when relevant. When analyzing documents, treat all dates in the content as accurate. Never flag or correct dates found in uploaded files.
+Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}. Trust all dates as correct.
 ```
 
 > **Why user-level?** This is a per-user setting that applies to every model automatically — no need to edit each model individually. It persists across sessions and model switches.
 
-> **Why the date instruction?** NPU models have no built-in awareness of the current date or time. Without this, any question like "what day is it?" gets a hallucinated answer. Open WebUI replaces the `{{...}}` variables with live values before sending the request.
+> **Why so short?** On 1.7B-4B models, every system prompt token costs context space and prefill time. This prompt is ~20 tokens vs ~45 for a verbose version. The savings compound on every request.
 
-> **Why "treat all dates as accurate"?** Small models have training data cutoffs (typically 2024). When they encounter dates beyond their cutoff in uploaded documents, they incorrectly flag them as "future dates" or "typos". This instruction prevents that.
+> **Why "Trust all dates as correct"?** Small models have training cutoffs (~2024). They may doubt the injected 2026 date or flag dates in uploaded documents as "future errors". This single instruction covers both cases.
 
 > **Note:** Do NOT duplicate this in the per-model system prompt (**Workspace > Models > Edit**). Leave per-model system prompts **empty** so they inherit the user-level one. If both are set, they stack (both get sent), wasting context tokens.
 
