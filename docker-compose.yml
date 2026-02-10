@@ -1,0 +1,114 @@
+# =============================================================================
+# Open WebUI — Docker Compose for RKLLM API Server (Orange Pi 5 Plus)
+# =============================================================================
+#
+# All optimized settings are hardcoded as environment variables below.
+# These serve as correct defaults for fresh installs or config resets.
+# Once changed in the Admin UI, the database value takes precedence
+# (PersistentConfig). Delete the Docker volume to re-apply env vars.
+#
+# USAGE:
+#   docker compose up -d          # Start
+#   docker compose down            # Stop
+#   docker compose pull && docker compose up -d   # Update image
+#   docker compose down -v         # Reset (deletes all data + settings)
+#
+# =============================================================================
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: always
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui:/app/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # -----------------------------------------------------------------
+      # Connection — RKLLM API Server (NPU models)
+      # -----------------------------------------------------------------
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
+      - OPENAI_API_KEY=sk-unused
+
+      # -----------------------------------------------------------------
+      # RAG Pipeline
+      # -----------------------------------------------------------------
+      # Embedding & Reranking
+      - RAG_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+      - RAG_RERANKING_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+      - RAG_EMBEDDING_BATCH_SIZE=10
+      - ENABLE_ASYNC_EMBEDDING=True
+
+      # Retrieval tuning
+      - RAG_SYSTEM_CONTEXT=True
+      - RAG_TOP_K=5
+      - RAG_TOP_K_RERANKER=3
+      - RAG_RELEVANCE_THRESHOLD=0.0
+      - ENABLE_RAG_HYBRID_SEARCH=True
+      - ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=True
+      - RAG_HYBRID_BM25_WEIGHT=0.1
+
+      # Chunking
+      - CHUNK_SIZE=1000
+      - CHUNK_OVERLAP=0
+      - CHUNK_MIN_SIZE_TARGET=400
+      - ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER=True
+
+      # Query generation (API server shortcircuits this — ~0ms)
+      - ENABLE_RETRIEVAL_QUERY_GENERATION=True
+
+      # Custom RAG prompt template
+      - |
+        RAG_TEMPLATE=### Task:
+        Answer the user's question using ONLY the provided context. Be thorough and detailed.
+
+        ### Guidelines:
+        - If the answer is in the context, provide a comprehensive response with all relevant details.
+        - If the context doesn't contain the answer, say so clearly.
+        - Respond in the same language as the user's query.
+        - Do not use XML tags in your response.
+
+        <context>
+        {{CONTEXT}}
+        </context>
+
+        <user_query>
+        {{QUERY}}
+        </user_query>
+
+      # -----------------------------------------------------------------
+      # Web Search (SearXNG)
+      # -----------------------------------------------------------------
+      - ENABLE_WEB_SEARCH=True
+      - WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://host.docker.internal:8080/search?q=<query>
+      - WEB_SEARCH_RESULT_COUNT=5
+      - WEB_SEARCH_CONCURRENT_REQUESTS=3
+      - BYPASS_WEB_SEARCH_WEB_LOADER=True
+      - BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=True
+
+      # -----------------------------------------------------------------
+      # File Upload / Image Compression
+      # -----------------------------------------------------------------
+      # 448x448 matches the VL model (deepseekocr) input resolution
+      - FILE_IMAGE_COMPRESSION_WIDTH=448
+      - FILE_IMAGE_COMPRESSION_HEIGHT=448
+
+      # -----------------------------------------------------------------
+      # Features
+      # -----------------------------------------------------------------
+      - ENABLE_CHANNELS=True
+      - ENABLE_MEMORIES=True
+      - ENABLE_NOTES=True
+
+      # -----------------------------------------------------------------
+      # Privacy
+      # -----------------------------------------------------------------
+      - ANONYMIZED_TELEMETRY=false
+      - DO_NOT_TRACK=true
+
+volumes:
+  open-webui:

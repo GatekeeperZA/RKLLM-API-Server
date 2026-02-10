@@ -656,7 +656,26 @@ curl http://localhost:8000/health
 
 ### Docker Setup
 
-Open WebUI runs as a Docker container on the same Orange Pi (or any machine on the network). The following `docker run` command includes all environment variables needed for the RKLLM API server, RAG, and VL/OCR to work correctly:
+Open WebUI runs as a Docker container on the same Orange Pi (or any machine on the network). All optimized settings are hardcoded as environment variables so they persist across container recreations.
+
+**Option A: Docker Compose (recommended)**
+
+A `docker-compose.yml` is included in this repo with all settings pre-configured:
+
+```bash
+# Copy docker-compose.yml to the Orange Pi and start:
+docker compose up -d
+
+# Update to latest Open WebUI image:
+docker compose pull && docker compose up -d
+
+# Full reset (deletes all data + settings, env vars re-apply):
+docker compose down -v && docker compose up -d
+```
+
+**Option B: Docker Run**
+
+Equivalent single command with all env vars:
 
 ```bash
 docker run -d \
@@ -667,24 +686,50 @@ docker run -d \
   -v open-webui:/app/backend/data \
   -e OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1 \
   -e OPENAI_API_KEY=sk-unused \
-  -e ENABLE_RETRIEVAL_QUERY_GENERATION=True \
-  -e RAG_SYSTEM_CONTEXT=True \
   -e RAG_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5 \
   -e RAG_RERANKING_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2 \
-  -e ENABLE_RAG_HYBRID_SEARCH=True \
-  -e RAG_HYBRID_BM25_WEIGHT=0.1 \
+  -e RAG_EMBEDDING_BATCH_SIZE=10 \
+  -e ENABLE_ASYNC_EMBEDDING=True \
+  -e RAG_SYSTEM_CONTEXT=True \
+  -e RAG_TOP_K=5 \
+  -e RAG_TOP_K_RERANKER=3 \
   -e RAG_RELEVANCE_THRESHOLD=0.0 \
+  -e ENABLE_RAG_HYBRID_SEARCH=True \
   -e ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=True \
-  -e ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER=True \
+  -e RAG_HYBRID_BM25_WEIGHT=0.1 \
+  -e CHUNK_SIZE=1000 \
   -e CHUNK_OVERLAP=0 \
   -e CHUNK_MIN_SIZE_TARGET=400 \
-  -e RAG_TOP_K=5 \
+  -e ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER=True \
+  -e ENABLE_RETRIEVAL_QUERY_GENERATION=True \
+  -e 'RAG_TEMPLATE=### Task:
+Answer the user'"'"'s question using ONLY the provided context. Be thorough and detailed.
+
+### Guidelines:
+- If the answer is in the context, provide a comprehensive response with all relevant details.
+- If the context doesn'"'"'t contain the answer, say so clearly.
+- Respond in the same language as the user'"'"'s query.
+- Do not use XML tags in your response.
+
+<context>
+{{CONTEXT}}
+</context>
+
+<user_query>
+{{QUERY}}
+</user_query>' \
   -e ENABLE_WEB_SEARCH=True \
   -e WEB_SEARCH_ENGINE=searxng \
   -e SEARXNG_QUERY_URL=http://host.docker.internal:8080/search?q=<query> \
   -e WEB_SEARCH_RESULT_COUNT=5 \
+  -e WEB_SEARCH_CONCURRENT_REQUESTS=3 \
   -e BYPASS_WEB_SEARCH_WEB_LOADER=True \
   -e BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=True \
+  -e FILE_IMAGE_COMPRESSION_WIDTH=448 \
+  -e FILE_IMAGE_COMPRESSION_HEIGHT=448 \
+  -e ENABLE_CHANNELS=True \
+  -e ENABLE_MEMORIES=True \
+  -e ENABLE_NOTES=True \
   -e ANONYMIZED_TELEMETRY=false \
   -e DO_NOT_TRACK=true \
   ghcr.io/open-webui/open-webui:main
@@ -707,14 +752,19 @@ docker run -d \
 | `RAG_SYSTEM_CONTEXT` | `True` | Injects retrieved document/search content into the system message instead of user message, enabling KV prefix caching for faster follow-up turns |
 | `RAG_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Best retrieval-quality embedding model that runs efficiently on ARM CPU (see [Embedding Model](#embedding-model-recommendation) below) |
 | `RAG_RERANKING_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Lightweight cross-encoder reranker (22M params, ~88MB RAM) — re-scores Top K results for much better precision. Open WebUI's sigmoid normalization is specifically designed for MS MARCO models |
+| `RAG_EMBEDDING_BATCH_SIZE` | `10` | Processes 10 text chunks per embedding batch — speeds up document ingestion without excessive memory use on ARM |
+| `ENABLE_ASYNC_EMBEDDING` | `True` | Embeds documents asynchronously — prevents blocking the UI during file uploads |
 | `ENABLE_RAG_HYBRID_SEARCH` | `True` | Combines semantic (vector) + keyword (BM25) search for significantly better retrieval than vector-only |
 | `RAG_HYBRID_BM25_WEIGHT` | `0.1` | 10% keyword / 90% semantic — heavily semantic-leaning since bge-small-en-v1.5 delivers strong retrieval. Higher values dilute precision |
 | `ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS` | `True` | Enriches BM25 index with document filenames, titles, and section headers — improves keyword recall for metadata-based queries |
 | `ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER` | `True` | Splits documents by Markdown headers (H1-H6) first, preserving document structure. The character splitter only runs as a secondary pass on oversized sections |
 | `RAG_RELEVANCE_THRESHOLD` | `0.0` | **Critical.** Must be `0.0` — higher values filter out valid results because cross-encoder sigmoid scores are often below 0.1 for cross-lingual or loosely-related content. The reranker handles quality filtering instead |
+| `CHUNK_SIZE` | `1000` | Maximum characters per chunk. Balanced for 4K context models — large enough for coherent passages, small enough to fit multiple chunks |
 | `CHUNK_OVERLAP` | `0` | Zero overlap — Chroma Research showed overlap actively hurts retrieval IoU by returning redundant tokens. With Hybrid Search, overlap is unnecessary |
 | `CHUNK_MIN_SIZE_TARGET` | `400` | Merges tiny fragments (<400 chars) with neighbors, preventing low-quality micro-chunks. Works with Markdown Header Splitter to reduce chunk count by up to 90% |
-| `RAG_TOP_K` | `5` | Retrieves 5 candidate chunks, then reranker narrows to best 3 (Top K Reranker default). Good funnel ratio for 4K context models |
+| `RAG_TOP_K` | `5` | Retrieves 5 candidate chunks, then reranker narrows to best 3 (Top K Reranker). Good funnel ratio for 4K context models |
+| `RAG_TOP_K_RERANKER` | `3` | Reranker keeps top 3 from the 5 retrieved chunks — only the most relevant content reaches the model |
+| `RAG_TEMPLATE` | *(custom)* | Custom reading-comprehension prompt that instructs the model to answer from context only. See `docker-compose.yml` for the full template |
 
 **Web Search (SearXNG):**
 
@@ -724,8 +774,24 @@ docker run -d \
 | `WEB_SEARCH_ENGINE` | `searxng` | Uses the self-hosted SearXNG instance for privacy and JSON API support |
 | `SEARXNG_QUERY_URL` | `http://host.docker.internal:8080/search?q=<query>` | SearXNG instance URL. Uses `host.docker.internal` to reach the host-side SearXNG container. Change if your SearXNG is on a different host or port |
 | `WEB_SEARCH_RESULT_COUNT` | `5` | Number of search results to fetch. 5 gives good coverage — the API server's quality-floor filtering drops irrelevant results automatically |
+| `WEB_SEARCH_CONCURRENT_REQUESTS` | `3` | Limits concurrent web search requests to 3 — prevents overwhelming SearXNG while keeping searches fast |
 | `BYPASS_WEB_SEARCH_WEB_LOADER` | `True` | Uses search engine snippets instead of scraping full pages — cleaner, faster, and more reliable for small models |
 | `BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL` | `True` | Sends search snippets directly to the model without embedding/retrieving — the API server builds its own optimized prompt internally |
+
+**File Upload / Image Compression:**
+
+| Variable | Value | Reason |
+|----------|-------|--------|
+| `FILE_IMAGE_COMPRESSION_WIDTH` | `448` | Compresses uploaded images to 448px width — matches the VL model (deepseekocr) input resolution exactly |
+| `FILE_IMAGE_COMPRESSION_HEIGHT` | `448` | Compresses uploaded images to 448px height — reduces upload size without quality loss for vision tasks |
+
+**Features:**
+
+| Variable | Value | Reason |
+|----------|-------|--------|
+| `ENABLE_CHANNELS` | `True` | Enables group chat channels |
+| `ENABLE_MEMORIES` | `True` | Enables persistent user memories across conversations |
+| `ENABLE_NOTES` | `True` | Enables the notes feature for saving snippets |
 
 **Privacy:**
 
@@ -738,9 +804,9 @@ docker run -d \
 
 > **`--add-host` flag (Linux-specific, required):** On Linux, Docker does not resolve `host.docker.internal` by default — this is a Docker Desktop feature for macOS/Windows only. The `--add-host=host.docker.internal:host-gateway` flag maps it to the host's gateway IP, allowing the container to reach services running on the host (the RKLLM API server, Ollama, etc.). Without this flag, Open WebUI's default Ollama connection (`http://host.docker.internal:11434`) and any OpenAI connections using `host.docker.internal` will fail with `ClientConnectorDNSError: Cannot connect to host host.docker.internal`.
 
-> **Note:** All RAG/retrieval variables are set at the Docker level so they persist across container recreations. These are `PersistentConfig` variables — once the UI saves a value, it takes precedence over the env var (stored in `webui.db` on the `open-webui` Docker volume). The env vars serve as correct defaults for fresh installs or config resets. If you ever delete and recreate the Docker volume, the env vars re-apply automatically.
+> **Note:** All variables are set at the Docker level so they persist across container recreations. These are `PersistentConfig` variables — once the UI saves a value, it takes precedence over the env var (stored in `webui.db` on the `open-webui` Docker volume). The env vars serve as correct defaults for fresh installs or config resets. If you ever delete and recreate the Docker volume, the env vars re-apply automatically.
 
-> **Settings not hardcoded** (match Open WebUI defaults): `CHUNK_SIZE=1000`, `RAG_TEXT_SPLITTER=character`, `RAG_TOP_K_RERANKER=3`.
+> **Settings only configurable via Admin UI** (no env var available): Web search domain filter list (`!reddit.com`, `!twitter.com`, `!x.com`, `!linkedin.com`, `!facebook.com`, `!instagram.com`, `!tripadvisor.com`, `!timeanddate.com`), model display order, and prompt suggestions. These must be re-configured manually after a volume reset.
 
 ### Connection
 
