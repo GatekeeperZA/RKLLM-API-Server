@@ -1471,7 +1471,11 @@ python tests/deep_diagnostic.py --section 4    # Run only section 4
 | 11 | Message normalization (list content, integer coercion, null content, non-dict filtering) |
 | 12 | Shortcircuit streaming SSE compliance (chunk count, usage block, system_fingerprint) |
 
-All suites target `http://192.168.2.180:8000` by default — edit the `API` constant at the top to match your server IP.
+All suites default to `http://localhost:8000`. To target a remote server, set the `RKLLM_API` environment variable:
+
+```bash
+RKLLM_API=http://192.168.x.x:8000 python tests/diagnostic_test.py
+```
 
 ### Benchmark Tool (`tests/benchmark_test.py`)
 
