@@ -85,7 +85,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Open WebUI integration** — reasoning appears as collapsible thinking blocks
 
 ### Open WebUI Meta-Task Shortcuts
-- **Query generation shortcircuit** — Open WebUI asks the model to generate search queries for retrieval; instead of wasting 5s of inference, the server extracts the user's actual question from the chat history and returns it as the query instantly (~0ms)
+- **Query generation shortcircuit** — Open WebUI asks the model to generate search queries for retrieval; instead of wasting 5s of inference, the server extracts the user's actual question from the chat history and returns it as the query instantly (~0ms). For vague follow-ups ("can you verify that?"), it enriches the query with entities extracted from the assistant's previous response (bold text, quoted strings, capitalized phrases)
 - **Title generation shortcircuit** — extracts the first user message as the chat title (~0ms instead of 5-10s inference)
 - **Tag generation shortcircuit** — returns a default tag instantly (~0ms instead of 5-10s inference)
 - **Meta-task thinking disabled** — auto-detects Open WebUI internal tasks (query gen, title gen, tags, autocomplete) and disables `<think>` reasoning to avoid wasting 20+ seconds on trivial tasks
@@ -667,12 +667,13 @@ docker run -d \
   -v open-webui:/app/backend/data \
   -e OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1 \
   -e OPENAI_API_KEY=sk-unused \
-  -e ENABLE_RETRIEVAL_QUERY_GENERATION=False \
+  -e ENABLE_RETRIEVAL_QUERY_GENERATION=True \
   -e RAG_SYSTEM_CONTEXT=True \
   -e RAG_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5 \
   -e RAG_RERANKING_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2 \
   -e ENABLE_RAG_HYBRID_SEARCH=True \
-  -e RAG_HYBRID_BM25_WEIGHT=0.3 \
+  -e RAG_HYBRID_BM25_WEIGHT=0.1 \
+  -e RAG_RELEVANCE_THRESHOLD=0.0 \
   -e ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=True \
   -e ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER=True \
   -e CHUNK_OVERLAP=0 \
@@ -680,8 +681,8 @@ docker run -d \
   -e RAG_TOP_K=5 \
   -e ENABLE_WEB_SEARCH=True \
   -e WEB_SEARCH_ENGINE=searxng \
-  -e SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query> \
-  -e WEB_SEARCH_RESULT_COUNT=3 \
+  -e SEARXNG_QUERY_URL=http://host.docker.internal:8080/search?q=<query> \
+  -e WEB_SEARCH_RESULT_COUNT=5 \
   -e BYPASS_WEB_SEARCH_WEB_LOADER=True \
   -e BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=True \
   -e ANONYMIZED_TELEMETRY=false \
@@ -702,14 +703,15 @@ docker run -d \
 
 | Variable | Value | Reason |
 |----------|-------|--------|
-| `ENABLE_RETRIEVAL_QUERY_GENERATION` | `False` | Prevents Open WebUI from sending a separate LLM call to generate search queries for RAG — the server handles this via meta-task shortcircuits instead |
+| `ENABLE_RETRIEVAL_QUERY_GENERATION` | `True` | Enables retrieval query generation — Open WebUI sends a query gen request, which the API server shortcircuits instantly (~0ms) with a context-enriched query instead of wasting 5-10s on inference |
 | `RAG_SYSTEM_CONTEXT` | `True` | Injects retrieved document/search content into the system message instead of user message, enabling KV prefix caching for faster follow-up turns |
 | `RAG_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Best retrieval-quality embedding model that runs efficiently on ARM CPU (see [Embedding Model](#embedding-model-recommendation) below) |
 | `RAG_RERANKING_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Lightweight cross-encoder reranker (22M params, ~88MB RAM) — re-scores Top K results for much better precision. Open WebUI's sigmoid normalization is specifically designed for MS MARCO models |
 | `ENABLE_RAG_HYBRID_SEARCH` | `True` | Combines semantic (vector) + keyword (BM25) search for significantly better retrieval than vector-only |
-| `RAG_HYBRID_BM25_WEIGHT` | `0.3` | 30% keyword / 70% semantic — semantic-leaning balance. Semantic search is stronger with a good embedding model |
+| `RAG_HYBRID_BM25_WEIGHT` | `0.1` | 10% keyword / 90% semantic — heavily semantic-leaning since bge-small-en-v1.5 delivers strong retrieval. Higher values dilute precision |
 | `ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS` | `True` | Enriches BM25 index with document filenames, titles, and section headers — improves keyword recall for metadata-based queries |
 | `ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER` | `True` | Splits documents by Markdown headers (H1-H6) first, preserving document structure. The character splitter only runs as a secondary pass on oversized sections |
+| `RAG_RELEVANCE_THRESHOLD` | `0.0` | **Critical.** Must be `0.0` — higher values filter out valid results because cross-encoder sigmoid scores are often below 0.1 for cross-lingual or loosely-related content. The reranker handles quality filtering instead |
 | `CHUNK_OVERLAP` | `0` | Zero overlap — Chroma Research showed overlap actively hurts retrieval IoU by returning redundant tokens. With Hybrid Search, overlap is unnecessary |
 | `CHUNK_MIN_SIZE_TARGET` | `400` | Merges tiny fragments (<400 chars) with neighbors, preventing low-quality micro-chunks. Works with Markdown Header Splitter to reduce chunk count by up to 90% |
 | `RAG_TOP_K` | `5` | Retrieves 5 candidate chunks, then reranker narrows to best 3 (Top K Reranker default). Good funnel ratio for 4K context models |
@@ -720,8 +722,8 @@ docker run -d \
 |----------|-------|--------|
 | `ENABLE_WEB_SEARCH` | `True` | Enables the web search toggle in the chat UI |
 | `WEB_SEARCH_ENGINE` | `searxng` | Uses the self-hosted SearXNG instance for privacy and JSON API support |
-| `SEARXNG_QUERY_URL` | `http://searxng:8080/search?q=<query>` | SearXNG Docker service URL. Change `searxng` to your container name or IP if different |
-| `WEB_SEARCH_RESULT_COUNT` | `3` | Number of search results to fetch. 3 is good for 4K context models; increase to 5 for 16K models |
+| `SEARXNG_QUERY_URL` | `http://host.docker.internal:8080/search?q=<query>` | SearXNG instance URL. Uses `host.docker.internal` to reach the host-side SearXNG container. Change if your SearXNG is on a different host or port |
+| `WEB_SEARCH_RESULT_COUNT` | `5` | Number of search results to fetch. 5 gives good coverage — the API server's quality-floor filtering drops irrelevant results automatically |
 | `BYPASS_WEB_SEARCH_WEB_LOADER` | `True` | Uses search engine snippets instead of scraping full pages — cleaner, faster, and more reliable for small models |
 | `BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL` | `True` | Sends search snippets directly to the model without embedding/retrieving — the API server builds its own optimized prompt internally |
 
@@ -736,9 +738,9 @@ docker run -d \
 
 > **`--add-host` flag (Linux-specific, required):** On Linux, Docker does not resolve `host.docker.internal` by default — this is a Docker Desktop feature for macOS/Windows only. The `--add-host=host.docker.internal:host-gateway` flag maps it to the host's gateway IP, allowing the container to reach services running on the host (the RKLLM API server, Ollama, etc.). Without this flag, Open WebUI's default Ollama connection (`http://host.docker.internal:11434`) and any OpenAI connections using `host.docker.internal` will fail with `ClientConnectorDNSError: Cannot connect to host host.docker.internal`.
 
-> **Note:** All RAG/retrieval variables are set at the Docker level so they persist across container recreations. These are `PersistentConfig` variables — once the UI saves a value, it takes precedence over the env var. The env vars serve as correct defaults for fresh installs or config resets.
+> **Note:** All RAG/retrieval variables are set at the Docker level so they persist across container recreations. These are `PersistentConfig` variables — once the UI saves a value, it takes precedence over the env var (stored in `webui.db` on the `open-webui` Docker volume). The env vars serve as correct defaults for fresh installs or config resets. If you ever delete and recreate the Docker volume, the env vars re-apply automatically.
 
-> **Settings not hardcoded** (match Open WebUI defaults): `CHUNK_SIZE=1000`, `RAG_TEXT_SPLITTER=character`, `RAG_TOP_K_RERANKER=3`, `RAG_RELEVANCE_THRESHOLD=0.0`.
+> **Settings not hardcoded** (match Open WebUI defaults): `CHUNK_SIZE=1000`, `RAG_TEXT_SPLITTER=character`, `RAG_TOP_K_RERANKER=3`.
 
 ### Connection
 
@@ -814,8 +816,8 @@ All web search settings are hardcoded (see [Docker Setup](#docker-setup) env var
 |---------|-------|----------|
 | Web Search | **ON** | `ENABLE_WEB_SEARCH=True` |
 | Search Engine | `searxng` | `WEB_SEARCH_ENGINE=searxng` |
-| SearXNG Query URL | `http://searxng:8080/search?q=<query>` | `SEARXNG_QUERY_URL` |
-| Result Count | `3` | `WEB_SEARCH_RESULT_COUNT=3` |
+| SearXNG Query URL | `http://host.docker.internal:8080/search?q=<query>` | `SEARXNG_QUERY_URL` |
+| Result Count | `5` | `WEB_SEARCH_RESULT_COUNT=5` |
 | Bypass Web Loader | **ON** | `BYPASS_WEB_SEARCH_WEB_LOADER=True` |
 | Bypass Embedding & Retrieval | **ON** | `BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=True` |
 
@@ -861,8 +863,8 @@ These settings control how Open WebUI chunks, embeds, and retrieves uploaded doc
 | **Full Context Mode** | **OFF** | default | Injecting the entire document overflows the 4K context window |
 | **Hybrid Search** | **ON** | `ENABLE_RAG_HYBRID_SEARCH=True` | Combines semantic (vector) + keyword (BM25) search |
 | **Enrich Hybrid Search Text** | **ON** | `ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=True` | Enriches BM25 index with filenames, titles, and section headers |
-| **BM25 Weight** | `0.3` | `RAG_HYBRID_BM25_WEIGHT=0.3` | 30% keyword / 70% semantic — semantic-leaning since bge-small-en-v1.5 is strong |
-| **Relevance Threshold** | `0` | default | Let the reranker handle filtering. Increase to 0.1-0.2 if low-quality results appear |
+| **BM25 Weight** | `0.1` | `RAG_HYBRID_BM25_WEIGHT=0.1` | 10% keyword / 90% semantic — heavily semantic-leaning since bge-small-en-v1.5 delivers strong retrieval |
+| **Relevance Threshold** | `0` | `RAG_RELEVANCE_THRESHOLD=0.0` | **Must be 0.** Cross-encoder sigmoid scores are often below 0.1 for valid content — any threshold filters out real results. Let the reranker handle quality |
 
 > **RAG Template:** Use the **default template** (clear the field) — it includes inline citation support with `[id]` format and comprehensive guidelines. The API server's RAG pipeline works with the default template.
 
@@ -1452,7 +1454,7 @@ Measured on **Orange Pi 5 Plus (16 GB)** — RK3588, 3 NPU cores, RKNPU driver 0
 | `v1.0-subprocess-stable` | Last working subprocess version (V1) |
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
-| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + document RAG + NPU benchmarks + full test suites (108/108 pass) |
+| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + NPU benchmarks + full test suites (108/108 pass) |
 
 ---
 
