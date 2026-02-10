@@ -804,9 +804,59 @@ Answer the user'"'"'s question using ONLY the provided context. Be thorough and 
 
 > **`--add-host` flag (Linux-specific, required):** On Linux, Docker does not resolve `host.docker.internal` by default — this is a Docker Desktop feature for macOS/Windows only. The `--add-host=host.docker.internal:host-gateway` flag maps it to the host's gateway IP, allowing the container to reach services running on the host (the RKLLM API server, Ollama, etc.). Without this flag, Open WebUI's default Ollama connection (`http://host.docker.internal:11434`) and any OpenAI connections using `host.docker.internal` will fail with `ClientConnectorDNSError: Cannot connect to host host.docker.internal`.
 
-> **Note:** All variables are set at the Docker level so they persist across container recreations. These are `PersistentConfig` variables — once the UI saves a value, it takes precedence over the env var (stored in `webui.db` on the `open-webui` Docker volume). The env vars serve as correct defaults for fresh installs or config resets. If you ever delete and recreate the Docker volume, the env vars re-apply automatically.
+### What's Hardcoded and Why
 
-> **Settings only configurable via Admin UI** (no env var available): Web search domain filter list (`!reddit.com`, `!twitter.com`, `!x.com`, `!linkedin.com`, `!facebook.com`, `!instagram.com`, `!tripadvisor.com`, `!timeanddate.com`), model display order, and prompt suggestions. These must be re-configured manually after a volume reset.
+The goal is **minimal user configuration** — a fresh install should work correctly out of the box with zero manual settings. The `docker-compose.yml` file and database setup scripts together achieve this by hardcoding every setting that can be automated.
+
+**Three hardcoding layers are used:**
+
+| Layer | How | Survives Container Recreate | Survives Volume Delete |
+|-------|-----|:---------------------------:|:----------------------:|
+| **Docker env vars** (`docker-compose.yml`) | `PersistentConfig` — env var sets the initial default, DB value takes precedence once changed in UI | Yes | Yes (re-applies) |
+| **Database scripts** (`tests/set_model_prompts.py`, `tests/fix_owui_models.py`) | Directly write to `webui.db` inside the container | Yes (data on Docker volume) | No (must re-run) |
+| **Admin UI only** | No env var or script — must configure manually | Yes (data on Docker volume) | No (must redo) |
+
+**Settings hardcoded via Docker env vars** (auto-restore on fresh install):
+
+| Category | Settings |
+|----------|----------|
+| Connection | API base URL, API key |
+| RAG pipeline | Embedding model, reranking model, batch size, async embedding, hybrid search, BM25 weight, enriched texts, relevance threshold, top_k, top_k_reranker, custom RAG template |
+| Chunking | Chunk size, overlap, min size target, markdown header splitter |
+| Web search | Engine, SearXNG URL, result count, concurrent requests, bypass modes |
+| File upload | Image compression (448×448 for VL model) |
+| Features | Channels, memories, notes |
+| Privacy | Telemetry disabled |
+
+**Settings hardcoded via database scripts** (must re-run after volume reset):
+
+| Script | What it sets |
+|--------|-------------|
+| `tests/set_model_prompts.py` | System prompt on all models (date/time context) |
+| `tests/fix_owui_models.py` | Model capability flags (vision, image_gen, code_interpreter, etc.) |
+
+**Settings only configurable via Admin UI** (no env var available, must redo manually after volume reset):
+
+| Setting | Current Value | Where to Set |
+|---------|---------------|-------------|
+| Web search domain filter list | `!reddit.com`, `!twitter.com`, `!x.com`, `!linkedin.com`, `!facebook.com`, `!instagram.com`, `!tripadvisor.com`, `!timeanddate.com` | Admin > Settings > Web Search > Domain Filter List |
+| Model display order | qwen3-1.7b, qwen3-4b, phi-3-mini, gemma-3, deepseek-r1:7b, qwen3:8b, deepseekocr | Admin > Settings > Interface > Model Order |
+| Prompt suggestions | 16 custom suggestions (study, coding, travel, etc.) | Admin > Settings > Interface > Prompt Suggestions |
+
+**Full recovery after volume reset (`docker compose down -v`):**
+
+```bash
+# 1. Re-create container (env vars auto-apply)
+docker compose up -d
+
+# 2. Create admin account in browser, then run DB scripts:
+docker cp tests/set_model_prompts.py open-webui:/tmp/
+docker exec open-webui python3 /tmp/set_model_prompts.py
+docker cp tests/fix_owui_models.py open-webui:/tmp/
+docker exec open-webui python3 /tmp/fix_owui_models.py
+
+# 3. Re-configure Admin UI-only settings manually (domain filters, model order, prompt suggestions)
+```
 
 ### Connection
 
@@ -858,23 +908,38 @@ ollama pull phi3:3.8b
 
 > **CPU models (Ollama) do NOT need the NPU-specific settings below.** The system prompt, disabled "Builtin Tools", and other restrictions apply only to small NPU models served by this RKLLM API.
 
-### System Prompt (Required)
+### System Prompt (Pre-Configured)
 
-Set a **user-level** system prompt that applies globally to all models:
+The system prompt is set at the **model level** in the database — it applies to all users automatically with **zero user configuration required**. New users get the correct prompt immediately without needing to set anything up.
 
-**Settings** (gear icon, bottom-left) **> General > System Prompt:**
+**Current prompt (set on all models):**
 
 ```
 Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}. Trust all dates as correct.
 ```
 
-> **Why user-level?** This is a per-user setting that applies to every model automatically — no need to edit each model individually. It persists across sessions and model switches.
+Open WebUI resolves the template variables server-side before sending to the model:
+- `{{CURRENT_DATE}}` → e.g. "February 10, 2026"
+- `{{CURRENT_WEEKDAY}}` → e.g. "Tuesday"
+- `{{CURRENT_TIME}}` → e.g. "14:30:00"
+
+**How it works:** The prompt is stored in each model's `params.system` field in the database. Open WebUI injects it server-side on every request via `apply_system_prompt_to_body()`. This is enforced regardless of which user sends the message.
+
+**To change the prompt:** Edit `SYSTEM_PROMPT` in `tests/set_model_prompts.py` and re-run:
+
+```bash
+# Edit the prompt in the script, then:
+docker cp tests/set_model_prompts.py open-webui:/tmp/
+docker exec open-webui python3 /tmp/set_model_prompts.py
+```
+
+**Users can optionally add their own prompt** in Settings > General > System Prompt. If set, both prompts are sent (they stack). Leave the user-level prompt **empty** to use only the model-level default.
+
+> **Why model-level instead of user-level?** User-level prompts must be configured manually by each user — if a new user joins and forgets to set it, models won't know today's date. Model-level prompts are server-enforced, zero-configuration, and apply to everyone.
 
 > **Why so short?** On 1.7B-4B models, every system prompt token costs context space and prefill time. This prompt is ~20 tokens vs ~45 for a verbose version. The savings compound on every request.
 
 > **Why "Trust all dates as correct"?** Small models have training cutoffs (~2024). They may doubt the injected 2026 date or flag dates in uploaded documents as "future errors". This single instruction covers both cases.
-
-> **Note:** Do NOT duplicate this in the per-model system prompt (**Workspace > Models > Edit**). Leave per-model system prompts **empty** so they inherit the user-level one. If both are set, they stack (both get sent), wasting context tokens.
 
 ### Web Search (SearXNG)
 
