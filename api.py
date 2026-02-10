@@ -213,6 +213,7 @@ REQUEST_STALE_TIMEOUT = 30
 # Monitoring
 MONITOR_INTERVAL = 10
 IDLE_UNLOAD_TIMEOUT = 300
+VL_IDLE_UNLOAD_TIMEOUT = 300  # Auto-unload VL model after idle (frees NPU memory for large text models)
 
 # Stopword list for content-vs-boilerplate detection (jusText-inspired).
 ENGLISH_STOPWORDS = frozenset({
@@ -1237,6 +1238,7 @@ PROCESS_LOCK = RLock()
 _vision_encoder = None       # RKNNVisionEncoder instance (persistent)
 _vl_rkllm_wrapper = None     # RKLLMWrapper for VL LLM decoder
 VL_CURRENT_MODEL = None      # Name of loaded VL model (None = not loaded)
+VL_LAST_REQUEST_TIME = 0     # Timestamp of last VL request (for idle auto-unload)
 
 SHUTDOWN_EVENT = Event()
 GENERATION_COMPLETE = Event()
@@ -2162,6 +2164,17 @@ def load_model(model_name, config):
         load_start = time.time()
 
         if not _rkllm_wrapper.init_model(model_path, ctx_len, max_tokens):
+            # NPU memory may be exhausted by VL model — try unloading VL and retrying
+            if VL_CURRENT_MODEL:
+                logger.warning(f"Model {model_name} init failed with VL loaded — "
+                              f"unloading VL model to free NPU memory and retrying")
+                _unload_vl_model("NPU memory pressure — text model init failed")
+                if _rkllm_wrapper.init_model(model_path, ctx_len, max_tokens):
+                    logger.info(f"Model {model_name} loaded successfully after VL unload")
+                    elapsed = time.time() - load_start
+                    logger.info(f"{model_name} LOADED successfully in {elapsed:.1f}s (ctx={ctx_len})")
+                    CURRENT_MODEL = model_name
+                    return True
             logger.error(f"Model {model_name} failed to initialize "
                         f"(check model file integrity and rkllm version compatibility)")
             return False
@@ -2308,13 +2321,21 @@ def model_monitor():
         try:
             force_clear_if_orphaned()
 
-            # Auto-unload after idle timeout
+            # Auto-unload text model after idle timeout
             if (IDLE_UNLOAD_TIMEOUT > 0 and is_model_loaded()
                     and not is_request_active() and LAST_REQUEST_TIME > 0
                     and (time.time() - LAST_REQUEST_TIME) > IDLE_UNLOAD_TIMEOUT):
                 logger.info(f"Auto-unloading {CURRENT_MODEL} after "
                             f"{int(time.time() - LAST_REQUEST_TIME)}s idle")
                 unload_current("idle timeout")
+
+            # Auto-unload VL model after idle timeout (frees NPU memory)
+            if (VL_IDLE_UNLOAD_TIMEOUT > 0 and VL_CURRENT_MODEL
+                    and not is_request_active() and VL_LAST_REQUEST_TIME > 0
+                    and (time.time() - VL_LAST_REQUEST_TIME) > VL_IDLE_UNLOAD_TIMEOUT):
+                logger.info(f"Auto-unloading VL model {VL_CURRENT_MODEL} after "
+                            f"{int(time.time() - VL_LAST_REQUEST_TIME)}s idle")
+                _unload_vl_model("idle timeout")
         except Exception as e:
             logger.error(f"Monitor error: {e}")
 
@@ -2901,6 +2922,8 @@ def chat_completions():
                 end_request(request_id)
                 return make_error_response(f"Failed to load VL model '{vl_name}'", 500)
             update_request_activity()
+            global VL_LAST_REQUEST_TIME
+            VL_LAST_REQUEST_TIME = time.time()
 
             try:
                 image_np = _preprocess_image(
