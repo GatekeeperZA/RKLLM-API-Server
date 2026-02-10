@@ -2924,6 +2924,12 @@ def chat_completions():
         if is_rag:
             keep_history = 0
             kv_is_reset = True
+            # Explicitly clear KV cache before RAG inference.
+            # keep_history=0 discards the cache AFTER the run, but stale
+            # context from a prior non-RAG conversation would still be
+            # present DURING the run, contaminating the RAG prompt.
+            if _rkllm_wrapper and _rkllm_wrapper.is_loaded:
+                _rkllm_wrapper.clear_kv_cache()
             _reset_kv_tracking()
         else:
             incremental_msg = _check_kv_incremental(name, messages)
