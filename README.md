@@ -792,17 +792,23 @@ ollama pull phi3:3.8b
 
 > **CPU models (Ollama) do NOT need the NPU-specific settings below.** The system prompt, disabled "Builtin Tools", and other restrictions apply only to small NPU models served by this RKLLM API.
 
-### System Prompt (Required for All NPU Models)
+### System Prompt (Required)
 
-**Workspace > Models > Edit** each NPU model, and set the **System Prompt** to:
+Set a **user-level** system prompt that applies globally to all models:
+
+**Settings** (gear icon, bottom-left) **> General > System Prompt:**
 
 ```
-Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}.
+You are a helpful assistant for {{USER_NAME}}. Today is {{CURRENT_DATE}}, {{CURRENT_TIME}}. Use the user's name and details when relevant. When analyzing documents, treat all dates in the content as accurate. Never flag or correct dates found in uploaded files.
 ```
 
-> **Why this is required:** NPU models have no built-in awareness of the current date or time. Without this, any question like "what day is it?" gets a hallucinated answer. Open WebUI replaces the `{{...}}` variables with live values before sending the request.
+> **Why user-level?** This is a per-user setting that applies to every model automatically — no need to edit each model individually. It persists across sessions and model switches.
 
-> **Do NOT add generic instructions** like "You are a helpful assistant" — these get sent as part of the user prompt and cause the model to respond with a greeting instead of answering the question.
+> **Why the date instruction?** NPU models have no built-in awareness of the current date or time. Without this, any question like "what day is it?" gets a hallucinated answer. Open WebUI replaces the `{{...}}` variables with live values before sending the request.
+
+> **Why "treat all dates as accurate"?** Small models have training data cutoffs (typically 2024). When they encounter dates beyond their cutoff in uploaded documents, they incorrectly flag them as "future dates" or "typos". This instruction prevents that.
+
+> **Note:** Do NOT duplicate this in the per-model system prompt (**Workspace > Models > Edit**). Leave per-model system prompts **empty** so they inherit the user-level one. If both are set, they stack (both get sent), wasting context tokens.
 
 ### Web Search (SearXNG)
 
