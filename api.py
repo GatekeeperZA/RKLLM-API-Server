@@ -2661,11 +2661,16 @@ def chat_completions():
             break
     _luc_lower = _last_user_content.lower()
 
-    # === SHORTCIRCUIT: Retrieval query generation ===
+    # === SHORTCIRCUIT: Retrieval / web-search query generation ===
     # Open WebUI asks the model to generate search queries for document
-    # retrieval.  On small models this wastes ~5s and the JSON output
-    # often leaks into the chat display.  Extract the real question from
-    # the chat history and return it directly as the query.
+    # retrieval or web search.  On small models this wastes ~5s and the
+    # JSON output often leaks into the chat display.
+    #
+    # Strategy: extract the LAST user message from the embedded
+    # <chat_history>.  If it's a short/vague follow-up (e.g.
+    # "can you verify that course exists"), enrich it with key
+    # entities/topics extracted from the previous ASSISTANT response
+    # so the search engine gets a contextual query.
     _is_query_gen = (
         'generate search queries' in _luc_lower
         or 'generating search queries' in _luc_lower
@@ -2674,11 +2679,93 @@ def chat_completions():
     )
     if _is_query_gen:
         import re as _re_sc
-        _m = _re_sc.search(
-            r'(?:USER|user):\s*(.+?)(?:\s*</chat_history>|\s*$)',
+
+        # --- 1. Parse every USER/ASSISTANT turn from the chat_history ---
+        _ch_match = _re_sc.search(
+            r'<chat_history>(.*?)</chat_history>',
             _last_user_content, _re_sc.DOTALL
         )
-        _real_q = _m.group(1).strip() if _m else 'general query'
+        _chat_block = _ch_match.group(1) if _ch_match else _last_user_content
+
+        _all_user = _re_sc.findall(
+            r'(?:USER|user):\s*(.+?)(?=\s*(?:ASSISTANT|assistant):|</chat_history>|\s*$)',
+            _chat_block, _re_sc.DOTALL
+        )
+        _all_asst = _re_sc.findall(
+            r'(?:ASSISTANT|assistant):\s*(.+?)(?=\s*(?:USER|user):|</chat_history>|\s*$)',
+            _chat_block, _re_sc.DOTALL
+        )
+
+        _real_q = _all_user[-1].strip() if _all_user else 'general query'
+        _prev_asst = _all_asst[-1].strip() if _all_asst else ''
+
+        # --- 2. Context-enrich short/vague follow-up questions ---
+        # A question is considered "vague" when it's short and uses
+        # pronouns / demonstratives instead of naming things directly.
+        _VAGUE_WORDS = {'it', 'its', 'this', 'that', 'these', 'those',
+                        'they', 'them', 'one', 'the course', 'the document',
+                        'the file', 'the article', 'the data'}
+        _q_lower = _real_q.lower()
+        _is_vague = (
+            len(_real_q.split()) < 12
+            and any(v in _q_lower for v in _VAGUE_WORDS)
+        )
+
+        if _is_vague and _prev_asst:
+            # Extract key entities from the assistant's last response.
+            # Use capitalized words/phrases and quoted terms as signals
+            # of important nouns (course names, product names, etc.).
+            _entities = []
+
+            # Quoted strings (single or double)
+            _quoted = _re_sc.findall(r'["\u201c]([^"\u201d]{3,60})["\u201d]', _prev_asst)
+            _entities.extend(q.strip() for q in _quoted[:3])
+
+            # **Bold** text
+            _bold = _re_sc.findall(r'\*\*(.{3,60}?)\*\*', _prev_asst)
+            _entities.extend(b.strip() for b in _bold[:3])
+
+            # Capitalized multi-word phrases (e.g. "Python for Data Science")
+            _caps = _re_sc.findall(
+                r'\b([A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|for|and|the|of|in|with|&)){1,6})\b',
+                _prev_asst
+            )
+            _entities.extend(c.strip() for c in _caps[:5])
+
+            # Deduplicate while preserving order; skip entries that
+            # are substrings of an already-accepted entity.
+            _seen = set()
+            _unique_ents = []
+            for e in _entities:
+                _e_low = e.lower().strip()
+                if len(_e_low) < 3:
+                    continue
+                # Skip if this entity is a substring of one already kept
+                if any(_e_low in prev for prev in _seen):
+                    continue
+                # Remove previously-kept entries that are substrings
+                # of this (longer) entity
+                _seen = {p for p in _seen if p not in _e_low}
+                _unique_ents = [u for u in _unique_ents
+                                if u.lower() not in _e_low]
+                _seen.add(_e_low)
+                _unique_ents.append(e)
+
+            if _unique_ents:
+                # Build an enriched query: user question + top entities
+                _context_str = ' '.join(_unique_ents[:4])
+                _enriched_q = f"{_real_q} {_context_str}"
+                # Cap length for search engine friendliness
+                if len(_enriched_q) > 200:
+                    _enriched_q = _enriched_q[:200].rsplit(' ', 1)[0]
+                logger.info(f"SHORTCIRCUIT query gen — enriched vague query: "
+                            f"'{_real_q}' → '{_enriched_q}'")
+                return _make_shortcircuit_response(
+                    json.dumps({"queries": [_enriched_q]}),
+                    f"query gen — enriched: '{_enriched_q[:80]}'"
+                )
+
+        # Not vague or no assistant context — use the raw question
         return _make_shortcircuit_response(
             json.dumps({"queries": [_real_q]}),
             f"query gen — search query: '{_real_q[:80]}'"
