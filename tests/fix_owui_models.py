@@ -5,7 +5,7 @@ Fix Open WebUI model capabilities in the database.
 Problem: Most models have incorrect capability flags (vision, image_generation,
 code_interpreter, builtin_tools, citations) that don't match actual hardware.
 
-Only deepseekocr has a VL encoder. No models support image generation,
+Only qwen3-vl-2b has a VL encoder. No models support image generation,
 code interpretation, or built-in function calling on our RK3588 setup.
 """
 
@@ -19,7 +19,7 @@ DB_PATH = "/app/backend/data/webui.db"
 # Key: model id prefix → correct capability overrides
 # Defaults: vision=false, image_generation=false, code_interpreter=false,
 #           builtin_tools=false, citations=false
-# Only deepseekocr gets vision=true
+# Only qwen3-vl-2b gets vision=true (replaced deepseekocr)
 
 CORRECT_CAPS = {
     # NPU models (our RKLLM server)
@@ -27,7 +27,7 @@ CORRECT_CAPS = {
     "qwen3-4b-instruct-2507":  {"vision": False, "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
     "phi-3-mini-4k-instruct":  {"vision": False, "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
     "gemma-3-4b-it":           {"vision": False, "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
-    "deepseekocr":             {"vision": True,  "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
+    "qwen3-vl-2b":             {"vision": True,  "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
     
     # Ollama models
     "deepcoder-1.5b-preview":       {"vision": False, "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},

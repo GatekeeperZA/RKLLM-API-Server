@@ -104,7 +104,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Proper error responses** matching OpenAI error format
 
 ### Vision-Language (VL) / Multimodal
-- **Dual-model architecture** — text model (e.g. Qwen3-1.7B) + VL model (e.g. DeepSeekOCR-3B) loaded simultaneously
+- **Dual-model architecture** — text model (e.g. Qwen3-1.7B) + VL model (e.g. Qwen3-VL-2B) loaded simultaneously
 - **Automatic image routing** — requests with images route to VL model, text-only to text model
 - **Base64 image support** — accepts `image_url` with `data:image/...;base64,...` format (Open WebUI compatible)
 - **Direct NPU vision encoding** via ctypes binding to `librknnrt.so` (no Python RKNN toolkit needed)
@@ -164,7 +164,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 
 4. **gthread, not gevent** — `rkllm_run()` is a blocking C function that freezes gevent's event loop. Using `-k gthread` with real OS threads avoids this.
 
-5. **Dual-model VL** — Text and VL models are loaded simultaneously into separate `RKLLMWrapper` instances. The vision encoder runs on a third ctypes binding (`librknnrt.so`). Image requests are auto-routed to the VL pipeline; text requests use the primary model. A shared `_token_queue` serialized by `PROCESS_LOCK` prevents interleaving.
+5. **Dual-model VL** — Text and VL models are loaded simultaneously into separate `RKLLMWrapper` instances. The vision encoder runs on a third ctypes binding (`librknnrt.so`). Image requests are auto-routed to the VL pipeline; text requests use the primary model. A shared `_token_queue` serialized by `PROCESS_LOCK` prevents interleaving. Default VL model: **Qwen3-VL-2B** (replaced DeepSeekOCR-3B — smaller, saves ~1.1 GB RAM).
 
 ---
 
@@ -434,9 +434,9 @@ VL models require **two** files in the same folder: a `.rkllm` decoder and a `.r
 ~/models/
 ├── Qwen3-1.7B/                          # Text-only model
 │   └── Qwen3-1.7B-w8a8-rk3588.rkllm
-└── DeepSeekOCR-3B/                       # VL model (text + vision)
-    ├── DeepSeekOCR-3B-w8a8-rk3588.rkllm  # LLM decoder
-    └── DeepSeekOCR-3B-vision-encoder.rknn # Vision encoder
+└── Qwen3-VL-2b/                          # VL model (text + vision)
+    ├── Qwen3-VL-2b-w8a8-rk3588.rkllm     # LLM decoder
+    └── Qwen3-VL-2b-vision-encoder.rknn   # Vision encoder
 ```
 
 **How it works:**
@@ -448,8 +448,8 @@ VL models require **two** files in the same folder: a `.rkllm` decoder and a `.r
 **Supported VL models** (model folder name must contain):
 | Pattern | Model Family |
 |---------|-------------|
-| `deepseekocr` | DeepSeekOCR (recommended for OCR tasks) |
-| `qwen3-vl` | Qwen3-VL |
+| `qwen3-vl` | Qwen3-VL (recommended — fast, accurate, small) |
+| `deepseekocr` | DeepSeekOCR |
 | `qwen2.5-vl` | Qwen2.5-VL |
 | `qwen2-vl` | Qwen2-VL |
 | `internvl3` | InternVL3 |
@@ -458,7 +458,7 @@ VL models require **two** files in the same folder: a `.rkllm` decoder and a `.r
 **Requirements:**
 - `numpy` and `Pillow` Python packages (installed by `setup.sh`)
 - `librknnrt.so` (RKNN runtime library, usually at `/usr/lib/librknnrt.so`)
-- Sufficient RAM for both models (~5.5 GB for Qwen3-1.7B + DeepSeekOCR-3B)
+- Sufficient RAM for both models (~4.4 GB for Qwen3-1.7B + Qwen3-VL-2B)
 
 ### Context Length Detection
 
@@ -639,7 +639,7 @@ curl http://localhost:8000/health
   "current_model": "qwen3-1.7b",
   "model_loaded": true,
   "vl_model": {
-    "model": "deepseekocr-3b",
+    "model": "qwen3-vl-2b",
     "encoder_loaded": true,
     "llm_loaded": true
   },
@@ -782,7 +782,7 @@ Answer the user'"'"'s question using ONLY the provided context. Be thorough and 
 
 | Variable | Value | Reason |
 |----------|-------|--------|
-| `FILE_IMAGE_COMPRESSION_WIDTH` | `448` | Compresses uploaded images to 448px width — matches the VL model (deepseekocr) input resolution exactly |
+| `FILE_IMAGE_COMPRESSION_WIDTH` | `448` | Compresses uploaded images to 448px width — matches the VL model input resolution |
 | `FILE_IMAGE_COMPRESSION_HEIGHT` | `448` | Compresses uploaded images to 448px height — reduces upload size without quality loss for vision tasks |
 
 **Features:**
@@ -840,7 +840,7 @@ The goal is **minimal user configuration** — a fresh install should work corre
 | Setting | Current Value | Where to Set |
 |---------|---------------|-------------|
 | Web search domain filter list | `!reddit.com`, `!twitter.com`, `!x.com`, `!linkedin.com`, `!facebook.com`, `!instagram.com`, `!tripadvisor.com`, `!timeanddate.com` | Admin > Settings > Web Search > Domain Filter List |
-| Model display order | qwen3-1.7b, qwen3-4b, phi-3-mini, gemma-3, deepseek-r1:7b, qwen3:8b, deepseekocr | Admin > Settings > Interface > Model Order |
+| Model display order | qwen3-1.7b, qwen3-4b, phi-3-mini, gemma-3, deepseek-r1:7b, qwen3:8b, qwen3-vl-2b | Admin > Settings > Interface > Model Order |
 | Prompt suggestions | 16 custom suggestions (study, coding, travel, etc.) | Admin > Settings > Interface > Prompt Suggestions |
 
 **Full recovery after volume reset (`docker compose down -v`):**
@@ -1013,13 +1013,13 @@ These settings control how Open WebUI chunks, embeds, and retrieves uploaded doc
 
 > **RAG Template:** Use the **default template** (clear the field) — it includes inline citation support with `[id]` format and comprehensive guidelines. The API server's RAG pipeline works with the default template.
 
-> **Image Compression:** Set to `448x448` to match the VL encoder input resolution (DeepSeekOCR-3B).
+> **Image Compression:** Set to `448x448` to match the VL encoder input resolution.
 
 > **After changing settings:** Click **"Reindex Knowledge Base Vectors"** at the bottom of the Documents page to rebuild all embeddings with the new chunking/embedding configuration.
 
 ### VL / Image Upload Settings
 
-For vision-language (VL) models like DeepSeekOCR-3B to work with Open WebUI image uploads and OCR:
+For vision-language (VL) models like Qwen3-VL-2B to work with Open WebUI image uploads and OCR:
 
 **Admin > Settings > Images:**
 
@@ -1036,9 +1036,9 @@ For vision-language (VL) models like DeepSeekOCR-3B to work with Open WebUI imag
 
 **How VL works:** When you upload an image in chat, Open WebUI sends it as a base64-encoded `image_url` in the OpenAI multimodal content array format. The RKLLM API server auto-detects image content and routes the request to the VL model pipeline (vision encoder → NPU embedding → LLM decoder). No special configuration is needed beyond enabling the Vision capability on the model.
 
-**Supported image formats:** JPEG, PNG, WebP, BMP, GIF (first frame). Images are automatically resized to the VL encoder's input resolution (e.g., 448×448 for DeepSeekOCR-3B).
+**Supported image formats:** JPEG, PNG, WebP, BMP, GIF (first frame). Images are automatically resized to the VL encoder's input resolution.
 
-> **Tip:** For OCR tasks (extracting text from screenshots, documents, photos), use a model with OCR training like DeepSeekOCR-3B. Select it from the model dropdown before uploading the image.
+> **Tip:** For OCR tasks (extracting text from screenshots, documents, photos), use the VL model (Qwen3-VL-2B). Simply upload an image in chat — it auto-routes to the VL pipeline.
 
 ### Per-Model Capabilities (Required)
 
@@ -1588,14 +1588,14 @@ The V1 code may be useful as a reference if:
 
 | Model | Quantization | Img Encoder | Decode Speed | Encoder Time | Status |
 |-------|-------------|-------------|-------------|-------------|--------|
-| DeepSeekOCR-3B | W8A8 | 448×448 | ~31.8 tok/s | ~2.1s | Supported |
+| **Qwen3-VL-2B** | W8A8 | varies | ~15 tok/s | ~TBD | **Active (recommended)** |
+| DeepSeekOCR-3B | W8A8 | 448×448 | ~31.8 tok/s | ~2.1s | Supported (disabled) |
 | Qwen2.5-VL-3B | W8A8 | 392×392 | ~8.7 tok/s | ~2.9s | Supported |
 | Qwen2-VL-2B | W8A8 | 392×392 | ~16.6 tok/s | ~3.3s | Supported |
-| Qwen3-VL-2B | W8A8 | varies | ~TBD | ~TBD | Supported |
 | InternVL3-1B | W8A8 | 448×448 | ~TBD | ~TBD | Supported |
 | MiniCPM-V-2.6 | W8A8 | 448×448 | ~TBD | ~TBD | Supported |
 
-> VL encoder times and decode speeds from [RKLLM official benchmarks](https://github.com/airockchip/rknn-llm/blob/main/benchmark.md) on RK3588 W8A8 with all 3 NPU cores.
+> Qwen3-VL-2B replaces DeepSeekOCR-3B as the default VL model — it's smaller (~1.1 GB less RAM), based on the Qwen3 family, and available pre-converted in the [RKLLM official model zoo](https://console.box.lenovo.com/l/l0tXb8) (fetch code: `rkllm`).
 
 ---
 

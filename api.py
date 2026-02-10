@@ -324,7 +324,9 @@ def detect_context_length(path_or_name, default=4096):
 
 
 if os.path.exists(MODELS_ROOT):
-    for root, _, files in os.walk(MODELS_ROOT):
+    for root, dirs, files in os.walk(MODELS_ROOT):
+        # Skip hidden/disabled directories (prefixed with '.')
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
         rkllm_file = None
 
         rkllm_files = sorted(f for f in files if f.endswith(".rkllm"))
