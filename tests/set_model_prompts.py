@@ -26,7 +26,7 @@ DB_PATH = "/app/backend/data/webui.db"
 #   {{CURRENT_DATE}}     → e.g. "February 10, 2026"
 #   {{CURRENT_WEEKDAY}}  → e.g. "Tuesday"
 #   {{CURRENT_TIME}}     → e.g. "14:30:00"
-#   {{USER_NAME}}        → e.g. "Juan-Pierre"
+#   {{USER_NAME}}        → e.g. "User"
 SYSTEM_PROMPT = "Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}. This is the ONLY correct current date. Ignore any conflicting dates from search results."
 
 

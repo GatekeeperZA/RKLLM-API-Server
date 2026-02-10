@@ -29,10 +29,10 @@ import requests
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
-API = os.environ.get("RKLLM_API", "http://192.168.2.180:8000")
+API = os.environ.get("RKLLM_API", "http://localhost:8000")
 MODEL = os.environ.get("RKLLM_MODEL", "qwen3-1.7b")
 MODEL_ALT = os.environ.get("RKLLM_MODEL_ALT", "phi-3-mini-4k-instruct")
-VL_MODEL = os.environ.get("RKLLM_VL_MODEL", "deepseekocr")
+VL_MODEL = os.environ.get("RKLLM_VL_MODEL", "qwen3-vl-2b")
 TIMEOUT = int(os.environ.get("RKLLM_TIMEOUT", "180"))
 
 PASS = FAIL = WARN = SKIP = 0

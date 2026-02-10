@@ -25,8 +25,8 @@ import json, sys, time, urllib.request, urllib.error, subprocess, re, argparse, 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-API = "http://192.168.2.180:8000"
-SSH_HOST = "orangepi"  # SSH alias for fetching server logs
+API = os.environ.get("RKLLM_API", "http://localhost:8000")
+SSH_HOST = os.environ.get("RKLLM_SSH_HOST", "localhost")  # SSH alias for fetching server logs
 LOG_PATH = "~/rkllm_api/api.log"  # Also tries rkllm_api.log
 TIMEOUT = 300  # seconds per request
 

@@ -11,13 +11,13 @@ Usage:
 
 Output is designed to be copy-pasted for analysis.
 """
-import base64, hashlib, io, json, re, struct, sys, time, threading
+import base64, hashlib, io, json, os, re, struct, sys, time, threading
 import urllib.request, urllib.error
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-API = "http://192.168.2.180:8000"
+API = os.environ.get("RKLLM_API", "http://localhost:8000")
 TIMEOUT = 180
 VL_TIMEOUT = 300
 

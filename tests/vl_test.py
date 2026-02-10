@@ -5,9 +5,9 @@ streaming, error handling, KV cache, concurrent rejection, and more.
 
 Usage: python vl_test.py [complete|stream|all]
 """
-import base64, json, struct, sys, time, urllib.request, urllib.error, threading
+import base64, json, os, struct, sys, time, urllib.request, urllib.error, threading
 
-API = "http://192.168.2.180:8000"
+API = os.environ.get("RKLLM_API", "http://localhost:8000")
 PASS = 0
 FAIL = 0
 SKIP = 0

@@ -16,8 +16,7 @@ Usage:
     python e2e_test.py --section 1     # Run only section 1
     python e2e_test.py --fast          # Skip slow models (gemma, phi)
 
-Runs against: http://192.168.2.180:8000 (RKLLM API)
-              http://192.168.2.180:8080 (Open WebUI)
+Runs against: RKLLM_API env var (default http://localhost:8000)
 """
 import json, re, sys, time, os
 import urllib.request, urllib.error
@@ -25,9 +24,9 @@ import urllib.request, urllib.error
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-API = "http://192.168.2.180:8000"
-WEBUI = "http://192.168.2.180:3000"
-SEARXNG = "http://192.168.2.180:8080"
+API = os.environ.get("RKLLM_API", "http://localhost:8000")
+WEBUI = os.environ.get("RKLLM_WEBUI", "http://localhost:3000")
+SEARXNG = os.environ.get("RKLLM_SEARXNG", "http://localhost:8080")
 TIMEOUT = 180  # Per-request timeout (seconds)
 
 # Text models to test (skip deepseekocr — it's VL-only)
