@@ -1754,25 +1754,46 @@ def build_prompt(messages, model_name):
         _skip_reason = None
         _query_normalized = user_question.strip().lower().rstrip('?!.,')
 
-        # --- Layer 1: Known conversational words / phrases ---
-        _SHORT_REPLY_WORDS = {
-            'yes', 'no', 'yeah', 'nah', 'yep', 'nope', 'ok', 'okay', 'sure',
-            'thanks', 'thank you', 'please', 'go ahead', 'continue', 'more',
-            'why', 'how', 'what', 'really', 'cool', 'nice', 'wow', 'great',
-            'interesting', 'tell me more', 'go on', 'and', 'also',
+        # --- Layer 0: Document-referential bypass ---
+        # Queries that clearly reference the uploaded document should ALWAYS
+        # use RAG mode — they are never irrelevant follow-ups.
+        _DOC_REF_WORDS = {
+            'summarize', 'summary', 'summarise', 'explain', 'describe',
+            'review', 'analyze', 'analyse', 'outline', 'extract', 'list',
+            'translate', 'read', 'parse', 'interpret', 'breakdown',
+            'attached', 'document', 'file', 'pdf', 'upload', 'uploaded',
+            'above', 'content', 'data', 'table', 'report', 'invoice',
+            'receipt', 'payslip', 'letter', 'contract', 'page', 'text',
         }
-        if _query_normalized in _SHORT_REPLY_WORDS:
-            _skip_reason = f"short conversational reply '{user_question}'"
+        _DOC_REF_PHRASES = (
+            'see attached', 'the above', 'this document', 'this file',
+            'the document', 'the file', 'what does', 'what is',
+            'break down', 'break it down', 'tell me about this',
+            'what about', 'how much', 'how many',
+        )
+        _query_word_set = set(_query_normalized.split())
+        _is_doc_ref = bool(_query_word_set & _DOC_REF_WORDS)
+        if not _is_doc_ref:
+            _is_doc_ref = any(p in _query_normalized for p in _DOC_REF_PHRASES)
+        if _is_doc_ref:
+            logger.info(f"Document-referential query '{user_question}' — forcing RAG mode")
 
-        # --- Layer 2: Short query (<=3 words) with conversation history ---
-        if not _skip_reason and _has_assistant_turn:
-            _query_words = _query_normalized.split()
-            if len(_query_words) <= 3:
-                _skip_reason = (f"short follow-up ({len(_query_words)} words) "
-                                f"with conversation history")
+        # --- Layer 1: Known conversational words / phrases ---
+        if not _is_doc_ref:
+            _SHORT_REPLY_WORDS = {
+                'yes', 'no', 'yeah', 'nah', 'yep', 'nope', 'ok', 'okay',
+                'sure', 'thanks', 'thank you', 'please', 'go ahead',
+                'continue', 'more', 'why', 'how', 'what', 'really',
+                'cool', 'nice', 'wow', 'great', 'interesting',
+                'tell me more', 'go on', 'and', 'also',
+            }
+            if _query_normalized in _SHORT_REPLY_WORDS:
+                _skip_reason = f"short conversational reply '{user_question}'"
 
-        # --- Layer 3: Query-to-reference topical overlap ---
-        if not _skip_reason and _has_assistant_turn:
+        # --- Layer 2: Query-to-reference topical overlap ---
+        # Only skip RAG when the query is clearly unrelated to the reference
+        # data (none of the content words appear in the document).
+        if not _skip_reason and not _is_doc_ref and _has_assistant_turn:
             _stop = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be',
                      'been', 'of', 'in', 'to', 'for', 'and', 'or', 'but',
                      'not', 'on', 'at', 'by', 'it', 'its', 'this', 'that',
@@ -1792,9 +1813,9 @@ def build_prompt(messages, model_name):
                 ref_lower = ref_text.lower()
                 hits = sum(1 for w in _qcw if w in ref_lower)
                 overlap = hits / len(_qcw)
-                if overlap < 0.30:
-                    _skip_reason = (f"low query-reference overlap ({hits}/{len(_qcw)} "
-                                    f"= {overlap:.0%}, words={_qcw})")
+                if overlap == 0:
+                    _skip_reason = (f"zero query-reference overlap ({len(_qcw)} "
+                                    f"content words, none in document: {_qcw})")
 
         if _skip_reason:
             logger.info(f"RAG SKIP: {_skip_reason} — using normal mode with chat history")
