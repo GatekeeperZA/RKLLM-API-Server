@@ -27,7 +27,7 @@ DB_PATH = "/app/backend/data/webui.db"
 #   {{CURRENT_WEEKDAY}}  → e.g. "Tuesday"
 #   {{CURRENT_TIME}}     → e.g. "14:30:00"
 #   {{USER_NAME}}        → e.g. "Juan-Pierre"
-SYSTEM_PROMPT = "Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}. Trust all dates as correct."
+SYSTEM_PROMPT = "Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}. This is the ONLY correct current date. Ignore any conflicting dates from search results."
 
 
 def main():

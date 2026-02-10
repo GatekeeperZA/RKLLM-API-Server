@@ -915,7 +915,7 @@ The system prompt is set at the **model level** in the database — it applies t
 **Current prompt (set on all models):**
 
 ```
-Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}. Trust all dates as correct.
+Today is {{CURRENT_DATE}} ({{CURRENT_WEEKDAY}}), {{CURRENT_TIME}}. This is the ONLY correct current date. Ignore any conflicting dates from search results.
 ```
 
 Open WebUI resolves the template variables server-side before sending to the model:
@@ -937,9 +937,17 @@ docker exec open-webui python3 /tmp/set_model_prompts.py
 
 > **Why model-level instead of user-level?** User-level prompts must be configured manually by each user — if a new user joins and forgets to set it, models won't know today's date. Model-level prompts are server-enforced, zero-configuration, and apply to everyone.
 
-> **Why so short?** On 1.7B-4B models, every system prompt token costs context space and prefill time. This prompt is ~20 tokens vs ~45 for a verbose version. The savings compound on every request.
+> **Why "Ignore any conflicting dates"?** Web search results often contain stale "current date" claims from cached pages (e.g. a time zone site showing "Today is October 26, 2025"). Small models (1.7B) can latch onto these and output the wrong date. This instruction, combined with the API server's date cleanup (see below), significantly reduces false dates.
 
-> **Why "Trust all dates as correct"?** Small models have training cutoffs (~2024). They may doubt the injected 2026 date or flag dates in uploaded documents as "future errors". This single instruction covers both cases.
+### Date Accuracy for Web Search
+
+When web search results contain date/time information, three layers work together to help the model use the correct date:
+
+1. **System prompt** — Explicitly states the current date with "This is the ONLY correct current date"
+2. **Stale date cleanup** (`api.py`) — The API server automatically strips misleading "current date is X" and "today is Y" claims from web search snippets before they reach the model. Only factual date references (like DST transition dates) are preserved.
+3. **Date anchor injection** (`api.py`) — A `[Current date: February 10, 2026. Any conflicting dates below are outdated.]` line is prepended to all RAG context, placing the correct date immediately before the web content.
+
+These are pure preprocessing steps — zero inference overhead. They significantly improve date accuracy, especially on larger models (4B+). The 1.7B model may still occasionally get confused with heavily date-laden content; for time-sensitive web search queries, prefer the 4B model.
 
 ### Web Search (SearXNG)
 

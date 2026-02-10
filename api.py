@@ -57,6 +57,7 @@ from threading import Lock, RLock, Thread, Event
 import atexit
 import sys
 import signal
+from datetime import datetime, timezone
 
 try:
     import numpy as np
@@ -1419,6 +1420,47 @@ def is_model_loaded():
 # =============================================================================
 
 
+def _strip_stale_date_claims(text):
+    """Remove misleading 'current date/time is X' claims from web content.
+
+    Web pages (especially time/date sites) embed phrases like
+    'Current date is October 26, 2025' from cached or outdated pages.
+    Small models (1.7B-4B) latch onto these and output them as the answer,
+    ignoring the correct date in the system prompt.
+
+    This strips such claims WITHOUT removing factual date references
+    (e.g. 'DST starts on March 29, 2026' is kept).
+    """
+    # Patterns that claim to state what the "current" date/time is
+    # These are the exact patterns that confuse small models
+    _STALE_PATTERNS = [
+        # "Current date is October 26, 2025" / "Current time is 12:00 PM"
+        r'(?:the\s+)?current\s+(?:date|time|day)(?:\s+and\s+(?:date|time))?\s*(?:is|:)\s*[^.\n]{5,60}[.\n]?',
+        # "Today is October 26, 2025" / "Today's date is..."
+        r"today(?:'s\s+date)?\s+is\s*:?\s*[^.\n]{5,60}[.\n]?",
+        # "Right now it is October 26, 2025"
+        r'right\s+now\s+it\s+is\s*:?\s*[^.\n]{5,60}[.\n]?',
+        # "The date today is..."
+        r'the\s+date\s+today\s+is\s*:?\s*[^.\n]{5,60}[.\n]?',
+        # "Local Time: Sunday, October 26, 2025, 12:00 PM"
+        r'local\s+time\s*:\s*[^.\n]{5,60}[.\n]?',
+    ]
+    result = text
+    for pat in _STALE_PATTERNS:
+        matches = list(re.finditer(pat, result, re.IGNORECASE))
+        if matches:
+            for m in reversed(matches):
+                stripped = m.group().strip()
+                logger.debug(f"Stripped stale date claim: '{stripped[:80]}'")
+            result = re.sub(pat, '', result, flags=re.IGNORECASE)
+    if result != text:
+        # Clean up any leftover double blank lines
+        result = re.sub(r'\n{3,}', '\n\n', result)
+        logger.info(f"Stale date cleanup: {len(text)} -> {len(result)} chars "
+                    f"({len(text) - len(result)} chars removed)")
+    return result
+
+
 def _clean_web_content(text):
     """Strip web page navigation/boilerplate from scraped content.
 
@@ -1426,12 +1468,19 @@ def _clean_web_content(text):
     ALL navigation menus, cookie banners, sidebar links, footer cruft, and
     JS-framework text.
 
-    Strategy — four-pass line-level filtering:
+    Strategy — five-pass line-level filtering:
+    Pass 0: Strip misleading "current date/time" claims from web pages
     Pass 1: Remove known boilerplate phrases
     Pass 2: Remove concatenated navigation (CamelCase, title-case, URL-heavy)
     Pass 3: Collapse consecutive short-line navigation menus
     Pass 4: Keep only lines with data signals
     """
+    # --- Pass 0: Remove misleading date/time claims from web snippets ---
+    # Web pages often contain stale "current date is X" or "today is Y" text
+    # from cached pages that contradicts the actual current date. These confuse
+    # small models into outputting wrong dates.
+    text = _strip_stale_date_claims(text)
+
     lines = text.split('\n')
     pass1 = []
 
@@ -1939,6 +1988,15 @@ def build_prompt(messages, model_name):
         abstention = ". If not answered above, say you don't know" if enable_thinking else ''
         logger.info(f"RAG thinking: ctx={ctx}, threshold={DISABLE_THINK_FOR_RAG_BELOW_CTX}, "
                     f"thinking={'enabled' if enable_thinking else 'disabled'}")
+
+        # --- Date anchor injection ---
+        # Prepend a clear date statement to the RAG reference data so the
+        # model sees the correct date IMMEDIATELY before the web content.
+        # This counteracts stale dates that may remain in search snippets.
+        _today = datetime.now().strftime('%B %d, %Y')
+        _date_anchor = f"[Current date: {_today}. Any conflicting dates below are outdated.]"
+        reference_data = f"{_date_anchor}\n\n{reference_data}"
+        logger.debug(f"Injected date anchor: {_date_anchor}")
 
         # Clean trailing punctuation from user question to avoid double-period
         _clean_q = user_question.rstrip(' .!?;:')
