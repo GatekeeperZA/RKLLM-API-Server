@@ -93,9 +93,23 @@ services:
       # -----------------------------------------------------------------
       # File Upload / Image Compression
       # -----------------------------------------------------------------
-      # 448x448 matches the VL model (deepseekocr) input resolution
+      # 448x448 matches the VL model (Qwen3-VL-2B) input resolution
       - FILE_IMAGE_COMPRESSION_WIDTH=448
       - FILE_IMAGE_COMPRESSION_HEIGHT=448
+
+      # -----------------------------------------------------------------
+      # Document Processing (RAG)
+      # -----------------------------------------------------------------
+      # OCR images embedded in PDFs (uses Tesseract inside the container)
+      - PDF_EXTRACT_IMAGES=True
+
+      # -----------------------------------------------------------------
+      # Code Execution & Interpreter — OFF
+      # -----------------------------------------------------------------
+      # Small NPU models (1.7B–4B) generate unreliable code; running it
+      # wastes time or produces wrong results. Disable both features.
+      - ENABLE_CODE_EXECUTION=False
+      - ENABLE_CODE_INTERPRETER=False
 
       # -----------------------------------------------------------------
       # Features

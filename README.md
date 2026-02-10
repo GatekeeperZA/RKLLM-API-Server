@@ -823,8 +823,11 @@ The goal is **minimal user configuration** — a fresh install should work corre
 | Connection | API base URL, API key |
 | RAG pipeline | Embedding model, reranking model, batch size, async embedding, hybrid search, BM25 weight, enriched texts, relevance threshold, top_k, top_k_reranker, custom RAG template |
 | Chunking | Chunk size, overlap, min size target, markdown header splitter |
+| Document processing | PDF image extraction via OCR (`PDF_EXTRACT_IMAGES=True`) — extracts text from scanned images inside PDFs |
 | Web search | Engine, SearXNG URL, result count, concurrent requests, bypass modes |
 | File upload | Image compression (448×448 for VL model) |
+| Code execution | Disabled (`ENABLE_CODE_EXECUTION=False`) — small NPU models (1.7B–4B) generate unreliable code |
+| Code interpreter | Disabled (`ENABLE_CODE_INTERPRETER=False`) — same reason; wastes time or produces wrong results |
 | Features | Channels, memories, notes |
 | Privacy | Telemetry disabled |
 
