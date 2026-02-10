@@ -5,8 +5,9 @@ Fix Open WebUI model capabilities in the database.
 Problem: Most models have incorrect capability flags (vision, image_generation,
 code_interpreter, builtin_tools, citations) that don't match actual hardware.
 
-Only qwen3-vl-2b has a VL encoder. No models support image generation,
-code interpretation, or built-in function calling on our RK3588 setup.
+All NPU models get vision=true because the API server auto-routes images to the
+VL model (qwen3-vl-2b). No models support image generation, code interpretation,
+or built-in function calling on our RK3588 setup.
 """
 
 import sqlite3
@@ -17,16 +18,15 @@ DB_PATH = "/app/backend/data/webui.db"
 
 # Define CORRECT capabilities for each model
 # Key: model id prefix → correct capability overrides
-# Defaults: vision=false, image_generation=false, code_interpreter=false,
-#           builtin_tools=false, citations=false
-# Only qwen3-vl-2b gets vision=true (replaced deepseekocr)
+# All NPU models: vision=true (API auto-routes images to VL model)
+# Ollama models: vision=false (no VL routing for CPU models)
 
 CORRECT_CAPS = {
-    # NPU models (our RKLLM server)
-    "qwen3-1.7b":              {"vision": False, "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
-    "qwen3-4b-instruct-2507":  {"vision": False, "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
-    "phi-3-mini-4k-instruct":  {"vision": False, "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
-    "gemma-3-4b-it":           {"vision": False, "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
+    # NPU models (our RKLLM server) — vision=true on all (API auto-routes to VL model)
+    "qwen3-1.7b":              {"vision": True,  "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
+    "qwen3-4b-instruct-2507":  {"vision": True,  "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
+    "phi-3-mini-4k-instruct":  {"vision": True,  "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
+    "gemma-3-4b-it":           {"vision": True,  "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
     "qwen3-vl-2b":             {"vision": True,  "image_generation": False, "code_interpreter": False, "citations": False, "builtin_tools": False},
     
     # Ollama models
