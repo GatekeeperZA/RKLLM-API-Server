@@ -1233,7 +1233,7 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 
 ## Testing
 
-Two comprehensive test suites verify every code path against a live server. Both use only Python stdlib (`urllib`, `json`, `base64`) — no extra dependencies.
+Four test suites verify every code path against a live server — from unit-level parsing to full end-to-end integration across all models.
 
 ### Diagnostic Test (`tests/diagnostic_test.py`)
 
@@ -1277,12 +1277,59 @@ python tests/vl_test.py stream       # Streaming tests only
 
 ### Test Results (Orange Pi 5 Plus, Feb 2026)
 
-| Suite | Total | Pass | Fail | Time |
-|---|---|---|---|---|
-| `tests/diagnostic_test.py` | 108 | 108 | 0 | ~12 min |
-| `tests/vl_test.py` | 68 | 68 | 0 | ~8 min |
+| Suite | Total | Pass | Fail | Warn | Time |
+|---|---|---|---|---|---|
+| `tests/diagnostic_test.py` | 108 | 108 | 0 | 0 | ~12 min |
+| `tests/vl_test.py` | 68 | 68 | 0 | 0 | ~8 min |
+| `tests/e2e_test.py` | 85 | 85 | 0 | 0 | ~25 min |
+| `tests/deep_diagnostic.py` | 72 | 71 | 0 | 1 | ~18 min |
 
-Both suites target `http://192.168.2.180:8000` by default — edit the `API` constant at the top to match your server IP.
+### End-to-End Test (`tests/e2e_test.py`)
+
+Full integration test that exercises every model with real inference — **85 checks across 9 sections**, run against all 4 text models. Covers streaming, non-streaming, shortcircuits, RAG, cache, web search, KV multi-turn, per-model system prompts, database queries, and API compliance.
+
+```bash
+python tests/e2e_test.py                # Run all 9 sections against all models
+python tests/e2e_test.py --section 3    # Run only section 3
+```
+
+| Section | Coverage |
+|---|---|
+| 1 | Health, models endpoint, model listing |
+| 2 | Per-model text generation (streaming + non-streaming, all 4 models) |
+| 3 | Shortcircuit detection (title gen, tag gen, query gen) |
+| 4 | RAG pipeline with real document context |
+| 5 | Response cache (hit/miss timing) |
+| 6 | Web search result handling |
+| 7 | KV cache multi-turn memory |
+| 8 | Per-model system prompts |
+| 9 | Database / API compliance edge cases |
+
+### Deep Diagnostic Test (`tests/deep_diagnostic.py`)
+
+Targeted deep-dive into 12 under-tested areas identified via gap analysis — **72 checks** covering protocol compliance, edge cases, and stress scenarios.
+
+```bash
+python tests/deep_diagnostic.py                # Run all 12 sections
+python tests/deep_diagnostic.py --section 4    # Run only section 4
+```
+
+| Section | Coverage |
+|---|---|
+| 1 | SSE stream format strict compliance (Content-Type, JSON validity, [DONE], role, finish_reason) |
+| 2 | Concurrent request rejection (503 on second request, recovery after) |
+| 3 | Model hot-swap correctness (swap timing, response model field, health state) |
+| 4 | Unicode / special character handling (emoji, CJK, Arabic, HTML entities in stream) |
+| 5 | ThinkTagParser edge cases (partial tags, char-by-char, multi-block, regex parity, 10K blocks) |
+| 6 | CORS headers & preflight (OPTIONS, Access-Control-Allow-Origin, methods) |
+| 7 | Token usage accuracy (prompt+completion=total, streaming include_usage, ranges) |
+| 8 | Select / unload endpoints (invalid model, double unload, invalid JSON) |
+| 9 | VL / OCR pipeline (image inference, streaming, invalid base64, URL-based image rejection) |
+| 10 | Context overflow / large input (22K chars, 50-turn conversation, server recovery) |
+| 11 | Message normalization (list content, integer coercion, null content, non-dict filtering) |
+| 12 | Shortcircuit streaming SSE compliance (chunk count, usage block, system_fingerprint) |
+
+All suites target `http://192.168.2.180:8000` by default — edit the `API` constant at the top to match your server IP.
 
 ### Benchmark Tool (`tests/benchmark_test.py`)
 
@@ -1310,6 +1357,8 @@ RKLLM-API-Server/
 ├── README.md                       # This file
 ├── tests/
 │   ├── diagnostic_test.py          # Section-by-section diagnostic (17 sections, 108 tests)
+│   ├── e2e_test.py                 # End-to-end integration (9 sections, 85 checks, all models)
+│   ├── deep_diagnostic.py          # Deep diagnostic (12 sections, 72 checks, edge cases)
 │   ├── vl_test.py                  # Integration test suite (17 categories, 68 tests)
 │   ├── benchmark_test.py           # NPU model benchmark tool (tok/s, TTFT, memory)
 │   └── benchmark_results.json      # Latest benchmark results
@@ -1460,7 +1509,7 @@ Measured on **Orange Pi 5 Plus (16 GB)** — RK3588, 3 NPU cores, RKNPU driver 0
 | `v1.0-subprocess-stable` | Last working subprocess version (V1) |
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
-| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + NPU benchmarks + full test suites (108/108 pass) |
+| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + NPU benchmarks + full test suites (333 checks, 0 failures) |
 
 ---
 
