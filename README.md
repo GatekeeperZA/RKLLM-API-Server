@@ -644,7 +644,7 @@ curl http://localhost:8000/health
     "llm_loaded": true
   },
   "active_request": null,
-  "models_available": 3
+  "models_available": 4
 }
 ```
 
@@ -727,6 +727,9 @@ Answer the user'"'"'s question using ONLY the provided context. Be thorough and 
   -e BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=True \
   -e FILE_IMAGE_COMPRESSION_WIDTH=448 \
   -e FILE_IMAGE_COMPRESSION_HEIGHT=448 \
+  -e PDF_EXTRACT_IMAGES=True \
+  -e ENABLE_CODE_EXECUTION=False \
+  -e ENABLE_CODE_INTERPRETER=False \
   -e ENABLE_CHANNELS=True \
   -e ENABLE_MEMORIES=True \
   -e ENABLE_NOTES=True \
@@ -784,6 +787,19 @@ Answer the user'"'"'s question using ONLY the provided context. Be thorough and 
 |----------|-------|--------|
 | `FILE_IMAGE_COMPRESSION_WIDTH` | `448` | Compresses uploaded images to 448px width — matches the VL model input resolution |
 | `FILE_IMAGE_COMPRESSION_HEIGHT` | `448` | Compresses uploaded images to 448px height — reduces upload size without quality loss for vision tasks |
+
+**Document Processing:**
+
+| Variable | Value | Reason |
+|----------|-------|--------|
+| `PDF_EXTRACT_IMAGES` | `True` | Extracts text from scanned images inside PDFs using OCR (Tesseract inside the container) |
+
+**Code Execution:**
+
+| Variable | Value | Reason |
+|----------|-------|--------|
+| `ENABLE_CODE_EXECUTION` | `False` | Small NPU models (1.7B–4B) generate unreliable code — running it wastes time or produces wrong results |
+| `ENABLE_CODE_INTERPRETER` | `False` | Same reason — disable to prevent unreliable code interpretation |
 
 **Features:**
 
@@ -1030,12 +1046,12 @@ For vision-language (VL) models like Qwen3-VL-2B to work with Open WebUI image u
 |---------|-------|--------|
 | **Image Generation (Engine)** | **OFF** (leave unset) | Do NOT enable image generation — it interferes with image upload routing. VL/OCR is handled by the chat API, not the image generation pipeline |
 
-**Workspace > Models > Edit** (for each VL-capable model):
+**Workspace > Models > Edit** (for **all** NPU models):
 
 | Setting | Value | Reason |
 |---------|-------|--------|
-| **Vision** capability | **ON** | Tells Open WebUI this model accepts images. Without this, the image upload button won't appear in chat |
-| **Builtin Tools** | **OFF** | Small VL models cannot do function-calling |
+| **Vision** capability | **ON** | Enables the image upload button in chat for every model. The API server auto-routes image requests to the VL pipeline regardless of which model is selected — users don't need to manually switch to the VL model |
+| **Builtin Tools** | **OFF** | Small NPU models (1.5B–4B) cannot do function-calling |
 
 **How VL works:** When you upload an image in chat, Open WebUI sends it as a base64-encoded `image_url` in the OpenAI multimodal content array format. The RKLLM API server auto-detects image content and routes the request to the VL model pipeline (vision encoder → NPU embedding → LLM decoder). No special configuration is needed beyond enabling the Vision capability on the model.
 
@@ -1049,6 +1065,7 @@ For vision-language (VL) models like Qwen3-VL-2B to work with Open WebUI image u
 
 | Setting | Value | Reason |
 |---------|-------|--------|
+| **Vision** | **ON** | Enables image upload button in chat. The API server auto-routes images to the VL model — set this on **all** models, not just the VL model |
 | **Builtin Tools** | **OFF** ⚠️ | **Required.** Small NPU models (1.5B-4B) cannot do function-calling. Leaving this on injects tool-use instructions that confuse the model |
 | File Context | **ON** | Enables document and search result injection |
 
@@ -1498,6 +1515,7 @@ Results are saved to `tests/benchmark_results.json` and printed as formatted mar
 ```
 RKLLM-API-Server/
 ├── api.py                          # Main API server (ctypes, v2.0)
+├── docker-compose.yml              # Open WebUI Docker config (all settings hardcoded)
 ├── setup.sh                        # Zero-config installer (761 lines)
 ├── settings.yml                    # SearXNG configuration for Open WebUI
 ├── README.md                       # This file
@@ -1507,7 +1525,12 @@ RKLLM-API-Server/
 │   ├── deep_diagnostic.py          # Deep diagnostic (12 sections, 72 checks, edge cases)
 │   ├── vl_test.py                  # Integration test suite (17 categories, 68 tests)
 │   ├── benchmark_test.py           # NPU model benchmark tool (tok/s, TTFT, memory)
-│   └── benchmark_results.json      # Latest benchmark results
+│   ├── benchmark_results.json      # Latest benchmark results
+│   ├── set_model_prompts.py        # Set system prompts on all OWUI models (DB script)
+│   ├── fix_owui_models.py          # Set model capabilities: vision, tools, etc. (DB script)
+│   ├── remove_stale_models.py      # Mark old/removed models as inactive in OWUI DB
+│   ├── dump_owui_models_quick.py   # Quick dump of all OWUI model records
+│   └── dump_owui_settings.py       # Dump all OWUI admin settings from DB
 ├── archive/
 │   ├── api_v1_subprocess.py        # Original subprocess version (archived)
 │   └── CTYPES_MIGRATION_PLAN.md    # V1→V2 migration planning document
