@@ -2564,12 +2564,14 @@ def chat_completions():
     # plain strings once so all downstream code gets clean string content.
     for msg in messages:
         content = msg.get('content')
-        if isinstance(content, list):
+        if content is None:
+            msg['content'] = ''
+        elif isinstance(content, list):
             msg['content'] = " ".join(
                 part.get('text', '') for part in content
                 if isinstance(part, dict) and part.get('type') == 'text'
             )
-        elif content is not None and not isinstance(content, str):
+        elif not isinstance(content, str):
             msg['content'] = str(content)
 
     stream = bool(body.get('stream', False))
