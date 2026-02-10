@@ -1794,20 +1794,8 @@ def build_prompt(messages, model_name):
         # Only skip RAG when the query is clearly unrelated to the reference
         # data (none of the content words appear in the document).
         if not _skip_reason and not _is_doc_ref and _has_assistant_turn:
-            _stop = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be',
-                     'been', 'of', 'in', 'to', 'for', 'and', 'or', 'but',
-                     'not', 'on', 'at', 'by', 'it', 'its', 'this', 'that',
-                     'with', 'from', 'as', 'do', 'does', 'did', 'has', 'have',
-                     'had', 'will', 'would', 'can', 'could', 'should', 'may',
-                     'me', 'my', 'i', 'you', 'your', 'we', 'our', 'they',
-                     'them', 'their', 'he', 'she', 'him', 'her', 'about',
-                     'what', 'which', 'who', 'how', 'when', 'where', 'why',
-                     'tell', 'give', 'some', 'any', 'all', 'more', 'much',
-                     'many', 'very', 'just', 'also', 'so', 'if', 'than',
-                     'then', 'like', 'know', 'get', 'make', 'go', 'see',
-                     'no', 'yes', 'up', 'out', 'new', 'one', 'two'}
             _qcw = {w.lower().strip('?!.,;:\'"()') for w in user_question.split()
-                    if w.lower().strip('?!.,;:\'"()') not in _stop and len(w.strip('?!.,;:\'"()')) > 2}
+                    if w.lower().strip('?!.,;:\'"()') not in ENGLISH_STOPWORDS and len(w.strip('?!.,;:\'"()')) > 2}
             if _qcw and len(_qcw) <= 8:
                 _, ref_text, _ = rag_parts
                 ref_lower = ref_text.lower()
@@ -2625,6 +2613,7 @@ def chat_completions():
                 c = {
                     "id": request_id, "object": "chat.completion.chunk",
                     "created": int(time.time()), "model": requested_model,
+                    "system_fingerprint": SYSTEM_FINGERPRINT,
                     "choices": [{"index": 0, "delta": {"role": "assistant",
                                  "content": content}, "finish_reason": None}]
                 }
@@ -2632,6 +2621,7 @@ def chat_completions():
                 d = {
                     "id": request_id, "object": "chat.completion.chunk",
                     "created": int(time.time()), "model": requested_model,
+                    "system_fingerprint": SYSTEM_FINGERPRINT,
                     "choices": [{"index": 0, "delta": {},
                                  "finish_reason": "stop"}]
                 }
@@ -2647,6 +2637,7 @@ def chat_completions():
         return jsonify({
             "id": request_id, "object": "chat.completion",
             "created": int(time.time()), "model": requested_model,
+            "system_fingerprint": SYSTEM_FINGERPRINT,
             "choices": [{"index": 0, "message": {"role": "assistant",
                          "content": content}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 0, "completion_tokens": 1,
@@ -2678,22 +2669,21 @@ def chat_completions():
         or ('generate 1-3 broad' in _luc_lower and 'search' in _luc_lower)
     )
     if _is_query_gen:
-        import re as _re_sc
 
         # --- 1. Parse every USER/ASSISTANT turn from the chat_history ---
-        _ch_match = _re_sc.search(
+        _ch_match = re.search(
             r'<chat_history>(.*?)</chat_history>',
-            _last_user_content, _re_sc.DOTALL
+            _last_user_content, re.DOTALL
         )
         _chat_block = _ch_match.group(1) if _ch_match else _last_user_content
 
-        _all_user = _re_sc.findall(
+        _all_user = re.findall(
             r'(?:USER|user):\s*(.+?)(?=\s*(?:ASSISTANT|assistant):|</chat_history>|\s*$)',
-            _chat_block, _re_sc.DOTALL
+            _chat_block, re.DOTALL
         )
-        _all_asst = _re_sc.findall(
+        _all_asst = re.findall(
             r'(?:ASSISTANT|assistant):\s*(.+?)(?=\s*(?:USER|user):|</chat_history>|\s*$)',
-            _chat_block, _re_sc.DOTALL
+            _chat_block, re.DOTALL
         )
 
         _real_q = _all_user[-1].strip() if _all_user else 'general query'
@@ -2718,15 +2708,15 @@ def chat_completions():
             _entities = []
 
             # Quoted strings (single or double)
-            _quoted = _re_sc.findall(r'["\u201c]([^"\u201d]{3,60})["\u201d]', _prev_asst)
+            _quoted = re.findall(r'["\u201c]([^"\u201d]{3,60})["\u201d]', _prev_asst)
             _entities.extend(q.strip() for q in _quoted[:3])
 
             # **Bold** text
-            _bold = _re_sc.findall(r'\*\*(.{3,60}?)\*\*', _prev_asst)
+            _bold = re.findall(r'\*\*(.{3,60}?)\*\*', _prev_asst)
             _entities.extend(b.strip() for b in _bold[:3])
 
             # Capitalized multi-word phrases (e.g. "Python for Data Science")
-            _caps = _re_sc.findall(
+            _caps = re.findall(
                 r'\b([A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|for|and|the|of|in|with|&)){1,6})\b',
                 _prev_asst
             )
@@ -2790,11 +2780,10 @@ def chat_completions():
                 _first_user_msg = msg.get('content', '')[:60].strip()
                 break
         if not _first_user_msg:
-            import re as _re_tt
-            _m2 = _re_tt.search(
+            _m2 = re.search(
                 r'(?:USER|user):\s*(.+?)(?:\s*(?:ASSISTANT|assistant)'
                 r'|\s*</chat_history>|\s*$)',
-                _last_user_content, _re_tt.DOTALL
+                _last_user_content, re.DOTALL
             )
             _first_user_msg = (_m2.group(1).strip()[:60]
                                if _m2 else 'New Chat')
@@ -2986,7 +2975,11 @@ def chat_completions():
                         yield make_sse_chunk(request_id, name, created, delta={"role": "assistant"})
                         if reasoning_content:
                             yield make_sse_chunk(request_id, name, created, delta={"reasoning_content": reasoning_content})
-                        yield make_sse_chunk(request_id, name, created, delta={"content": cleaned_content})
+                        # Progressive chunking for natural streaming feel
+                        _chunk_size = 80
+                        for _ci in range(0, len(cleaned_content), _chunk_size):
+                            yield make_sse_chunk(request_id, name, created,
+                                                 delta={"content": cleaned_content[_ci:_ci + _chunk_size]})
                         yield make_sse_chunk(request_id, name, created, finish_reason="stop")
                         if include_usage:
                             yield make_sse_chunk(request_id, name, created, usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": prompt_tokens + completion_tokens})
@@ -3431,8 +3424,8 @@ def _generate_complete(prompt, request_id, model_name, created,
         # Post-generation bookkeeping — each operation is independent so a
         # failure in one doesn't skip the other.
         try:
-            if rag_cache_info and generation_clean and full_content:
-                cache_text = full_content
+            if rag_cache_info and generation_clean and cleaned_content:
+                cache_text = cleaned_content
                 if reasoning_content:
                     cache_text = f"<think>{reasoning_content}</think>{cleaned_content}"
                 _model, _question, _prompt = rag_cache_info
