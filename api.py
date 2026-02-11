@@ -1805,6 +1805,8 @@ def _strip_system_fluff(text):
         r'you are an? helpful ai\s*(?:[.!?]\s*|$)',
         r'as an ai assistant\s*(?:[.!?]\s*|$)',
         r'as a helpful assistant\s*(?:[.!?]\s*|$)',
+        r'user context\s*:\s*',
+        r'system context\s*:\s*',
     ]
 
     result = text
@@ -1820,11 +1822,20 @@ def _strip_system_fluff(text):
 def _is_date_only_system(text):
     """Check if system message contains ONLY date/time info."""
     s = text.strip()
-    if re.match(r'^today is \d{4}-\d{2}-\d{2}\b.*$', s, re.IGNORECASE):
-        lines = [l.strip() for l in s.split('\n') if l.strip()]
-        if len(lines) <= 1:
-            return True
-    return False
+    lines = [l.strip() for l in s.split('\n') if l.strip()]
+    if not lines:
+        return False
+    # First line must start with date pattern
+    if not re.match(r'^today is \d{4}-\d{2}-\d{2}\b', lines[0], re.IGNORECASE):
+        return False
+    if len(lines) <= 1:
+        return True
+    # Additional lines must also be date/time related
+    date_re = re.compile(
+        r'(?:date|time|today|current|correct|ignore|conflicting|'
+        r'monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
+        re.IGNORECASE)
+    return all(date_re.search(l) for l in lines[1:])
 
 
 # =============================================================================
