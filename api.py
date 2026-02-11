@@ -1408,7 +1408,7 @@ class RKLLMWrapper:
             return
         try:
             self.lib.rkllm_release_prompt_cache(self.handle)
-        except (AttributeError, Exception):
+        except Exception:
             pass
 
     def run(self, prompt, role="user", keep_history=1, enable_thinking=False,
@@ -2420,10 +2420,16 @@ def build_prompt(messages, model_name):
         prompt = "\n".join(parts)
         if len(prompt) > max_prompt_chars and len(parts) > 2:
             original_parts = len(parts)
-            # Always keep: first part (system prompt, if any) + last part (current user msg)
-            # Trim from the second element (oldest history turn) forward
-            while len(parts) > 2 and len("\n".join(parts)) > max_prompt_chars:
-                parts.pop(1)  # Remove oldest history turn
+            # Always keep: last part (current user msg).
+            # Trim oldest turns from the front.  If parts[0] is a system
+            # prompt (starts with "System:"), keep it; otherwise treat all
+            # parts equally and trim from index 0.
+            _keep_front = 1 if (parts and parts[0].startswith("System:")) else 0
+            # Track running length to avoid O(n^2) re-join
+            _total_len = sum(len(p) for p in parts) + len(parts) - 1  # newline separators
+            while len(parts) > (_keep_front + 1) and _total_len > max_prompt_chars:
+                removed = parts.pop(_keep_front)
+                _total_len -= len(removed) + 1  # +1 for newline separator
             prompt = "\n".join(parts)
             trimmed = original_parts - len(parts)
             if trimmed > 0:
@@ -2534,6 +2540,13 @@ def load_model(model_name, config):
                     elapsed = time.time() - load_start
                     logger.info(f"{model_name} LOADED successfully in {elapsed:.1f}s (ctx={ctx_len})")
                     CURRENT_MODEL = model_name
+                    # Load prompt cache (same logic as normal path)
+                    if PROMPT_CACHE_ENABLED:
+                        cache_file = os.path.join(os.path.dirname(model_path), 'prompt_cache.bin')
+                        if os.path.isfile(cache_file):
+                            _rkllm_wrapper.load_prompt_cache(cache_file)
+                        else:
+                            logger.debug(f"No prompt cache for {model_name} (will save on first request)")
                     return True
             logger.error(f"Model {model_name} failed to initialize "
                         f"(check model file integrity and rkllm version compatibility)")
@@ -2591,6 +2604,9 @@ def unload_current(reason="requested"):
             if _worker_thread.is_alive():
                 logger.warning("Worker thread did not finish after abort — proceeding with destroy")
         _worker_thread = None
+
+        # Release prompt cache before destroying model
+        _rkllm_wrapper.release_prompt_cache()
 
         # Destroy the model (frees NPU memory)
         _rkllm_wrapper.destroy()
@@ -3648,7 +3664,10 @@ def _generate_stream(prompt, request_id, model_name, created,
                 logger.error(f"[{request_id}] rkllm_run returned error code {ret}")
                 _token_queue.put(("error", f"rkllm_run returned {ret}"))
             elif _save_cache_path:
-                logger.info(f"Prompt cache saved: {_save_cache_path}")
+                if os.path.isfile(_save_cache_path):
+                    logger.info(f"Prompt cache saved: {_save_cache_path}")
+                else:
+                    logger.warning(f"Prompt cache save may have failed — file not found: {_save_cache_path}")
         except Exception as e:
             logger.error(f"[{request_id}] Worker thread error: {e}")
             _token_queue.put(("error", str(e)))
@@ -3888,7 +3907,10 @@ def _generate_complete(prompt, request_id, model_name, created,
                 logger.error(f"[{request_id}] rkllm_run returned error code {ret}")
                 _token_queue.put(("error", f"rkllm_run returned {ret}"))
             elif _save_cache_path:
-                logger.info(f"Prompt cache saved: {_save_cache_path}")
+                if os.path.isfile(_save_cache_path):
+                    logger.info(f"Prompt cache saved: {_save_cache_path}")
+                else:
+                    logger.warning(f"Prompt cache save may have failed — file not found: {_save_cache_path}")
         except Exception as e:
             logger.error(f"[{request_id}] Worker thread error: {e}")
             _token_queue.put(("error", str(e)))
