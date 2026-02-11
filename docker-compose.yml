@@ -93,9 +93,10 @@ services:
       # -----------------------------------------------------------------
       # File Upload / Image Compression
       # -----------------------------------------------------------------
-      # 448x448 matches the VL model (Qwen3-VL-2B) input resolution
-      - FILE_IMAGE_COMPRESSION_WIDTH=448
-      - FILE_IMAGE_COMPRESSION_HEIGHT=448
+      # 672x672 matches the active VL encoder resolution (Qwen3-VL-2B)
+      # Other available resolutions: 448 (faster, less detail), 896 (slower, more detail)
+      - FILE_IMAGE_COMPRESSION_WIDTH=672
+      - FILE_IMAGE_COMPRESSION_HEIGHT=672
 
       # -----------------------------------------------------------------
       # Document Processing (RAG)

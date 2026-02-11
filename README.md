@@ -728,8 +728,8 @@ Answer the user'"'"'s question using ONLY the provided context. Be thorough and 
   -e WEB_SEARCH_CONCURRENT_REQUESTS=3 \
   -e BYPASS_WEB_SEARCH_WEB_LOADER=True \
   -e BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=True \
-  -e FILE_IMAGE_COMPRESSION_WIDTH=448 \
-  -e FILE_IMAGE_COMPRESSION_HEIGHT=448 \
+  -e FILE_IMAGE_COMPRESSION_WIDTH=672 \
+  -e FILE_IMAGE_COMPRESSION_HEIGHT=672 \
   -e PDF_EXTRACT_IMAGES=True \
   -e ENABLE_CODE_EXECUTION=False \
   -e ENABLE_CODE_INTERPRETER=False \
@@ -788,8 +788,8 @@ Answer the user'"'"'s question using ONLY the provided context. Be thorough and 
 
 | Variable | Value | Reason |
 |----------|-------|--------|
-| `FILE_IMAGE_COMPRESSION_WIDTH` | `448` | Compresses uploaded images to 448px width — matches the VL model input resolution |
-| `FILE_IMAGE_COMPRESSION_HEIGHT` | `448` | Compresses uploaded images to 448px height — reduces upload size without quality loss for vision tasks |
+| `FILE_IMAGE_COMPRESSION_WIDTH` | `672` | Compresses uploaded images to 672px width — matches the active VL encoder resolution. Other options: `448` (faster, less detail), `896` (slower, more detail) |
+| `FILE_IMAGE_COMPRESSION_HEIGHT` | `672` | Compresses uploaded images to 672px height — must match the width value. See [Vision Encoder Resolution Comparison](#vision-encoder-resolution-comparison) |
 
 **Document Processing:**
 
@@ -844,7 +844,7 @@ The goal is **minimal user configuration** — a fresh install should work corre
 | Chunking | Chunk size, overlap, min size target, markdown header splitter |
 | Document processing | PDF image extraction via OCR (`PDF_EXTRACT_IMAGES=True`) — extracts text from scanned images inside PDFs |
 | Web search | Engine, SearXNG URL, result count, concurrent requests, bypass modes |
-| File upload | Image compression (448×448 for VL model) |
+| File upload | Image compression (672×672 for VL model — matches active encoder resolution) |
 | Code execution | Disabled (`ENABLE_CODE_EXECUTION=False`) — small NPU models (1.7B–4B) generate unreliable code |
 | Code interpreter | Disabled (`ENABLE_CODE_INTERPRETER=False`) — same reason; wastes time or produces wrong results |
 | Features | Channels, memories, notes |
@@ -1035,7 +1035,7 @@ These settings control how Open WebUI chunks, embeds, and retrieves uploaded doc
 
 > **RAG Template:** Use the **default template** (clear the field) — it includes inline citation support with `[id]` format and comprehensive guidelines. The API server's RAG pipeline works with the default template.
 
-> **Image Compression:** Set to `448x448` to match the VL encoder input resolution.
+> **Image Compression:** Set to `672x672` to match the active VL encoder resolution. Available resolutions: 448 (fast/low detail), 672 (balanced, default), 896 (slow/high detail). Change via Admin > Settings > Documents or the `tests/owui_set_compression.py` script.
 
 > **After changing settings:** Click **"Reindex Knowledge Base Vectors"** at the bottom of the Documents page to rebuild all embeddings with the new chunking/embedding configuration.
 
