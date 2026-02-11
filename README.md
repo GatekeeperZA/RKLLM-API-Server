@@ -35,6 +35,9 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [V1 (Subprocess) vs V2 (ctypes) — Why We Migrated](#v1-subprocess-vs-v2-ctypes--why-we-migrated)
 - [Tested Hardware](#tested-hardware)
 - [Tested Models](#tested-models)
+- [VL Model Evaluation](#vl-model-evaluation)
+- [Vision Encoder Resolution Comparison](#vision-encoder-resolution-comparison)
+- [Re-Exporting VL Models at Higher Resolution](#re-exporting-vl-models-at-higher-resolution)
 - [Benchmarks](#benchmarks)
 - [Git Tags & Branches](#git-tags--branches)
 - [License](#license)
@@ -446,14 +449,14 @@ VL models require **two** files in the same folder: a `.rkllm` decoder and a `.r
 4. Text-only requests continue using the text model normally
 
 **Supported VL models** (model folder name must contain):
-| Pattern | Model Family |
-|---------|-------------|
-| `qwen3-vl` | Qwen3-VL (recommended — fast, accurate, small) |
-| `deepseekocr` | DeepSeekOCR |
-| `qwen2.5-vl` | Qwen2.5-VL |
-| `qwen2-vl` | Qwen2-VL |
-| `internvl3` | InternVL3 |
-| `minicpm` | MiniCPM-V |
+| Pattern | Model Family | Notes |
+|---------|-------------|-------|
+| `qwen3-vl` | Qwen3-VL | **Recommended** — best OCR, fastest |
+| `qwen2.5-vl` | Qwen2.5-VL | Lower 392×392 encoder |
+| `qwen2-vl` | Qwen2-VL | Lower 392×392 encoder |
+| `internvl3` | InternVL3 / InternVL3.5 | W8A8 precision loss, poor OCR |
+| `deepseekocr` | DeepSeekOCR | Severe hallucination in RKNN conversion |
+| `minicpm` | MiniCPM-V | Untested |
 
 **Requirements:**
 - `numpy` and `Pillow` Python packages (installed by `setup.sh`)
@@ -1612,20 +1615,25 @@ The V1 code may be useful as a reference if:
 | Qwen3-4B-Instruct | W8A8 | 16K | ~4 GB | ~6 tok/s | Tested |
 | Gemma-3-4B-IT | W8A8 | 4K | ~4 GB | ~6 tok/s | Tested |
 
-> Pre-built RKLLM models available on HuggingFace: [Qwen3-1.7B-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) · [Phi-3-mini-4k-instruct-w8a8](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8)
+> Pre-built RKLLM models available on HuggingFace: [Qwen3-1.7B-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) · [Phi-3-mini-4k-instruct-w8a8](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8) · [Qwen3-VL-2B-Instruct-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3)
 
 ### VL (Vision-Language) Models
 
-| Model | Quantization | Img Encoder | Decode Speed | Encoder Time | Status |
-|-------|-------------|-------------|-------------|-------------|--------|
-| **Qwen3-VL-2B** | W8A8 | varies | ~15 tok/s | ~TBD | **Active (recommended)** |
-| DeepSeekOCR-3B | W8A8 | 448×448 | ~31.8 tok/s | ~2.1s | Supported (disabled) |
-| Qwen2.5-VL-3B | W8A8 | 392×392 | ~8.7 tok/s | ~2.9s | Supported |
-| Qwen2-VL-2B | W8A8 | 392×392 | ~16.6 tok/s | ~3.3s | Supported |
-| InternVL3-1B | W8A8 | 448×448 | ~TBD | ~TBD | Supported |
-| MiniCPM-V-2.6 | W8A8 | 448×448 | ~TBD | ~TBD | Supported |
+| Model | Quantization | Encoder Res | Decode Speed | Encoder Time | Peak RAM | Status |
+|-------|-------------|-------------|-------------|-------------|----------|--------|
+| **Qwen3-VL-2B** | W8A8 | **672×672** | ~15 tok/s | ~4s | ~6.5 GB | **Active (recommended)** |
+| Qwen3-VL-2B | W8A8 | 448×448 | ~15 tok/s | ~2s | ~5.5 GB | Available (default export) |
+| Qwen3-VL-2B | W8A8 | 896×896 | ~15 tok/s | ~12s | ~8.5 GB | Available (high-detail) |
+| InternVL3.5-2B | W8A8 | 448×448 | ~12.1 tok/s | ~2.0s | ~3.0 GB | **Tested — poor OCR accuracy** |
+| DeepSeekOCR-3B | W8A8 | 448×448 | ~31.8 tok/s | ~2.1s | ~3.0 GB | **Tested — severe hallucination** |
+| Qwen2.5-VL-3B | W8A8 | 392×392 | ~8.7 tok/s | ~2.9s | ~5.3 GB | Supported (lower resolution) |
+| Qwen2-VL-2B | W8A8 | 392×392 | ~16.6 tok/s | ~3.3s | ~3.0 GB | Supported |
+| InternVL3-1B | W8A8 | 448×448 | ~TBD | ~TBD | ~TBD | Supported |
+| MiniCPM-V-2.6 | W8A8 | 448×448 | ~TBD | ~TBD | ~TBD | Supported |
 
-> Qwen3-VL-2B replaces DeepSeekOCR-3B as the default VL model — it's smaller (~1.1 GB less RAM), based on the Qwen3 family, and available pre-converted in the [RKLLM official model zoo](https://console.box.lenovo.com/l/l0tXb8) (fetch code: `rkllm`).
+> **Qwen3-VL-2B is the recommended VL model** with the vision encoder re-exported at **672×672** for 2.25× more visual detail than the default 448×448. Three encoder resolutions (448/672/896) are available — see [Vision Encoder Resolution Comparison](#vision-encoder-resolution-comparison). To switch encoders, rename the `.rknn` files (only one should have the `.rknn` extension; others use `.rknn.alt`).
+>
+> All Qwen3-VL-2B files (LLM + all 3 vision encoders) are on HuggingFace: [GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3). Pre-converted models for other architectures available in the [RKLLM official model zoo](https://console.box.lenovo.com/l/l0tXb8) (fetch code: `rkllm`).
 
 ---
 
@@ -1668,6 +1676,144 @@ Measured on **Orange Pi 5 Plus (16 GB)** — RK3588, 3 NPU cores, RKNPU driver 0
 - **Cold TTFT includes model load** — Qwen3 loads in 2.8s, Phi-3 in ~4.5s. Warm TTFT (model already loaded) is ~1.3s for Qwen3 and ~2.0s for Phi-3
 - **Generation speed is stable** across prompt lengths — the NPU maintains consistent tok/s regardless of output length
 - **Reasoning prompts generate fewer tokens** but at slightly higher tok/s (less KV cache pressure from shorter context)
+
+---
+
+## VL Model Evaluation
+
+We tested all available pre-converted VL models to find the best option for real-world OCR tasks (reading gas meters from phone photos). All models use the same 448×448 (or lower) vision encoder, which crushes high-resolution phone photos (14-15 MP) down to a tiny thumbnail — a fundamental bottleneck for OCR accuracy.
+
+### Test Setup
+
+- **Hardware:** Orange Pi 5 Plus (16 GB), RK3588, RKNPU driver 0.9.8, rkllm-runtime v1.2.3
+- **Test images:** Two real gas meter photos (14-15 MB JPEG, taken with phone camera)
+- **Task:** Read the numeric meter display and identify the brand name printed on the meter
+
+### Results
+
+| Model | Source | Meter Reading | Brand Detection | Speed | Verdict |
+|-------|--------|--------------|----------------|-------|--------|
+| **Qwen3-VL-2B** | [RKLLM model zoo](https://console.box.lenovo.com/l/l0tXb8) | Produces plausible numbers (wrong but in range) | Detected similar text | 5-10s | **Best available** |
+| InternVL3.5-2B | [happyme531/InternVL3_5-2B-RKLLM](https://huggingface.co/happyme531/InternVL3_5-2B-RKLLM) | Completely wrong ("200.0", "48") | Hallucinated ("Bundix") | ~30s | Not usable for OCR |
+| DeepSeekOCR-3B | [RKLLM model zoo](https://console.box.lenovo.com/l/l0tXb8) | Completely wrong ("1234") or empty | Hallucinated entire scenes (car dashboards, industrial panels) | 5-15s | Not usable — severe hallucination |
+| Qwen2.5-VL-3B | [vuong1/Qwen2.5-VL-3B-Instruct-RKLLM](https://huggingface.co/vuong1/Qwen2.5-VL-3B-Instruct-RKLLM) | Not tested (lower 392×392 resolution) | — | ~8.7 tok/s | Rejected — lower resolution than current |
+
+### Key Findings
+
+1. **Qwen3-VL-2B is the best pre-converted option** — while not perfectly accurate for OCR, it produces contextually plausible results and is the fastest
+2. **InternVL3.5-2B** has a larger language model (Qwen2.5-1.5B) but W8A8 quantization destroyed its vision capability — also generates Chinese chain-of-thought gibberish
+3. **DeepSeekOCR-3B** was specifically designed for OCR but the RKNN conversion is fundamentally broken — it hallucinates entirely different scenes
+4. **All models share the same root problem:** the 448×448 (or 392×392) vision encoder crushes phone photos too aggressively for reliable text/number reading
+5. **The real solution is re-exporting the vision encoder at higher resolution** — see [Vision Encoder Resolution Comparison](#vision-encoder-resolution-comparison) for results
+
+---
+
+## Vision Encoder Resolution Comparison
+
+After identifying that the 448×448 default vision encoder was the bottleneck, we re-exported the Qwen3-VL-2B vision encoder at 672×672 and 896×896 using the rknn-llm export scripts on an x86 host (Gatekeeper-PC: Ubuntu, 15GB RAM + 36GB swap, CPU-only — no GPU required).
+
+### File Layout on Orange Pi
+
+```
+~/models/Qwen3-VL-2b/
+    qwen3-vl-2b-instruct_w8a8_rk3588.rkllm   # LLM decoder (shared)
+    qwen3-vl-2b_vision_672_rk3588.rknn        # Active encoder (672×672)
+    qwen3-vl-2b_vision_448_rk3588.rknn.alt    # Fast, low-detail (inactive)
+    qwen3-vl-2b_vision_896_rk3588.rknn.alt    # Slow, high-detail (inactive)
+```
+
+To switch encoder: rename the active `.rknn` to `.rknn.alt` and the desired one from `.rknn.alt` to `.rknn`, then `sudo systemctl restart rkllm-api`.
+
+### Resolution Benchmark Results
+
+Tested on Orange Pi 5 Plus (16GB) with real 14-15MB JPEG gas meter photos:
+
+| Resolution | Visual Tokens | RKNN Size | Encoder Time | Total Response | Peak RAM |
+|---|---|---|---|---|---|
+| **448×448** | 196 (14×14) | 812 MB | ~2s | 5–10s | ~5.5 GB |
+| **672×672** ⭐ | 441 (21×21) | 854 MB | ~4s | 9–11s | ~6.5 GB |
+| **896×896** | 784 (28×28) | 923 MB | ~12s | 25–28s | ~8.5 GB |
+
+### OCR Test Results (Gas Meter Photos)
+
+| Resolution | meter1.jpg | meter2.jpg | Consistency |
+|---|---|---|---|
+| 448×448 | `975648` | `3700211` | Unique readings |
+| 672×672 | `37866` | `3709217` | — |
+| 896×896 | `37866` | `57709217` | 672 & 896 agree on meter1 |
+
+**Key conclusions:**
+- **672×672 is the sweet spot** — 2.25× more visual detail with only ~1s extra latency vs 448
+- **896×896 is 3× slower** (25-28s vs 9-11s) for marginal benefit
+- **The 2B LLM is the accuracy bottleneck**, not the vision encoder — different resolutions produce different (all incorrect) readings, suggesting the model size limits OCR reliability
+- **Text decode speed is unaffected** (~15 tok/s) — only the vision encode + prefill time increases
+- All files are on HuggingFace: [GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3)
+
+---
+
+## Re-Exporting VL Models at Higher Resolution
+
+The RKNN export scripts accept `--height` and `--width` parameters, so you can re-export the Qwen3-VL-2B vision encoder at a higher resolution (e.g., 672×672 or 896×896) to improve OCR accuracy. This only affects the `.rknn` vision encoder — the `.rkllm` language model stays the same.
+
+### Requirements
+
+- **x86 Linux machine** with Python 3.9-3.12 (the toolkits do **not** run on ARM)
+- **No GPU required** — CPU-only export works (tested on Ubuntu 22.04, 15GB RAM)
+- ~20 GB RAM+swap for 672×672, ~35 GB for 896×896 (use `fallocate` + `mkswap` for extra swap)
+- `rknn-toolkit2` v2.3.2 (`pip install rknn-toolkit2`)
+- `torch==2.4.0`, `torchvision==0.19.0`
+- `transformers>=4.57.0`, `onnx>=1.18.0`
+
+### Step-by-Step: Re-Export Qwen3-VL at Higher Resolution
+
+```bash
+# Clone the export scripts
+git clone https://github.com/airockchip/rknn-llm.git
+cd rknn-llm/examples/multimodal_model_demo
+
+# Install dependencies
+pip install transformers==4.57.0 torch rkllm-toolkit rknn-toolkit2
+
+# Download the original Qwen3-VL-2B HuggingFace model
+# (needed as source for the vision encoder weights)
+git clone https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct
+
+# Step 1: Export vision encoder to ONNX at custom resolution
+# Height/width must be divisible by (merge_size * patch_size) = 2 * 16 = 32 for Qwen3-VL
+python export/export_vision.py \
+  --path ./Qwen3-VL-2B-Instruct \
+  --model_name qwen3-vl \
+  --height 672 --width 672
+# Output: ./onnx/qwen3-vl_vision.onnx
+
+# Step 2: Convert ONNX to RKNN for RK3588
+python export/export_vision_rknn.py \
+  --path ./onnx/qwen3-vl_vision.onnx \
+  --model_name qwen3-vl \
+  --target-platform rk3588 \
+  --height 672 --width 672
+# Output: ./rknn/qwen3-vl_vision_rk3588.rknn
+```
+
+### Resolution Options for Qwen3-VL
+
+Qwen3-VL uses `patch_size=16` and `merge_size=2`, so resolution must be divisible by 32:
+
+| Resolution | Visual Tokens | Encoder Time (measured) | RAM Impact | Notes |
+|-----------|--------------|--------------------|-----------|---------|
+| 448×448 | 196 | ~2s | Baseline (5.5 GB) | Default from model zoo |
+| 672×672 | 441 | ~4s | +1 GB (6.5 GB) | ⭐ **Recommended** — 2.25× more pixels |
+| 896×896 | 784 | ~12s | +3 GB (8.5 GB) | 4× more pixels, noticeably slower |
+| 1120×1120 | 1225 | ~20s+ | +5 GB+ | May OOM on 16 GB devices |
+
+> **Note:** The `.rkllm` language model file does NOT need to be re-exported — only the `.rknn` vision encoder changes. Copy the new `.rknn` file to the model folder on the Orange Pi alongside the existing `.rkllm` file.
+
+### Important Constraints
+
+- Height and width must be divisible by `patch_size × merge_size` (32 for Qwen3-VL, 28 for Qwen2/2.5-VL)
+- Higher resolution = more visual tokens = longer prefill time and more NPU memory
+- The vision encoder runs on the NPU — very large resolutions may cause OOM on 16 GB devices
+- The RKLLM LLM decoder has a fixed `max_context_len` — ensure visual tokens + text tokens fit within it
 
 ---
 
