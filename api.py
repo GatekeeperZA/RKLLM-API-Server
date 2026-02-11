@@ -450,6 +450,100 @@ def detect_model_capabilities(model_id, model_dir, has_vision_encoder=False):
     return sorted(caps)
 
 
+# ---- Model-aware sampling profiles ----------------------------------------
+# RKLLM sets sampling parameters at model-init time (not per-request).
+# top_k=1 forces greedy decoding — terrible for Qwen3 and most small models.
+# These profiles provide optimal defaults per model family.
+#
+# Users can override by adding "sampling" to model_config.json:
+#   {"sampling": {"top_k": 30, "temperature": 0.5}}
+_SAMPLING_DEFAULTS_INIT = {
+    'top_k': 40,
+    'top_p': 0.9,
+    'temperature': 0.7,
+    'repeat_penalty': 1.1,
+    'frequency_penalty': 0.0,
+    'presence_penalty': 0.0,
+}
+
+MODEL_SAMPLING_PROFILES = {
+    # Qwen3 is extremely sensitive to sampling; official docs say NEVER use greedy.
+    # presence_penalty 1.5 helps prevent repetition loops.
+    'qwen3': {
+        'top_k': 20,
+        'top_p': 0.8,
+        'temperature': 0.7,
+        'repeat_penalty': 1.1,
+        'frequency_penalty': 0.0,
+        'presence_penalty': 1.5,
+    },
+    # Gemma benefits from wider sampling pool, moderate temperature.
+    'gemma': {
+        'top_k': 40,
+        'top_p': 0.95,
+        'temperature': 0.7,
+        'repeat_penalty': 1.1,
+        'frequency_penalty': 0.0,
+        'presence_penalty': 0.0,
+    },
+    # Phi works best with lower temperature for focused output.
+    'phi': {
+        'top_k': 40,
+        'top_p': 0.9,
+        'temperature': 0.6,
+        'repeat_penalty': 1.1,
+        'frequency_penalty': 0.0,
+        'presence_penalty': 0.0,
+    },
+    # DeepSeek reasoning models — moderate sampling.
+    'deepseek': {
+        'top_k': 20,
+        'top_p': 0.9,
+        'temperature': 0.6,
+        'repeat_penalty': 1.1,
+        'frequency_penalty': 0.0,
+        'presence_penalty': 1.0,
+    },
+}
+
+
+def detect_sampling_profile(model_id, model_dir):
+    """Determine optimal sampling parameters for a model.
+
+    Priority: model_config.json > MODEL_SAMPLING_PROFILES > _SAMPLING_DEFAULTS_INIT
+    """
+    profile = dict(_SAMPLING_DEFAULTS_INIT)
+
+    # Match model family from MODEL_SAMPLING_PROFILES
+    model_lower = model_id.lower()
+    matched_family = None
+    for family, family_profile in MODEL_SAMPLING_PROFILES.items():
+        if family in model_lower:
+            profile.update(family_profile)
+            matched_family = family
+            break
+
+    # Check model_config.json for user override
+    config_file = os.path.join(model_dir, 'model_config.json')
+    if os.path.isfile(config_file):
+        try:
+            with open(config_file, 'r') as f:
+                user_cfg = json.load(f)
+            if 'sampling' in user_cfg and isinstance(user_cfg['sampling'], dict):
+                profile.update(user_cfg['sampling'])
+                logger.info(f"Sampling for {model_id}: custom from model_config.json")
+                return profile
+        except Exception as e:
+            logger.warning(f"Failed to read sampling from {config_file}: {e}")
+
+    source = f"profile '{matched_family}'" if matched_family else "default"
+    logger.info(f"Sampling for {model_id}: {source} "
+                f"(top_k={profile['top_k']}, top_p={profile['top_p']}, "
+                f"temp={profile['temperature']}, repeat={profile['repeat_penalty']}, "
+                f"presence={profile['presence_penalty']})")
+    return profile
+
+
 if os.path.exists(MODELS_ROOT):
     for root, dirs, files in os.walk(MODELS_ROOT):
         # Skip hidden/disabled directories (prefixed with '.')
@@ -493,11 +587,14 @@ if os.path.exists(MODELS_ROOT):
         has_encoder = bool(vision_encoder_path and vl_config)
         capabilities = detect_model_capabilities(model_id, root, has_vision_encoder=has_encoder)
 
+        sampling = detect_sampling_profile(model_id, root)
+
         config = {
             "path": rkllm_file,
             "context_length": context_len,
             "max_tokens": MAX_TOKENS_DEFAULT,
             "capabilities": capabilities,
+            "sampling": sampling,
         }
 
         if vision_encoder_path and vl_config:
@@ -1193,24 +1290,29 @@ class RKLLMWrapper:
         except AttributeError:
             pass  # May not exist in all library versions
 
-    def init_model(self, model_path, ctx_len, max_tokens, vl_config=None):
+    def init_model(self, model_path, ctx_len, max_tokens, vl_config=None, sampling=None):
         """Initialize a model.  Returns True on success.
 
         Args:
             vl_config: if provided, dict with img_start/img_end/img_content/base_domain_id
                        for VL model initialization.
+            sampling: dict of sampling parameters (top_k, top_p, temperature, etc.)
+                      from detect_sampling_profile().
         """
+        if sampling is None:
+            sampling = dict(_SAMPLING_DEFAULTS_INIT)
+
         param = RKLLMParam()
         param.model_path = model_path.encode('utf-8')
         param.max_context_len = ctx_len
         param.max_new_tokens = max_tokens
-        param.top_k = 1
+        param.top_k = sampling.get('top_k', 40)
         param.n_keep = -1
-        param.top_p = 0.9
-        param.temperature = 0.8
-        param.repeat_penalty = 1.1
-        param.frequency_penalty = 0.0
-        param.presence_penalty = 0.0
+        param.top_p = sampling.get('top_p', 0.9)
+        param.temperature = sampling.get('temperature', 0.7)
+        param.repeat_penalty = sampling.get('repeat_penalty', 1.1)
+        param.frequency_penalty = sampling.get('frequency_penalty', 0.0)
+        param.presence_penalty = sampling.get('presence_penalty', 0.0)
         param.mirostat = 0
         param.mirostat_tau = 5.0
         param.mirostat_eta = 0.1
@@ -2312,16 +2414,18 @@ def load_model(model_name, config):
         ctx_len = config.get('context_length', CONTEXT_LENGTH_DEFAULT)
         max_tokens = config.get('max_tokens', MAX_TOKENS_DEFAULT)
 
+        sampling = config.get('sampling')
+
         logger.info(f"STARTING LOAD of {model_name} (ctx={ctx_len}, max_tok={max_tokens})...")
         load_start = time.time()
 
-        if not _rkllm_wrapper.init_model(model_path, ctx_len, max_tokens):
+        if not _rkllm_wrapper.init_model(model_path, ctx_len, max_tokens, sampling=sampling):
             # NPU memory may be exhausted by VL model — try unloading VL and retrying
             if VL_CURRENT_MODEL:
                 logger.warning(f"Model {model_name} init failed with VL loaded — "
                               f"unloading VL model to free NPU memory and retrying")
                 _unload_vl_model("NPU memory pressure — text model init failed")
-                if _rkllm_wrapper.init_model(model_path, ctx_len, max_tokens):
+                if _rkllm_wrapper.init_model(model_path, ctx_len, max_tokens, sampling=sampling):
                     logger.info(f"Model {model_name} loaded successfully after VL unload")
                     elapsed = time.time() - load_start
                     logger.info(f"{model_name} LOADED successfully in {elapsed:.1f}s (ctx={ctx_len})")
@@ -2433,7 +2537,9 @@ def _load_vl_model(vl_name, vl_config):
             ctx_len = vl_config.get('context_length', CONTEXT_LENGTH_DEFAULT)
             max_tokens = vl_config.get('max_tokens', MAX_TOKENS_DEFAULT)
             vl_cfg = vl_config.get('vl_config')
-            if not _vl_rkllm_wrapper.init_model(model_path, ctx_len, max_tokens, vl_config=vl_cfg):
+            sampling = vl_config.get('sampling')
+            if not _vl_rkllm_wrapper.init_model(model_path, ctx_len, max_tokens,
+                                                 vl_config=vl_cfg, sampling=sampling):
                 logger.error(f"VL model {vl_name} failed to initialize")
                 return False
 
