@@ -103,7 +103,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **`stream_options.include_usage`** — streaming token counts per OpenAI spec
 - **`system_fingerprint`** in all responses
 - **`max_tokens` / `max_completion_tokens`** support
-- **Request body size limit** (16 MB)
+- **Request body size limit** (50 MB)
 - **Proper error responses** matching OpenAI error format
 
 ### Vision-Language (VL) / Multimodal
@@ -1202,11 +1202,11 @@ Open WebUI searches SearXNG with the raw user message. Short follow-ups produce 
 
 | Layer | Trigger | Example |
 |-------|---------|---------|
+| Layer 0: Document-referential bypass | Query contains document-related words/phrases — **forces RAG mode** | "summarize this", "the attached file" |
 | Layer 1: Word list | Exact match to known conversational words | "yes", "thanks", "tell me more" |
-| Layer 2: Short query | ≤3 words with conversation history | "south africa", "another one" |
-| Layer 3: Topical overlap | < 30% query keywords found in reference text | Off-topic search results |
+| Layer 2: Zero-overlap check | Zero query content-words found in reference text (w/ conversation history) | Off-topic follow-up after RAG |
 
-When any layer fires, RAG is skipped and the model uses normal conversation mode.
+Layer 0 fires first and overrides the other layers (document-referential queries always use RAG). When Layer 1 or 2 fires, RAG is skipped and the model uses normal conversation mode.
 
 ### Multi-Turn Conversation History
 
@@ -1259,8 +1259,8 @@ The NPU runtime maintains an internal KV cache. With `keep_history=1`, prior con
 ### How It Works
 
 1. **First turn** — The server calls `rkllm_clear_kv_cache()` then sends the full prompt with `keep_history=1`. After generation, the KV cache contains the full conversation.
-2. **Follow-up turns** — The server computes the hash of the conversation prefix. If it matches the previous turn's hash (same conversation, same model), only the new user message is sent with `keep_history=1`. The NPU appends to the existing KV cache.
-3. **New conversation** — Hash mismatch triggers `rkllm_clear_kv_cache()` + full prompt resend.
+2. **Follow-up turns** — The server compares the list of prior user messages against what the KV cache already contains. If the lists match (same conversation, same model), only the new user message is sent with `keep_history=1`. The NPU appends to the existing KV cache.
+3. **New conversation** — List mismatch triggers `rkllm_clear_kv_cache()` + full prompt resend.
 4. **RAG queries** — Always use `keep_history=0` (standalone, no history needed).
 
 This makes multi-turn conversations significantly faster — Turn 2+ take ~50ms to prefill regardless of total conversation length.
@@ -1275,7 +1275,6 @@ All configuration is at the top of `api.py`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODEL_LOAD_TIMEOUT` | 180s | Max time to wait for model initialization |
 | `GENERATION_TIMEOUT` | 600s | Max total generation time |
 | `FIRST_TOKEN_TIMEOUT` | 120s | Max wait for first token (includes prefill) |
 | `FALLBACK_SILENCE` | 12s | Max silence between tokens after first |
@@ -1348,7 +1347,7 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 
 - Binds to `0.0.0.0:8000` — accessible from all network interfaces
 - No API key validation (any non-empty string works for Open WebUI)
-- Request body limited to 16 MB
+- Request body limited to 50 MB
 - **Do NOT expose directly to the public internet**
 - Place behind a reverse proxy (nginx, Caddy) with authentication if external access is needed
 
@@ -1519,7 +1518,7 @@ Results are saved to `tests/benchmark_results.json` and printed as formatted mar
 RKLLM-API-Server/
 ├── api.py                          # Main API server (ctypes, v2.0)
 ├── docker-compose.yml              # Open WebUI Docker config (all settings hardcoded)
-├── setup.sh                        # Zero-config installer (761 lines)
+├── setup.sh                        # Zero-config installer (762 lines)
 ├── settings.yml                    # SearXNG configuration for Open WebUI
 ├── README.md                       # This file
 ├── tests/
@@ -1533,7 +1532,9 @@ RKLLM-API-Server/
 │   ├── fix_owui_models.py          # Set model capabilities: vision, tools, etc. (DB script)
 │   ├── remove_stale_models.py      # Mark old/removed models as inactive in OWUI DB
 │   ├── dump_owui_models_quick.py   # Quick dump of all OWUI model records
-│   └── dump_owui_settings.py       # Dump all OWUI admin settings from DB
+│   ├── dump_owui_settings.py       # Dump all OWUI admin settings from DB
+│   ├── owui_set_compression.py     # Set OWUI image compression (DB + runtime API)
+│   └── vl_multi_image_test.py      # Multi-image VL model integration test
 ├── archive/
 │   ├── api_v1_subprocess.py        # Original subprocess version (archived)
 │   └── CTYPES_MIGRATION_PLAN.md    # V1→V2 migration planning document
@@ -1560,7 +1561,7 @@ The original server (`archive/api_v1_subprocess.py`) worked by spawning a separa
 | **Error handling** | Detect process crash / timeout | C return codes + error callback state |
 | **Process management** | ~500 lines (spawn, monitor, kill, restart) | 0 lines (no process to manage) |
 | **VL / multimodal** | Not supported | Dual-model architecture with RKNN vision encoder |
-| **Code size** | 2682 lines | ~3200 lines (text + VL + RAG) |
+| **Code size** | 2682 lines | ~3600 lines (text + VL + RAG) |
 
 ### Why the Change Matters
 
