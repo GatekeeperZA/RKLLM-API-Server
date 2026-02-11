@@ -18,3 +18,6 @@ venv/
 # OS
 Thumbs.db
 .DS_Store
+
+# Open WebUI admin tools (local only, contain DB manipulation scripts)
+owui_tools/
