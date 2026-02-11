@@ -81,6 +81,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Follow-up detection** — 3-layer system prevents RAG on conversational replies
 - **Response caching** — LRU cache eliminates redundant inference for repeated questions
 - **Context-dependent thinking** — disables reasoning on small context models to save tokens
+- **Auto-capability detection** — infers model type (thinking, instruct, VL, OCR) from folder names; only reasoning models get `<think>` enabled
 
 ### Reasoning Model Support
 - **`<think>` tag parsing** for Qwen3 and similar reasoning models
@@ -478,6 +479,40 @@ The server auto-detects context length from the filename or folder name:
 | `-32k` or `_32k` | 32,768 tokens |
 | *(none found)* | 4,096 (default) |
 
+### Model Capabilities Detection
+
+The server auto-detects each model's capabilities from its folder name. This controls whether `<think>` reasoning is enabled and what metadata is exposed via `/v1/models`.
+
+**Auto-detected capabilities by model family:**
+
+| Folder pattern | Detected capabilities | Thinking |
+|---|---|---|
+| `qwen3` (not VL) | `instruct`, `thinking` | Yes |
+| `deepseek*r1` / `deepseek*r2` | `instruct`, `thinking` | Yes |
+| `qwq` | `instruct`, `thinking` | Yes |
+| `deepseekocr` | `instruct`, `ocr` | No |
+| `qwen*vl` | `instruct`, `vl` | No |
+| `phi` | `instruct` | No |
+| `gemma` | `instruct` | No |
+| `llama` | `instruct` | No |
+| `mistral` / `mixtral` | `instruct` | No |
+| `internvl` / `minicpm` | `instruct` | No |
+| *(contains `instruct` or `-it`)* | `instruct` | No |
+| *(no match)* | `base` | No |
+
+Any model with a `.rknn` vision encoder file automatically gains the `vl` capability.
+
+**Override with `model_config.json`:** Place a JSON file in the model folder to override auto-detection:
+
+```json
+// ~/models/MyCustomModel/model_config.json
+{
+  "capabilities": ["thinking", "instruct"]
+}
+```
+
+**Effect on thinking:** Only models with the `thinking` capability get `enable_thinking=True` on the RKLLM runtime. Non-thinking models (Phi-3, Gemma, etc.) always run with `enable_thinking=False`, preventing wasted tokens on models that don't support `<think>` blocks.
+
 ### Auto-Generated Aliases
 
 Model folder names are converted to IDs (lowercase, hyphens). Aliases are auto-generated:
@@ -555,7 +590,7 @@ sudo systemctl disable rkllm-api
 
 ### `GET /v1/models`
 
-List all detected models.
+List all detected models with capabilities and context length.
 
 ```bash
 curl http://localhost:8000/v1/models
@@ -569,11 +604,39 @@ curl http://localhost:8000/v1/models
       "id": "qwen3-1.7b",
       "object": "model",
       "created": 1738972800,
-      "owned_by": "rkllm"
+      "owned_by": "rkllm",
+      "capabilities": ["instruct", "thinking"],
+      "context_length": 4096
+    },
+    {
+      "id": "gemma-3-4b-it",
+      "object": "model",
+      "created": 1738972800,
+      "owned_by": "rkllm",
+      "capabilities": ["instruct"],
+      "context_length": 4096
+    },
+    {
+      "id": "qwen3-vl-2b",
+      "object": "model",
+      "created": 1738972800,
+      "owned_by": "rkllm",
+      "capabilities": ["instruct", "vl"],
+      "context_length": 4096
     }
   ]
 }
 ```
+
+**Capability values:**
+
+| Capability | Meaning |
+|---|---|
+| `thinking` | Native `<think>` reasoning support (Qwen3, DeepSeek-R1, QwQ) |
+| `instruct` | Instruction-tuned / chat model |
+| `vl` | Vision-language model (image understanding) |
+| `ocr` | Specialised for document OCR |
+| `base` | Base / completion-only model (no chat template) |
 
 ### `POST /v1/chat/completions`
 

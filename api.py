@@ -340,6 +340,51 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 MODELS = {}
 
+# ---- Model type classification ------------------------------------------
+# Patterns matched against the lowercase model folder name to infer the
+# model's capability set.  Order matters: first match wins for the type
+# (but VL is always additive via .rknn detection).
+#
+# Capabilities:
+#   "thinking"  — model natively supports <think> reasoning blocks
+#   "instruct"  — instruction-tuned model (chat-safe)
+#   "vl"        — vision-language model (has .rknn encoder)
+#   "ocr"       — specialised for document OCR
+#   "base"      — base / completion-only model (no chat template)
+#
+# Users can override by placing a model_config.json in the model folder:
+#   {"capabilities": ["thinking", "instruct"]}
+MODEL_CAPABILITY_RULES = [
+    # Qwen3 (not VL) — native <think> support
+    (re.compile(r'qwen3(?!.*vl)'), {"thinking", "instruct"}),
+    # DeepSeek-R1 / DeepSeek-R2 reasoning
+    (re.compile(r'deepseek.*r\d'),  {"thinking", "instruct"}),
+    # QwQ reasoning
+    (re.compile(r'qwq'),            {"thinking", "instruct"}),
+    # DeepSeek OCR — VL + OCR (VL added separately via .rknn)
+    (re.compile(r'deepseekocr'),    {"instruct", "ocr"}),
+    # InternVL — VL instruct
+    (re.compile(r'internvl'),       {"instruct"}),
+    # MiniCPM — VL instruct
+    (re.compile(r'minicpm'),        {"instruct"}),
+    # Qwen2.5-VL / Qwen3-VL — VL instruct (no thinking in VL path)
+    (re.compile(r'qwen.*vl'),       {"instruct"}),
+    # Qwen2/2.5 instruct (non-VL, non-reasoning)
+    (re.compile(r'qwen2'),          {"instruct"}),
+    # Phi family — instruct only
+    (re.compile(r'phi'),            {"instruct"}),
+    # Gemma family — instruct only
+    (re.compile(r'gemma'),          {"instruct"}),
+    # Llama family — instruct
+    (re.compile(r'llama'),          {"instruct"}),
+    # Mistral / Mixtral
+    (re.compile(r'mi[sx]tral'),     {"instruct"}),
+    # ChatGLM
+    (re.compile(r'chatglm'),        {"instruct"}),
+    # Yi models
+    (re.compile(r'\byi\b'),         {"instruct"}),
+]
+
 
 def detect_context_length(path_or_name, default=4096):
     s = path_or_name.lower()
@@ -357,6 +402,52 @@ def detect_context_length(path_or_name, default=4096):
             pass
 
     return default
+
+
+def detect_model_capabilities(model_id, model_dir, has_vision_encoder=False):
+    """Infer model capabilities from folder name, with optional JSON override.
+
+    Args:
+        model_id: Lowercase model folder name (e.g. 'qwen3-4b-instruct-2507')
+        model_dir: Absolute path to the model folder
+        has_vision_encoder: True if an .rknn file was found in the folder
+
+    Returns:
+        A sorted list of capability strings, e.g. ["instruct", "thinking"]
+    """
+    # 1. Check for user override: model_config.json in the model folder
+    config_file = os.path.join(model_dir, 'model_config.json')
+    if os.path.isfile(config_file):
+        try:
+            with open(config_file, 'r') as f:
+                user_cfg = json.load(f)
+            if 'capabilities' in user_cfg and isinstance(user_cfg['capabilities'], list):
+                caps = set(user_cfg['capabilities'])
+                logger.info(f"Capabilities for {model_id}: {sorted(caps)} (from model_config.json)")
+                return sorted(caps)
+        except Exception as e:
+            logger.warning(f"Failed to read {config_file}: {e} — falling back to auto-detect")
+
+    # 2. Auto-detect from folder name patterns
+    caps = set()
+    for pattern, cap_set in MODEL_CAPABILITY_RULES:
+        if pattern.search(model_id):
+            caps = set(cap_set)  # Copy; don't mutate the constant
+            break
+
+    # 3. If nothing matched, infer from common naming conventions
+    if not caps:
+        if 'instruct' in model_id or '-it' in model_id or model_id.endswith('-it'):
+            caps.add("instruct")
+        else:
+            caps.add("base")
+
+    # 4. VL is always additive — if .rknn encoder exists, add "vl"
+    if has_vision_encoder:
+        caps.add("vl")
+
+    logger.info(f"Capabilities for {model_id}: {sorted(caps)} (auto-detected)")
+    return sorted(caps)
 
 
 if os.path.exists(MODELS_ROOT):
@@ -398,19 +489,25 @@ if os.path.exists(MODELS_ROOT):
                               f"treating as text-only (add config for '{model_id}' to VL_MODEL_CONFIGS)")
                 vision_encoder_path = None
 
+        # Detect capabilities (thinking, instruct, vl, etc.)
+        has_encoder = bool(vision_encoder_path and vl_config)
+        capabilities = detect_model_capabilities(model_id, root, has_vision_encoder=has_encoder)
+
         config = {
             "path": rkllm_file,
             "context_length": context_len,
             "max_tokens": MAX_TOKENS_DEFAULT,
+            "capabilities": capabilities,
         }
 
         if vision_encoder_path and vl_config:
             config["vision_encoder_path"] = vision_encoder_path
             config["vl_config"] = vl_config
             logger.info(f"Detected VL: {model_id} (context={context_len}, "
+                       f"caps={capabilities}, "
                        f"encoder={os.path.basename(vision_encoder_path)})")
         else:
-            logger.info(f"Detected: {model_id} (context={context_len})")
+            logger.info(f"Detected: {model_id} (context={context_len}, caps={capabilities})")
 
         MODELS[model_id] = config
 
@@ -1837,7 +1934,9 @@ def build_prompt(messages, model_name):
     rag_parts = _extract_rag_reference(system_text) if system_text else None
 
     prompt = ""
-    enable_thinking = True  # Default: allow thinking
+    # Only enable thinking for models that natively support <think> blocks
+    model_caps = model_cfg.get('capabilities', []) if model_cfg else []
+    enable_thinking = 'thinking' in model_caps
 
     # =====================================================================
     # FOLLOW-UP / IRRELEVANT-RAG DETECTION
@@ -2028,11 +2127,11 @@ def build_prompt(messages, model_name):
 
     # Re-check after quality floor may have cleared rag_parts
     if rag_parts and user_question:
-        # enable_thinking for RAG: disabled on small context models
-        enable_thinking = ctx >= DISABLE_THINK_FOR_RAG_BELOW_CTX
+        # enable_thinking for RAG: only if model supports it AND context is large enough
+        enable_thinking = ('thinking' in model_caps) and (ctx >= DISABLE_THINK_FOR_RAG_BELOW_CTX)
         abstention = ". If not answered above, say you don't know" if enable_thinking else ''
         logger.info(f"RAG thinking: ctx={ctx}, threshold={DISABLE_THINK_FOR_RAG_BELOW_CTX}, "
-                    f"thinking={'enabled' if enable_thinking else 'disabled'}")
+                    f"caps={model_caps}, thinking={'enabled' if enable_thinking else 'disabled'}")
 
         # --- Date anchor injection ---
         # Prepend a clear date statement to the RAG reference data so the
@@ -2114,7 +2213,8 @@ def build_prompt(messages, model_name):
                 parts.append(content)
 
         prompt = "\n".join(parts)
-        enable_thinking = True  # Default: allow thinking in normal mode
+        # Only enable thinking for models with the "thinking" capability
+        enable_thinking = 'thinking' in model_caps
 
         # --- Open WebUI meta-task detection ---
         # Open WebUI sends internal tasks (search query gen, title gen, tag gen)
@@ -2563,16 +2663,19 @@ def parse_think_tags(text):
 @app.route('/v1/models', methods=['GET'])
 @app.route('/models', methods=['GET'])
 def list_models():
-    """OpenAI-compatible model listing endpoint."""
+    """OpenAI-compatible model listing endpoint with capability metadata."""
     logger.debug(f"/v1/models called - current_model: {CURRENT_MODEL}")
     data = []
-    for model_id in MODELS:
-        data.append({
+    for model_id, cfg in MODELS.items():
+        entry = {
             "id": model_id,
             "object": "model",
             "created": SERVER_START_TIME,
             "owned_by": "rkllm",
-        })
+            "capabilities": cfg.get("capabilities", []),
+            "context_length": cfg.get("context_length", CONTEXT_LENGTH_DEFAULT),
+        }
+        data.append(entry)
     return jsonify({"object": "list", "data": data})
 
 
