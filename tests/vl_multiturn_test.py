@@ -10,13 +10,14 @@ This simulates what Open WebUI sends when:
 
 We check the log to confirm VL multi-turn mode was activated.
 """
+import os
 import requests
 import base64
 import time
 import subprocess
 import sys
 
-API = "http://192.168.2.180:8000"
+API = os.getenv("RKLLM_API_BASE", "http://localhost:8000")
 
 # Generate a small valid test image
 from PIL import Image

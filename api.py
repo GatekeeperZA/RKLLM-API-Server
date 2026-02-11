@@ -176,6 +176,11 @@ _SAMPLING_DEFAULTS = {
 # Context-dependent thinking for RAG queries.
 DISABLE_THINK_FOR_RAG_BELOW_CTX = 8192
 
+# VL multi-turn context caps — VL models have limited context windows,
+# so RAG reference text and prior assistant answers are truncated.
+VL_RAG_CONTEXT_CAP = 2000       # Max chars of RAG reference text in VL prompts
+VL_ASSISTANT_HISTORY_CAP = 500  # Max chars per prior assistant answer in VL prompts
+
 # Open WebUI internal task signatures — these are meta-tasks (search query
 # generation, title generation, tag generation, etc.) sent by Open WebUI
 # before/after the actual user request.  Thinking mode wastes 20+ seconds
@@ -1478,6 +1483,12 @@ def _strip_stale_date_claims(text):
         r'the\s+date\s+today\s+is\s*:?\s*[^.\n]{5,60}[.\n]?',
         # "Local Time: Sunday, October 26, 2025, 12:00 PM"
         r'local\s+time\s*:\s*[^.\n]{5,60}[.\n]?',
+        # "It is currently October 26, 2025" / "It's currently..."
+        r"it(?:'s|\s+is)\s+currently\s+[^.\n]{5,60}[.\n]?",
+        # "As of today, the date is..." / "As of today, October 26, 2025"
+        r'as\s+of\s+today\s*[,:]\s*[^.\n]{5,60}[.\n]?',
+        # "Updated: October 26, 2025" / "Last updated: 2025-10-26"
+        r'(?:last\s+)?updated\s*:\s*[^.\n]{5,60}[.\n]?',
     ]
     result = text
     for pat in _STALE_PATTERNS:
@@ -2738,6 +2749,9 @@ def chat_completions():
                     "choices": [{"index": 0, "delta": {},
                                  "finish_reason": "stop"}]
                 }
+                if include_usage:
+                    d["usage"] = {"prompt_tokens": 0,
+                                  "completion_tokens": 1, "total_tokens": 1}
                 yield f"data: {json.dumps(d)}\n\n"
                 yield "data: [DONE]\n\n"
             return Response(
@@ -3030,13 +3044,13 @@ def chat_completions():
                     if rag_parts:
                         _, ref_text, _ = rag_parts
                         # Cap to avoid filling VL model's limited context
-                        prompt_parts.append(f"Reference:\n{ref_text[:2000]}")
+                        prompt_parts.append(f"Reference:\n{ref_text[:VL_RAG_CONTEXT_CAP]}")
 
                 # 2. Brief conversation history (prior assistant answers)
                 for _m in messages:
                     if _m.get('role') == 'assistant' and _m.get('content'):
                         prompt_parts.append(
-                            f"Previous answer: {_m['content'][:500]}")
+                            f"Previous answer: {_m['content'][:VL_ASSISTANT_HISTORY_CAP]}")
 
                 # 3. The actual current question
                 prompt_parts.append(latest_user_text)
@@ -3351,7 +3365,9 @@ def _generate_stream(prompt, request_id, model_name, created,
                         yield make_sse_chunk(request_id, model_name, created,
                                              delta={"content": chunk_text})
 
-                # Repetition loop detection — check every ~200 chars to avoid overhead
+                # Repetition loop detection — runs every token but the
+                # _detect_repetition_loop() call is O(n) worst-case: it only
+                # scans the last REPETITION_WINDOW chars against earlier text.
                 combined_output = total_reasoning + total_content
                 if len(combined_output) > REPETITION_WINDOW * 2:
                     loop_hits = _detect_repetition_loop(combined_output)
@@ -3558,7 +3574,9 @@ def _generate_complete(prompt, request_id, model_name, created,
                 update_request_activity()
                 content_parts.append(msg_data)
 
-                # Repetition loop detection (VL non-streaming)
+                # Repetition loop detection (non-streaming path)
+                # Build running output — O(n) join, but non-streaming
+                # batches are capped by max_new_tokens so this is bounded.
                 combined_output = "".join(content_parts)
                 if len(combined_output) > REPETITION_WINDOW * 2:
                     loop_hits = _detect_repetition_loop(combined_output)

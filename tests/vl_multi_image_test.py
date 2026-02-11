@@ -16,7 +16,7 @@ import time
 from PIL import Image
 import requests
 
-API_BASE = os.getenv("RKLLM_API_BASE", "http://192.168.2.180:8000")
+API_BASE = os.getenv("RKLLM_API_BASE", "http://localhost:8000")
 ENDPOINT = f"{API_BASE}/v1/chat/completions"
 
 

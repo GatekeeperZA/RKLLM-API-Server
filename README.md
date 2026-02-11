@@ -74,7 +74,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Document/PDF RAG** — works with Open WebUI's document upload and embedding pipeline
 - **Summarization detection** — detects "summarize" queries and adds stronger multi-paragraph instructions
 - **Smart prompt restructuring** — reading comprehension format optimized for small models
-- **4-pass web content cleaning** — strips navigation, boilerplate, cookie banners
+- **5-pass web content cleaning** — strips navigation, boilerplate, cookie banners, stale dates
 - **Score-based paragraph selection** — jusText-inspired content quality scoring
 - **Near-duplicate removal** — Jaccard similarity deduplication across sources
 - **Quality floor** — drops irrelevant search results instead of confusing the model
@@ -1178,7 +1178,8 @@ When Open WebUI performs a web search or retrieves document chunks, the results 
 
 1. **Detection** — `<source>` tags in the system message trigger RAG mode
 2. **Extraction** — Content extracted from between `<source>...</source>` tags
-3. **Web Content Cleaning** (4-pass):
+3. **Web Content Cleaning** (5-pass):
+   - Pass 0: Strip misleading "current date/time" claims from cached web pages
    - Pass 1: Remove known boilerplate phrases (cookies, sign-in, privacy policy, etc.)
    - Pass 2: Remove navigation patterns (CamelCase runs, title-case-heavy lines, URL clusters)
    - Pass 3: Collapse consecutive short-line menus (4+ short lines = navigation)
@@ -1301,6 +1302,13 @@ All configuration is at the top of `api.py`:
 | `RAG_CACHE_TTL` | 300 | Cache lifetime in seconds (0 to disable) |
 | `RAG_CACHE_MAX_ENTRIES` | 50 | Max cached responses |
 | `DISABLE_THINK_FOR_RAG_BELOW_CTX` | 8192 | Disable thinking for RAG when context < this |
+
+### VL (Vision-Language) Limits
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VL_RAG_CONTEXT_CAP` | 2000 chars | Max RAG reference text in VL multi-turn prompts |
+| `VL_ASSISTANT_HISTORY_CAP` | 500 chars | Max chars per prior assistant answer in VL prompts |
 
 ### Process Management
 

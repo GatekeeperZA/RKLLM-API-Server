@@ -48,8 +48,13 @@ print("Database updated successfully.")
 try:
     import requests
     BASE = "http://localhost:8080"  # Inside the container, OWUI listens on 8080
-    EMAIL = os.environ.get("OWUI_EMAIL", "admin@theroot.za.net")
-    PASSWORD = os.environ.get("OWUI_PASSWORD", "852170001aOp*")
+    EMAIL = os.environ.get("OWUI_EMAIL")
+    PASSWORD = os.environ.get("OWUI_PASSWORD")
+    if not EMAIL or not PASSWORD:
+        print("ERROR: Set OWUI_EMAIL and OWUI_PASSWORD env vars before running.")
+        print("  export OWUI_EMAIL='your-email'")
+        print("  export OWUI_PASSWORD='your-password'")
+        sys.exit(1)
 
     # Sign in
     r = requests.post(f"{BASE}/api/v1/auths/signin",
