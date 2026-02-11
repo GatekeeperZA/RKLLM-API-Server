@@ -181,6 +181,18 @@ DISABLE_THINK_FOR_RAG_BELOW_CTX = 8192
 VL_RAG_CONTEXT_CAP = 2000       # Max chars of RAG reference text in VL prompts
 VL_ASSISTANT_HISTORY_CAP = 500  # Max chars per prior assistant answer in VL prompts
 
+# Text-model multi-turn history management.
+# Small models (4K context) degrade rapidly when history fills the context window.
+# We reserve a portion of context for the system prompt + current user turn +
+# model output, and fit as many recent turns as possible into the remainder.
+HISTORY_CONTEXT_RESERVE = 0.35  # Reserve 35% of context for current turn + output
+ASSISTANT_HISTORY_CAP = 1500    # Max chars per prior assistant answer in text prompts
+
+# Regex to strip <think>...</think> blocks from assistant history.
+# Qwen3 docs: "historical model output should only include the final output
+# part and does not need to include the thinking content."
+_RE_THINK_BLOCK = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
+
 # Open WebUI internal task signatures — these are meta-tasks (search query
 # generation, title generation, tag generation, etc.) sent by Open WebUI
 # before/after the actual user request.  Thinking mode wastes 20+ seconds
@@ -2318,14 +2330,38 @@ def build_prompt(messages, model_name):
 
         for role, content in conversation:
             if multi_turn:
-                if role == 'user':
-                    parts.append(f"User: {content}")
-                elif role == 'assistant':
+                if role == 'assistant':
+                    # Strip <think>...</think> blocks from assistant history.
+                    # Qwen3 docs explicitly say historical output should only
+                    # include the final answer, not the thinking content.
+                    content = _RE_THINK_BLOCK.sub('', content).strip()
+                    if not content:
+                        continue
+                    # Cap assistant history length to avoid context bloat
+                    if len(content) > ASSISTANT_HISTORY_CAP:
+                        content = content[:ASSISTANT_HISTORY_CAP] + '...'
                     parts.append(f"Assistant: {content}")
+                elif role == 'user':
+                    parts.append(f"User: {content}")
             else:
                 parts.append(content)
 
+        # --- Sliding window: trim oldest turns if prompt exceeds context ---
+        # Reserve space for current turn + model output, fit recent history.
+        max_prompt_chars = int(ctx * CHARS_PER_TOKEN_ESTIMATE * (1 - HISTORY_CONTEXT_RESERVE))
         prompt = "\n".join(parts)
+        if len(prompt) > max_prompt_chars and len(parts) > 2:
+            original_parts = len(parts)
+            # Always keep: first part (system prompt, if any) + last part (current user msg)
+            # Trim from the second element (oldest history turn) forward
+            while len(parts) > 2 and len("\n".join(parts)) > max_prompt_chars:
+                parts.pop(1)  # Remove oldest history turn
+            prompt = "\n".join(parts)
+            trimmed = original_parts - len(parts)
+            if trimmed > 0:
+                logger.info(f"History sliding window: trimmed {trimmed} oldest turns "
+                            f"({original_parts} -> {len(parts)} parts, "
+                            f"{len(prompt)} chars, ctx={ctx})")
         # Only enable thinking for models with the "thinking" capability
         enable_thinking = 'thinking' in model_caps
 
