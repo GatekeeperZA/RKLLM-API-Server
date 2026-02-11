@@ -67,7 +67,7 @@ except ImportError:
     _VL_DEPS_AVAILABLE = False
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB (base64 images can be large)
 CORS(app)
 
 # =============================================================================
