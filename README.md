@@ -66,6 +66,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Clean abort** — native `rkllm_abort()` for instant cancellation (no SIGKILL needed)
 - **Graceful shutdown** on SIGTERM/SIGINT with model cleanup
 - **RLock-based locking** — prevents model switch deadlock scenarios
+- **Repetition loop detection** — aborts generation when the model enters paragraph-level repetition loops (configurable window/threshold)
 - **Error callback state** — detects C library errors and surfaces them as proper HTTP responses
 
 ### RAG (Retrieval-Augmented Generation)
@@ -114,6 +115,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Image preprocessing** — auto square-pad (128,128,128 background) and resize to encoder input size
 - **Multiple VL model support** — auto-detects `.rknn` vision encoder alongside `.rkllm` decoder
 - **Configurable special tokens** — `VL_MODEL_CONFIGS` maps model families to their image tokens
+- **Multi-turn VL context** — follow-up questions, RAG/web search data, and conversation history are included in VL prompts (not just the original image caption)
 - **Seamless Open WebUI experience** — paste/upload images in chat, responses stream normally
 
 ---
@@ -1278,6 +1280,8 @@ All configuration is at the top of `api.py`:
 | `GENERATION_TIMEOUT` | 600s | Max total generation time |
 | `FIRST_TOKEN_TIMEOUT` | 120s | Max wait for first token (includes prefill) |
 | `FALLBACK_SILENCE` | 12s | Max silence between tokens after first |
+| `REPETITION_WINDOW` | 200 chars | Sliding window size for repetition loop detection |
+| `REPETITION_MAX_HITS` | 2 | Abort after this many repeated windows detected |
 
 ### Defaults
 
@@ -1534,7 +1538,8 @@ RKLLM-API-Server/
 │   ├── dump_owui_models_quick.py   # Quick dump of all OWUI model records
 │   ├── dump_owui_settings.py       # Dump all OWUI admin settings from DB
 │   ├── owui_set_compression.py     # Set OWUI image compression (DB + runtime API)
-│   └── vl_multi_image_test.py      # Multi-image VL model integration test
+│   ├── vl_multi_image_test.py      # Multi-image VL model integration test
+│   └── vl_multiturn_test.py        # VL multi-turn context + RAG integration test
 ├── archive/
 │   ├── api_v1_subprocess.py        # Original subprocess version (archived)
 │   └── CTYPES_MIGRATION_PLAN.md    # V1→V2 migration planning document
@@ -1561,7 +1566,7 @@ The original server (`archive/api_v1_subprocess.py`) worked by spawning a separa
 | **Error handling** | Detect process crash / timeout | C return codes + error callback state |
 | **Process management** | ~500 lines (spawn, monitor, kill, restart) | 0 lines (no process to manage) |
 | **VL / multimodal** | Not supported | Dual-model architecture with RKNN vision encoder |
-| **Code size** | 2682 lines | ~3600 lines (text + VL + RAG) |
+| **Code size** | 2682 lines | ~3700 lines (text + VL + RAG) |
 
 ### Why the Change Matters
 
