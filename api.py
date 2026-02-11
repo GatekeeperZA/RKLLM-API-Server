@@ -188,6 +188,10 @@ VL_ASSISTANT_HISTORY_CAP = 500  # Max chars per prior assistant answer in VL pro
 HISTORY_CONTEXT_RESERVE = 0.35  # Reserve 35% of context for current turn + output
 ASSISTANT_HISTORY_CAP = 1500    # Max chars per prior assistant answer in text prompts
 
+# Prompt cache: save/load KV state for system prompt tokens to skip re-prefill.
+# Cache files are stored as <model_dir>/prompt_cache.bin and loaded on model init.
+PROMPT_CACHE_ENABLED = True     # Set False to disable prompt cache entirely
+
 # Regex to strip <think>...</think> blocks from assistant history.
 # Qwen3 docs: "historical model output should only include the final output
 # part and does not need to include the thinking content."
@@ -1302,6 +1306,22 @@ class RKLLMWrapper:
         except AttributeError:
             pass  # May not exist in all library versions
 
+        # rkllm_load_prompt_cache(handle, prompt_cache_path) -> int
+        try:
+            self.lib.rkllm_load_prompt_cache.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p,
+            ]
+            self.lib.rkllm_load_prompt_cache.restype = ctypes.c_int
+        except AttributeError:
+            pass
+
+        # rkllm_release_prompt_cache(handle) -> int
+        try:
+            self.lib.rkllm_release_prompt_cache.argtypes = [ctypes.c_void_p]
+            self.lib.rkllm_release_prompt_cache.restype = ctypes.c_int
+        except AttributeError:
+            pass
+
     def init_model(self, model_path, ctx_len, max_tokens, vl_config=None, sampling=None):
         """Initialize a model.  Returns True on success.
 
@@ -1357,8 +1377,48 @@ class RKLLMWrapper:
         self._model_loaded = True
         return True
 
-    def run(self, prompt, role="user", keep_history=1, enable_thinking=False):
+    def load_prompt_cache(self, cache_path):
+        """Load a saved prompt cache from disk into the runtime.
+
+        This pre-loads KV state for previously processed tokens (e.g. system
+        prompt), saving prefill time on the first request after model load.
+        Returns True on success.
+        """
+        if not self._model_loaded:
+            return False
+        try:
+            ret = self.lib.rkllm_load_prompt_cache(
+                self.handle, cache_path.encode('utf-8'))
+            if ret == 0:
+                logger.info(f"Prompt cache loaded: {cache_path}")
+                return True
+            else:
+                logger.warning(f"rkllm_load_prompt_cache returned {ret} — cache may be stale")
+                return False
+        except AttributeError:
+            logger.debug("rkllm_load_prompt_cache not available in this SDK version")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to load prompt cache: {e}")
+            return False
+
+    def release_prompt_cache(self):
+        """Release a loaded prompt cache from memory."""
+        if not self._model_loaded:
+            return
+        try:
+            self.lib.rkllm_release_prompt_cache(self.handle)
+        except (AttributeError, Exception):
+            pass
+
+    def run(self, prompt, role="user", keep_history=1, enable_thinking=False,
+            save_prompt_cache_path=None):
         """Run inference (BLOCKING).  Must be called from a worker thread.
+
+        Args:
+            save_prompt_cache_path: if set, saves KV state to this path after
+                                   inference.  Used once on first request to
+                                   prime the prompt cache for subsequent loads.
 
         Returns the rkllm_run return code (0 = success).
         """
@@ -1375,6 +1435,14 @@ class RKLLMWrapper:
         ctypes.memset(ctypes.byref(infer_param), 0, ctypes.sizeof(RKLLMInferParam))
         infer_param.mode = RKLLM_INFER_GENERATE
         infer_param.keep_history = keep_history
+
+        # Optionally save prompt cache after this inference
+        _cache_param = None
+        if save_prompt_cache_path:
+            _cache_param = RKLLMPromptCacheParam()
+            _cache_param.save_prompt_cache = 1
+            _cache_param.prompt_cache_path = save_prompt_cache_path.encode('utf-8')
+            infer_param.prompt_cache_params = ctypes.pointer(_cache_param)
 
         return self.lib.rkllm_run(
             self.handle,
@@ -2474,7 +2542,31 @@ def load_model(model_name, config):
         elapsed = time.time() - load_start
         logger.info(f"{model_name} LOADED successfully in {elapsed:.1f}s (ctx={ctx_len})")
         CURRENT_MODEL = model_name
+
+        # Try loading prompt cache (saves ~50-200ms on first prefill)
+        if PROMPT_CACHE_ENABLED:
+            model_dir = os.path.dirname(model_path)
+            cache_file = os.path.join(model_dir, 'prompt_cache.bin')
+            if os.path.isfile(cache_file):
+                _rkllm_wrapper.load_prompt_cache(cache_file)
+            else:
+                logger.debug(f"No prompt cache for {model_name} (will save on first request)")
+
         return True
+
+
+def _get_prompt_cache_path(model_name):
+    """Return the prompt cache file path for a model, or None."""
+    if not PROMPT_CACHE_ENABLED:
+        return None
+    config = MODELS.get(model_name)
+    if not config:
+        return None
+    model_dir = os.path.dirname(config['path'])
+    cache_file = os.path.join(model_dir, 'prompt_cache.bin')
+    if os.path.isfile(cache_file):
+        return None  # Already exists — don't re-save
+    return cache_file
 
 
 def unload_current(reason="requested"):
@@ -3534,6 +3626,9 @@ def _generate_stream(prompt, request_id, model_name, created,
     # early client disconnect (GeneratorExit) is caught by the finally
     # block, which resets GENERATION_COMPLETE and calls end_request().
 
+    # Determine if we should save prompt cache on this run
+    _save_cache_path = _get_prompt_cache_path(model_name) if (kv_is_reset and not _is_vl) else None
+
     # Start rkllm_run in a worker thread (it blocks until generation completes)
     def _worker():
         try:
@@ -3547,10 +3642,13 @@ def _generate_stream(prompt, request_id, model_name, created,
             else:
                 ret = _active_wrapper.run(prompt, role="user",
                                           keep_history=keep_history,
-                                          enable_thinking=enable_thinking)
+                                          enable_thinking=enable_thinking,
+                                          save_prompt_cache_path=_save_cache_path)
             if ret != 0:
                 logger.error(f"[{request_id}] rkllm_run returned error code {ret}")
                 _token_queue.put(("error", f"rkllm_run returned {ret}"))
+            elif _save_cache_path:
+                logger.info(f"Prompt cache saved: {_save_cache_path}")
         except Exception as e:
             logger.error(f"[{request_id}] Worker thread error: {e}")
             _token_queue.put(("error", str(e)))
@@ -3768,6 +3866,9 @@ def _generate_complete(prompt, request_id, model_name, created,
         except queue.Empty:
             break
 
+    # Determine if we should save prompt cache on this run
+    _save_cache_path = _get_prompt_cache_path(model_name) if (kv_is_reset and not _is_vl) else None
+
     # Start worker thread
     def _worker():
         try:
@@ -3781,10 +3882,13 @@ def _generate_complete(prompt, request_id, model_name, created,
             else:
                 ret = _active_wrapper.run(prompt, role="user",
                                           keep_history=keep_history,
-                                          enable_thinking=enable_thinking)
+                                          enable_thinking=enable_thinking,
+                                          save_prompt_cache_path=_save_cache_path)
             if ret != 0:
                 logger.error(f"[{request_id}] rkllm_run returned error code {ret}")
                 _token_queue.put(("error", f"rkllm_run returned {ret}"))
+            elif _save_cache_path:
+                logger.info(f"Prompt cache saved: {_save_cache_path}")
         except Exception as e:
             logger.error(f"[{request_id}] Worker thread error: {e}")
             _token_queue.put(("error", str(e)))
