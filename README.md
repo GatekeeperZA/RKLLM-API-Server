@@ -51,6 +51,9 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/models` endpoints work with any OpenAI client
 - **Direct NPU access** via ctypes binding to `librkllmrt.so` (no subprocess overhead)
 - **KV cache incremental mode** — follow-up turns only prefill the new message (~50ms vs ~500ms)
+- **Prompt cache preloading** — saves KV state to disk after first inference; subsequent model loads restore it instantly, skipping system prompt re-prefill
+- **Model-aware sampling profiles** — per-family tuned sampling parameters (Qwen3, Gemma, Phi, DeepSeek) with `model_config.json` override support
+- **Context-aware sliding window** — automatically trims oldest conversation turns when history exceeds context length, keeping the most recent exchange intact
 - **Streaming & non-streaming** responses with proper SSE (Server-Sent Events) format
 - **Auto-detection** of all `.rkllm` models in `~/models` directory
 - **Context length auto-detection** from filename patterns (2k/4k/8k/16k/32k)
@@ -87,6 +90,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **`<think>` tag parsing** for Qwen3 and similar reasoning models
 - **`reasoning_content`** field in both streaming deltas and non-streaming responses
 - **Streaming state machine** handles tags split across output chunks
+- **Thinking block stripping** — `<think>...</think>` blocks are automatically stripped from assistant history before re-sending to the model (per Qwen3 docs: "historical output should only include the final output")
 - **Open WebUI integration** — reasoning appears as collapsible thinking blocks
 
 ### Open WebUI Meta-Task Shortcuts
@@ -1305,6 +1309,7 @@ The server:
 - Parses these tags from the token stream using a state machine (handles tags split across chunks)
 - Sends `reasoning_content` in streaming deltas (Open WebUI displays these as collapsible thinking blocks)
 - Returns `reasoning_content` in non-streaming responses
+- **Thinking blocks stripped from history** — prior assistant responses have `<think>...</think>` removed before re-sending to the model, per Qwen3 docs ("historical output should only include the final output part"). This saves tokens and prevents the model from mimicking its own chain-of-thought
 - **Context-dependent thinking for RAG**: On small context models (< 8k), thinking is disabled via `enable_thinking = false` to save tokens for the actual answer
 
 > **Note:** DeepSeek-R1 is currently **not usable on the NPU** with RKLLM Runtime v1.2.3 (produces `[PAD]` garbage tokens). Use **Qwen3-1.7B** for NPU reasoning, or run `deepseek-r1:7b` via Ollama on CPU. See the [Pre-Built Models](#pre-built-models) section for details.
@@ -1330,6 +1335,25 @@ The NPU runtime maintains an internal KV cache. With `keep_history=1`, prior con
 4. **RAG queries** — Always use `keep_history=0` (standalone, no history needed).
 
 This makes multi-turn conversations significantly faster — Turn 2+ take ~50ms to prefill regardless of total conversation length.
+
+### Prompt Cache Preloading
+
+When `PROMPT_CACHE_ENABLED = True` (default), the server saves the KV state to disk after the first inference on a freshly loaded model. On subsequent model loads (e.g., after a model swap or service restart), this cache is restored automatically, pre-populating the system prompt tokens so the first turn starts faster.
+
+- Cache file: `<model_dir>/prompt_cache.bin` (e.g., `~/models/Qwen3-1.7B/prompt_cache.bin`)
+- **Save**: Triggered on the first KV reset (new conversation) after model load, if no cache file exists yet
+- **Load**: Called automatically during `load_model()` if a cache file is found
+- Uses the RKLLM SDK's `rkllm_load_prompt_cache()` / `rkllm_release_prompt_cache()` API
+- Graceful fallback: if the SDK version doesn't support the cache API, the feature is silently disabled
+
+### Context-Aware Sliding Window
+
+When conversation history exceeds the model's context window, the server automatically trims the oldest turns to make room. This prevents context overflow errors while preserving the most recent exchange:
+
+- Reserves `HISTORY_CONTEXT_RESERVE` (35%) of context for the current turn + generation output
+- Caps each prior assistant message at `ASSISTANT_HISTORY_CAP` (1500 chars) to prevent single long responses from dominating history
+- Trims from the oldest turn first, always keeping at least the most recent user/assistant pair
+- Strips `<think>...</think>` blocks from assistant history before inclusion (per Qwen3 guidelines)
 
 ---
 
@@ -1372,6 +1396,43 @@ All configuration is at the top of `api.py`:
 |----------|---------|-------------|
 | `VL_RAG_CONTEXT_CAP` | 2000 chars | Max RAG reference text in VL multi-turn prompts |
 | `VL_ASSISTANT_HISTORY_CAP` | 500 chars | Max chars per prior assistant answer in VL prompts |
+
+### History & Sliding Window
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HISTORY_CONTEXT_RESERVE` | 0.35 | Fraction of context reserved for current turn + output |
+| `ASSISTANT_HISTORY_CAP` | 1500 chars | Max chars per prior assistant answer in text prompts |
+
+### Prompt Cache
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PROMPT_CACHE_ENABLED` | `True` | Enable/disable KV state save/load on model init |
+
+### Sampling Profiles
+
+Model-aware sampling is configured via `MODEL_SAMPLING_PROFILES` in `api.py`. Each model family gets tuned defaults:
+
+| Family | top_k | top_p | temp | repeat_penalty | presence_penalty |
+|--------|-------|-------|------|----------------|------------------|
+| `qwen3` | 20 | 0.8 | 0.7 | 1.1 | 1.5 |
+| `gemma` | 40 | 0.95 | 0.7 | 1.1 | 0.0 |
+| `phi` | 40 | 0.9 | 0.6 | 1.1 | 0.0 |
+| `deepseek` | 20 | 0.9 | 0.6 | 1.1 | 1.0 |
+
+**Override per model**: Add a `"sampling"` key in `model_config.json` inside the model directory:
+
+```json
+{
+  "sampling": {
+    "top_k": 30,
+    "temperature": 0.5
+  }
+}
+```
+
+Only specified fields are overridden; unset fields use the family profile defaults.
 
 ### Process Management
 
@@ -1901,7 +1962,7 @@ Qwen3-VL uses `patch_size=16` and `merge_size=2`, so resolution must be divisibl
 | `v1.0-subprocess-stable` | Last working subprocess version (V1) |
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
-| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + NPU benchmarks + full test suites (333 checks, 0 failures) |
+| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + model-aware sampling + prompt cache + sliding window + NPU benchmarks + full test suites (333 checks, 0 failures) |
 
 ---
 
