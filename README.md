@@ -1710,7 +1710,7 @@ We tested all available pre-converted VL models to find the best option for real
 
 ## Vision Encoder Resolution Comparison
 
-After identifying that the 448×448 default vision encoder was the bottleneck, we re-exported the Qwen3-VL-2B vision encoder at 672×672 and 896×896 using the rknn-llm export scripts on an x86 host (Gatekeeper-PC: Ubuntu, 15GB RAM + 36GB swap, CPU-only — no GPU required).
+After identifying that the 448×448 default vision encoder was the bottleneck, we re-exported the Qwen3-VL-2B vision encoder at 672×672 and 896×896 using the rknn-llm export scripts on an x86 host (Ubuntu, 15GB RAM + 36GB swap, CPU-only — no GPU required).
 
 ### File Layout on Orange Pi
 
