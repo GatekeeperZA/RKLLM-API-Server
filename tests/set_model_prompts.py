@@ -105,6 +105,10 @@ def main():
             print(f"  OK   {user_name}: no parseable settings")
             continue
 
+        if not isinstance(settings, dict):
+            print(f"  OK   {user_name}: no user-level prompt")
+            continue
+
         user_prompt = settings.get("system", None)
         if user_prompt:
             print(f"  CLEAR {user_name}: removing user-level prompt (was: {user_prompt!r:.80})")
