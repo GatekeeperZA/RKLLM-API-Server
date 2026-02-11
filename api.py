@@ -2925,37 +2925,57 @@ def chat_completions():
             global VL_LAST_REQUEST_TIME
             VL_LAST_REQUEST_TIME = time.time()
 
-            try:
-                image_np = _preprocess_image(
-                    _vl_images[0],
-                    _vision_encoder.model_width,
-                    _vision_encoder.model_height,
-                )
-            except Exception as e:
-                logger.error(f"[{request_id}] Image preprocessing failed: {e}")
-                end_request(request_id)
-                return make_error_response(f"Image preprocessing failed: {e}", 400)
-            update_request_activity()
+            # --- Multi-image support: encode each image, concatenate embeddings ---
+            MAX_VL_IMAGES = 4  # Safety cap to prevent NPU OOM on 16GB device
+            images_to_process = _vl_images[:MAX_VL_IMAGES]
+            if len(_vl_images) > MAX_VL_IMAGES:
+                logger.warning(f"[{request_id}] {len(_vl_images)} images provided, "
+                              f"capping to {MAX_VL_IMAGES} (NPU memory limit)")
 
-            logger.info(f"[{request_id}] Running vision encoder...")
-            with PROCESS_LOCK:
-                image_embed = _vision_encoder.run(image_np)
-            if image_embed is None:
-                end_request(request_id)
-                return make_error_response("Vision encoder inference failed", 500)
-            update_request_activity()
+            all_embeds = []
+            for img_idx, img_bytes in enumerate(images_to_process):
+                try:
+                    image_np = _preprocess_image(
+                        img_bytes,
+                        _vision_encoder.model_width,
+                        _vision_encoder.model_height,
+                    )
+                except Exception as e:
+                    logger.error(f"[{request_id}] Image {img_idx+1} preprocessing failed: {e}")
+                    end_request(request_id)
+                    return make_error_response(
+                        f"Image {img_idx+1}/{len(images_to_process)} preprocessing failed: {e}", 400)
+                update_request_activity()
+
+                logger.info(f"[{request_id}] Running vision encoder on image "
+                           f"{img_idx+1}/{len(images_to_process)}...")
+                with PROCESS_LOCK:
+                    embed = _vision_encoder.run(image_np)
+                if embed is None:
+                    end_request(request_id)
+                    return make_error_response(
+                        f"Vision encoder failed on image {img_idx+1}/{len(images_to_process)}", 500)
+                all_embeds.append(embed)
+                update_request_activity()
+
+            n_images = len(all_embeds)
+            if n_images == 1:
+                image_embed = all_embeds[0]
+            else:
+                image_embed = np.concatenate(all_embeds)
+
             logger.info(f"[{request_id}] Vision encoder done: "
-                       f"{len(image_embed)} floats "
-                       f"({_vision_encoder.model_image_token} tokens x "
+                       f"{n_images} image(s), {len(image_embed)} floats "
+                       f"({_vision_encoder.model_image_token} tokens/img x "
                        f"{_vision_encoder.model_embed_size} embed)")
 
             vl_image_tag = vl_config.get('vl_config', {}).get('image_tag', '<image>')
-            vl_prompt = f"{vl_image_tag}{_vl_text_prompt}"
+            vl_prompt = f"{vl_image_tag * n_images}{_vl_text_prompt}"
 
             vl_data = {
                 'image_embed': image_embed,
                 'n_image_tokens': _vision_encoder.model_image_token,
-                'n_image': 1,
+                'n_image': n_images,
                 'image_width': _vision_encoder.model_width,
                 'image_height': _vision_encoder.model_height,
             }
