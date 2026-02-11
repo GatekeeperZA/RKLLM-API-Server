@@ -2970,7 +2970,55 @@ def chat_completions():
                        f"{_vision_encoder.model_embed_size} embed)")
 
             vl_image_tag = vl_config.get('vl_config', {}).get('image_tag', '<image>')
-            vl_prompt = f"{vl_image_tag * n_images}{_vl_text_prompt}"
+
+            # --- Build VL prompt with conversation context ---
+            # _vl_text_prompt comes from the image-bearing message, which may
+            # NOT be the latest user turn (e.g., image in Turn 1, follow-up
+            # question in Turn 3).  Detect this and include the full context
+            # so follow-up questions, RAG data, and corrections are processed.
+            latest_user_text = None
+            for _m in reversed(messages):
+                if _m.get('role') == 'user' and _m.get('content', '').strip():
+                    latest_user_text = _m['content'].strip()
+                    break
+
+            is_vl_followup = (latest_user_text
+                              and latest_user_text != _vl_text_prompt
+                              and len(messages) > 2)
+
+            if is_vl_followup:
+                # Multi-turn VL conversation: user's current question differs
+                # from the original image message.  Build context-rich prompt.
+                prompt_parts = []
+
+                # 1. RAG / web-search context from system message
+                system_text = next(
+                    (_m['content'] for _m in messages
+                     if _m.get('role') == 'system' and _m.get('content')), None)
+                if system_text:
+                    rag_parts = _extract_rag_reference(system_text)
+                    if rag_parts:
+                        _, ref_text, _ = rag_parts
+                        # Cap to avoid filling VL model's limited context
+                        prompt_parts.append(f"Reference:\n{ref_text[:2000]}")
+
+                # 2. Brief conversation history (prior assistant answers)
+                for _m in messages:
+                    if _m.get('role') == 'assistant' and _m.get('content'):
+                        prompt_parts.append(
+                            f"Previous answer: {_m['content'][:500]}")
+
+                # 3. The actual current question
+                prompt_parts.append(latest_user_text)
+
+                context_text = '\n\n'.join(prompt_parts)
+                vl_prompt = f"{vl_image_tag * n_images}{context_text}"
+                logger.info(f"[{request_id}] VL multi-turn: "
+                           f"original='{_vl_text_prompt[:60]}', "
+                           f"latest='{latest_user_text[:60]}', "
+                           f"prompt_len={len(vl_prompt)}")
+            else:
+                vl_prompt = f"{vl_image_tag * n_images}{_vl_text_prompt}"
 
             vl_data = {
                 'image_embed': image_embed,
