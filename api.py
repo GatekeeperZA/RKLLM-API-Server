@@ -158,6 +158,12 @@ MAX_TOKENS_DEFAULT = 2048
 CONTEXT_LENGTH_DEFAULT = 4096
 CHARS_PER_TOKEN_ESTIMATE = 4  # ~4 chars/token for English (industry standard)
 
+# Repetition loop detection — abort generation when model enters text loops.
+# Small LLMs sometimes repeat the same paragraph verbatim; rkllm's repeat_penalty
+# only penalises individual tokens, not paragraph-level loops.
+REPETITION_WINDOW = 200       # Chars to compare against earlier output
+REPETITION_MAX_HITS = 2       # Abort after this many repeated windows
+
 # OpenAI sampling parameter defaults — rkllm uses model-compiled sampling,
 # but we log when callers send non-default values so they know.
 _SAMPLING_DEFAULTS = {
@@ -282,6 +288,30 @@ def _jaccard_similarity(text_a, text_b):
     intersection = words_a & words_b
     union = words_a | words_b
     return len(intersection) / len(union)
+
+
+def _detect_repetition_loop(text, window=REPETITION_WINDOW, max_hits=REPETITION_MAX_HITS):
+    """Detect if generated text has entered a repetition loop.
+
+    Checks whether the last `window` characters of `text` appear verbatim
+    earlier in the output.  Returns the number of times the window pattern
+    was found (0 = no loop).  The caller should abort when hits >= max_hits.
+    """
+    if len(text) < window * 2:
+        return 0  # Not enough text to detect loops
+    tail = text[-window:]
+    search_area = text[:-window]
+    hits = 0
+    start = 0
+    while True:
+        idx = search_area.find(tail, start)
+        if idx == -1:
+            break
+        hits += 1
+        if hits >= max_hits:
+            return hits
+        start = idx + 1
+    return hits
 
 
 # =============================================================================
@@ -3321,6 +3351,17 @@ def _generate_stream(prompt, request_id, model_name, created,
                         yield make_sse_chunk(request_id, model_name, created,
                                              delta={"content": chunk_text})
 
+                # Repetition loop detection — check every ~200 chars to avoid overhead
+                combined_output = total_reasoning + total_content
+                if len(combined_output) > REPETITION_WINDOW * 2:
+                    loop_hits = _detect_repetition_loop(combined_output)
+                    if loop_hits >= REPETITION_MAX_HITS:
+                        logger.warning(f"[{request_id}] Repetition loop detected "
+                                       f"({loop_hits} repeats of {REPETITION_WINDOW}-char window, "
+                                       f"{len(combined_output)} chars total) — aborting")
+                        _active_wrapper.abort()
+                        break
+
             elif msg_type == "finish":
                 stats_data = msg_data or {}
                 generation_clean = True
@@ -3516,6 +3557,17 @@ def _generate_complete(prompt, request_id, model_name, created,
                     got_first_token = True
                 update_request_activity()
                 content_parts.append(msg_data)
+
+                # Repetition loop detection (VL non-streaming)
+                combined_output = "".join(content_parts)
+                if len(combined_output) > REPETITION_WINDOW * 2:
+                    loop_hits = _detect_repetition_loop(combined_output)
+                    if loop_hits >= REPETITION_MAX_HITS:
+                        logger.warning(f"[{request_id}] Repetition loop detected "
+                                       f"({loop_hits} repeats of {REPETITION_WINDOW}-char window, "
+                                       f"{len(combined_output)} chars total) — aborting")
+                        _active_wrapper.abort()
+                        break
 
             elif msg_type == "finish":
                 stats_data = msg_data or {}
