@@ -21,3 +21,6 @@ Thumbs.db
 
 # Open WebUI admin tools (local only, contain DB manipulation scripts)
 owui_tools/
+
+# Random files
+api-tmp.py
