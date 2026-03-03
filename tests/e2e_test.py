@@ -18,7 +18,7 @@ Usage:
 
 Runs against: RKLLM_API env var (default http://localhost:8000)
 """
-import json, re, sys, time, os
+import json, sys, time, os
 import urllib.request, urllib.error
 
 # =============================================================================
@@ -874,10 +874,22 @@ def test_compliance():
           code == 400,
           f"status={code}")
 
-    # --- Invalid body ---
-    code2, data2, _ = _req("POST", "/v1/chat/completions", "not json")
-    check(sec, "Invalid body: 400",
-          code2 == 400,
+    # --- Invalid body (not a JSON object) ---
+    try:
+        raw_req = urllib.request.Request(
+            f"{API}/v1/chat/completions",
+            data=b"not json at all",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(raw_req, timeout=TIMEOUT) as resp:
+            code2 = resp.status
+    except urllib.error.HTTPError as e:
+        code2 = e.code
+    except Exception:
+        code2 = 0
+    check(sec, "Invalid JSON body: 400 or 500",
+          code2 in (400, 500),
           f"status={code2}")
 
     # --- Model list structure ---

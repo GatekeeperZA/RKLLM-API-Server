@@ -11,7 +11,7 @@ Usage:
 
 Output is designed to be copy-pasted for analysis.
 """
-import base64, hashlib, io, json, os, re, struct, sys, time, threading
+import base64, json, os, struct, sys, time, threading
 import urllib.request, urllib.error
 
 # =============================================================================
@@ -44,7 +44,7 @@ def _req(method, path, body=None, timeout=TIMEOUT):
             except json.JSONDecodeError:
                 return resp.status, None, raw
     except urllib.error.HTTPError as e:
-        raw = e.read().decode()
+        raw = e.read().decode() if e.fp else ""
         try:
             return e.code, json.loads(raw), raw
         except json.JSONDecodeError:
@@ -81,7 +81,7 @@ def _stream_req(path, body, timeout=TIMEOUT):
                         chunks.append({"_raw": payload})
             return chunks, content, reasoning
     except Exception as e:
-        return chunks, content, str(e)
+        return chunks, content, f"[ERROR] {e}"
 
 
 def check(section, name, condition, detail=""):

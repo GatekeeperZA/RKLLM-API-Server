@@ -54,18 +54,6 @@ PROMPTS = {
     },
 }
 
-# VL benchmark (only for models with vision capability)
-VL_PROMPT = {
-    "messages": [
-        {"role": "user", "content": [
-            {"type": "text", "text": "Describe what you see in this image in detail."},
-            {"type": "image_url", "image_url": {"url": None}},  # Filled at runtime
-        ]}
-    ],
-    "label": "VL image description",
-    "description": "Vision-language: describe a test image",
-}
-
 # Chars per token estimate (for tok/s from client side when server doesn't return it)
 CHARS_PER_TOKEN = 3.5
 
@@ -73,8 +61,8 @@ CHARS_PER_TOKEN = 3.5
 # =============================================================================
 # HELPERS
 # =============================================================================
-def api_request(method, path, body=None, stream=False):
-    """Send HTTP request. Returns (status, data, elapsed_s) or streaming iterator."""
+def api_request(method, path, body=None):
+    """Send HTTP request. Returns (status, data, elapsed_s)."""
     url = f"{API}{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(
@@ -84,8 +72,6 @@ def api_request(method, path, body=None, stream=False):
     start = time.time()
     try:
         resp = urllib.request.urlopen(req, timeout=TIMEOUT)
-        if stream:
-            return resp, start
         body_bytes = resp.read()
         elapsed = time.time() - start
         return resp.status, json.loads(body_bytes), elapsed

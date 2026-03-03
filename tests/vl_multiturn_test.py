@@ -11,13 +11,14 @@ This simulates what Open WebUI sends when:
 We check the log to confirm VL multi-turn mode was activated.
 """
 import os
+import json
 import requests
 import base64
 import time
 import subprocess
 import sys
 
-API = os.getenv("RKLLM_API_BASE", "http://localhost:8000")
+API = os.getenv("RKLLM_API", "http://localhost:8000")
 
 # Generate a small valid test image
 from PIL import Image
@@ -80,7 +81,6 @@ if resp.status_code != 200:
 full_text = ""
 for line in resp.iter_lines(decode_unicode=True):
     if line.startswith("data: ") and line != "data: [DONE]":
-        import json
         try:
             chunk = json.loads(line[6:])
             delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")

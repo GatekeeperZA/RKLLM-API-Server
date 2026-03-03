@@ -65,7 +65,8 @@ def _stream_req(path, body, timeout=180):
                         chunks.append(payload)
             return 200, chunks, content
     except urllib.error.HTTPError as e:
-        return e.code, [], e.read().decode()
+        raw = e.read().decode() if e.fp else ""
+        return e.code, [], raw
     except Exception as e:
         return 0, [], str(e)
 
