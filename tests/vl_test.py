@@ -11,6 +11,7 @@ API = os.environ.get("RKLLM_API", "http://localhost:8000")
 PASS = 0
 FAIL = 0
 SKIP = 0
+VL_MODEL = None  # Auto-detected from /v1/models
 
 
 def _req(method, path, body=None, timeout=180):
@@ -56,8 +57,10 @@ def _stream_req(path, body, timeout=180):
                     try:
                         obj = json.loads(payload)
                         chunks.append(obj)
-                        delta = obj.get("choices", [{}])[0].get("delta", {})
-                        content += delta.get("content", "")
+                        choices = obj.get("choices", [])
+                        if choices:
+                            delta = choices[0].get("delta", {})
+                            content += delta.get("content", "")
                     except json.JSONDecodeError:
                         chunks.append(payload)
             return 200, chunks, content
@@ -153,7 +156,14 @@ def test_models_list():
     report("GET /v1/models returns 200", code == 200)
     report("object is 'list'", data and data.get("object") == "list")
     models = [m["id"] for m in data.get("data", [])] if data else []
-    report("deepseekocr in model list", "deepseekocr" in models, f"models={models}")
+    # Detect VL model dynamically (any model with 'vl' capability)
+    global VL_MODEL
+    for m in data.get("data", []):
+        caps = m.get("capabilities", [])
+        if "vl" in caps:
+            VL_MODEL = m["id"]
+            break
+    report("VL model detected", VL_MODEL is not None, f"vl_model={VL_MODEL}, models={models}")
     report("qwen3-1.7b in model list", "qwen3-1.7b" in models)
     report("all models have required fields",
            data and all(
@@ -226,13 +236,15 @@ def test_text_streaming():
 
 def test_streaming_usage():
     print("\n=== 6. STREAMING WITH USAGE ===")
+    # Ensure clean state: wait for any prior generation to complete
+    time.sleep(3)
     code, chunks, content = _stream_req("/v1/chat/completions", {
         "model": "qwen3-1.7b",
         "messages": [{"role": "user", "content": "Say 'usage test' only."}],
         "stream": True, "max_tokens": 50,
         "stream_options": {"include_usage": True},
     })
-    report("returns 200", code == 200)
+    report("returns 200", code == 200, f"code={code}, detail={content[:200]}" if code != 200 else "")
     # Last chunk before [DONE] should have usage
     real_chunks = [c for c in chunks if isinstance(c, dict)]
     if real_chunks:
@@ -241,7 +253,7 @@ def test_streaming_usage():
         report("final chunk has usage", has_usage,
                f"usage={last.get('usage')}" if has_usage else "no usage in final chunk")
     else:
-        report("final chunk has usage", False, "no chunks")
+        report("final chunk has usage", False, f"no chunks (code={code}, err={content[:200]})")
 
 
 def test_model_switching():
@@ -292,8 +304,11 @@ def test_model_unload():
 
 def test_vl_non_streaming():
     print("\n=== 9. VL NON-STREAMING ===")
+    if not VL_MODEL:
+        skip("VL non-streaming", "no VL model detected")
+        return
     img = _make_test_image_b64()
-    code, data, raw = _vl_chat("deepseekocr", "What colors do you see?", img, stream=False, max_tokens=200)
+    code, data, raw = _vl_chat(VL_MODEL, "What colors do you see?", img, stream=False, max_tokens=200)
     report("returns 200", code == 200, f"code={code}" if code != 200 else "")
     if code != 200:
         report("error detail", False, raw[:200])
@@ -302,7 +317,8 @@ def test_vl_non_streaming():
         msg = data.get("choices", [{}])[0].get("message", {})
         report("has content", bool(msg.get("content")),
                f"len={len(msg.get('content', ''))}")
-        report("model is deepseekocr", data.get("model") == "deepseekocr")
+        report("model is VL model", data.get("model") == VL_MODEL,
+               f"expected={VL_MODEL}, got={data.get('model')}")
         report("finish_reason is stop",
                data["choices"][0].get("finish_reason") == "stop")
 
@@ -315,10 +331,13 @@ def test_vl_non_streaming():
 
 def test_vl_streaming():
     print("\n=== 10. VL STREAMING ===")
+    if not VL_MODEL:
+        skip("VL streaming", "no VL model detected")
+        return
     img = _make_test_image_b64()
-    code, chunks, content = _vl_chat("deepseekocr", "Describe this image briefly.", img,
+    code, chunks, content = _vl_chat(VL_MODEL, "Describe this image briefly.", img,
                                       stream=True, max_tokens=150)
-    report("returns 200", code == 200)
+    report("returns 200", code == 200, f"code={code}" if code != 200 else "")
     report("received chunks", len(chunks) > 1, f"chunk_count={len(chunks)}")
     report("ends with [DONE]", chunks and chunks[-1] == "[DONE]")
     report("has content", len(content) > 10, f"content_len={len(content)}")
@@ -339,24 +358,27 @@ def test_vl_auto_routing():
     code, data, _ = _req("POST", "/v1/chat/completions", body, timeout=180)
     report("auto-routes to VL (returns 200)", code == 200)
     if data:
-        report("model in response is deepseekocr",
-               data.get("model") == "deepseekocr",
-               f"model={data.get('model')}")
+        report("model in response is VL model",
+               VL_MODEL and data.get("model") == VL_MODEL,
+               f"expected={VL_MODEL}, got={data.get('model')}")
 
 
 def test_vl_no_text():
     print("\n=== 12. VL WITH NO TEXT (DEFAULT PROMPT) ===")
+    if not VL_MODEL:
+        skip("VL no text", "no VL model detected")
+        return
     img = _make_test_image_b64()
     # Send image with no text part — should use default "Describe this image."
     body = {
-        "model": "deepseekocr",
+        "model": VL_MODEL,
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:image/bmp;base64,{img}"}},
         ]}],
         "stream": False, "max_tokens": 100,
     }
     code, data, _ = _req("POST", "/v1/chat/completions", body, timeout=180)
-    report("VL with no text returns 200", code == 200)
+    report("VL with no text returns 200", code == 200, f"code={code}" if code != 200 else "")
     if data:
         report("has content", bool(
             data.get("choices", [{}])[0].get("message", {}).get("content")))
@@ -396,7 +418,7 @@ def test_error_handling():
 
     # Bad base64 image
     body = {
-        "model": "deepseekocr",
+        "model": VL_MODEL or "qwen3-1.7b",
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,NOT_VALID_BASE64!!!"}},
             {"type": "text", "text": "test"},
@@ -552,11 +574,16 @@ if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
     if mode == "complete":
         img = _make_test_image_b64()
-        code, data, raw = _vl_chat("deepseekocr", "Describe the colors you see.", img, max_tokens=200)
+        # Detect VL model
+        _, mdata, _ = _req("GET", "/v1/models")
+        vl = next((m["id"] for m in (mdata or {}).get("data", []) if "vl" in m.get("capabilities", [])), "qwen3-vl-2b")
+        code, data, raw = _vl_chat(vl, "Describe the colors you see.", img, max_tokens=200)
         print(json.dumps(data, indent=2) if data else raw)
     elif mode == "stream":
         img = _make_test_image_b64()
-        code, chunks, content = _vl_chat("deepseekocr", "Describe this image briefly.", img,
+        _, mdata, _ = _req("GET", "/v1/models")
+        vl = next((m["id"] for m in (mdata or {}).get("data", []) if "vl" in m.get("capabilities", [])), "qwen3-vl-2b")
+        code, chunks, content = _vl_chat(vl, "Describe this image briefly.", img,
                                           stream=True, max_tokens=200)
         print(content)
         if chunks and chunks[-1] == "[DONE]":

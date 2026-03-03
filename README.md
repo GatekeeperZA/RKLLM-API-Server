@@ -70,6 +70,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Graceful shutdown** on SIGTERM/SIGINT with model cleanup
 - **RLock-based locking** — prevents model switch deadlock scenarios
 - **Repetition loop detection** — aborts generation when the model enters paragraph-level repetition loops (configurable window/threshold)
+- **SSE heartbeats during prefill** — sends keep-alive comments every 15s during long prefill to prevent HTTP proxy/client timeouts
 - **Error callback state** — detects C library errors and surfaces them as proper HTTP responses
 
 ### RAG (Retrieval-Augmented Generation)
@@ -104,6 +105,10 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Auto-detection** — recognizes Home Assistant requests by system prompt signatures (`smart home manager`, `Available Devices:`, `execute_services`)
 - **Thinking auto-disabled** — skips `<think>` reasoning for HA requests, cutting response time in half
 - **Compatible with Extended OpenAI Conversation** (HACS) — works as a drop-in conversation agent for Assist
+
+### Monitoring
+- **Prometheus metrics** (optional) — `rkllm_tokens_generated`, `rkllm_prefill_duration`, `rkllm_decode_duration`, `rkllm_tokens_per_request`, `rkllm_queue_wait_seconds`, `rkllm_active_requests`, `rkllm_model_load_seconds`, `rkllm_current_model` — exposed at `/metrics`
+- **Graceful degradation** — metrics are disabled automatically if `prometheus-flask-exporter` is not installed
 
 ### Standards Compliance
 - **`stream_options.include_usage`** — streaming token counts per OpenAI spec
@@ -213,6 +218,9 @@ This project was developed and tested on:
 ```bash
 # Core (required)
 pip install flask flask-cors gunicorn
+
+# Prometheus monitoring (optional — metrics at /metrics endpoint)
+pip install prometheus-flask-exporter prometheus-client
 
 # VL / multimodal support (optional — needed only for vision-language models)
 pip install numpy Pillow
@@ -722,6 +730,16 @@ curl http://localhost:8000/health
 
 > The `vl_model` field is `null` when no VL model is loaded.
 
+### `GET /metrics`
+
+Prometheus metrics endpoint (only available when `prometheus-flask-exporter` is installed).
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+Exposes counters, histograms, and gauges for tokens generated, prefill/decode duration, tokens per request, queue wait time, active requests, model load time, and current model state.
+
 ---
 
 ## Open WebUI Configuration
@@ -740,6 +758,12 @@ docker compose up -d
 
 # Update to latest Open WebUI image:
 docker compose pull && docker compose up -d
+
+# Update with full backup + rollback (recommended):
+# Uses the automated backup script — backs up DB + uploads,
+# verifies integrity, pulls latest image, health checks,
+# and auto-rolls back on failure. See Backup & Update section below.
+/home/armbian/scripts/openwebui_full_backup_update.sh
 
 # Full reset (deletes all data + settings, env vars re-apply):
 docker compose down -v && docker compose up -d
@@ -1237,6 +1261,54 @@ docker compose down && docker compose up -d
 
 ---
 
+## Backup & Update
+
+### Automated Weekly Backup + Update
+
+A cron job runs every **Sunday at 3 AM** to back up Open WebUI data and pull the latest image:
+
+```
+0 3 * * 0  /home/armbian/scripts/openwebui_full_backup_update.sh >> /var/log/openwebui_backup.log 2>&1
+```
+
+**What the script does:**
+
+1. Stops the Open WebUI container
+2. Backs up `webui.db` (SQLite) and `uploads/` + `vector_db/` directories
+3. Verifies backup integrity (`sqlite3 PRAGMA integrity_check` + `tar -tzf`)
+4. Rotates backups — keeps the last **5** (oldest deleted automatically)
+5. Pulls the latest Open WebUI image
+6. Recreates the container via `docker compose up -d`
+7. Runs an HTTP health check (up to 180 s timeout)
+8. On failure: **auto-rollback** — restores DB + files, tags the old image, restarts with it
+
+**Backup location:** `/home/armbian/backups/openwebui/`
+
+**Manual trigger:**
+```bash
+/home/armbian/scripts/openwebui_full_backup_update.sh
+```
+
+### Rollback Support
+
+The `docker-compose.yml` uses an environment variable for the image tag so the rollback path can override it:
+
+```yaml
+image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}
+```
+
+During normal operation `OPEN_WEBUI_IMAGE` is unset, so Docker pulls `main`. During rollback the script sets `OPEN_WEBUI_IMAGE` to the previously-tagged image and runs `docker compose up -d`, which picks up the old version.
+
+### Model Enforcement
+
+A separate hourly cron runs `enforce-owui-models.sh` to ensure the Open WebUI model list stays in sync with the RKLLM API server:
+
+```
+0 * * * *  /home/armbian/scripts/enforce-owui-models.sh >> /var/log/enforce-owui-models.log 2>&1
+```
+
+---
+
 ## RAG Pipeline
 
 When Open WebUI performs a web search or retrieves document chunks, the results are injected into the system message as `<source>` tags (or via a custom RAG template). The server detects this and activates a specialized RAG pipeline:
@@ -1366,8 +1438,8 @@ All configuration is at the top of `api.py`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GENERATION_TIMEOUT` | 600s | Max total generation time |
-| `FIRST_TOKEN_TIMEOUT` | 120s | Max wait for first token (includes prefill) |
-| `FALLBACK_SILENCE` | 12s | Max silence between tokens after first |
+| `FIRST_TOKEN_TIMEOUT` | 300s | Max wait for first token (includes prefill) |
+| `FALLBACK_SILENCE` | 20s | Max silence between tokens after first |
 | `REPETITION_WINDOW` | 200 chars | Sliding window size for repetition loop detection |
 | `REPETITION_MAX_HITS` | 2 | Abort after this many repeated windows detected |
 
@@ -1438,9 +1510,10 @@ Only specified fields are overridden; unset fields use the family profile defaul
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REQUEST_STALE_TIMEOUT` | 30s | Auto-clear tracked request after this idle time |
+| `REQUEST_STALE_TIMEOUT` | 180s | Auto-clear tracked request after this idle time |
 | `MONITOR_INTERVAL` | 10s | Health check / idle monitoring frequency |
-| `IDLE_UNLOAD_TIMEOUT` | 300s | Auto-unload model after idle (0 to disable) |
+| `IDLE_UNLOAD_TIMEOUT` | 300s | Auto-unload text model after idle (0 to disable) |
+| `VL_IDLE_UNLOAD_TIMEOUT` | 300s | Auto-unload VL model after idle (0 to disable) |
 
 ### Environment Variables
 
@@ -1504,11 +1577,11 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 ### "Another request is currently being processed" (503)
 - NPU is single-task — only one request at a time
 - Previous request may be stuck — check `/health` endpoint
-- Stale requests auto-clear after 30s idle
+- Stale requests auto-clear after 180s idle
 
 ### Streaming stops mid-response
-- Check `FALLBACK_SILENCE` timeout (default 12s) — increase if model is slow
-- Large prompts near context limit may cause long prefill — increase `FIRST_TOKEN_TIMEOUT`
+- Check `FALLBACK_SILENCE` timeout (default 20s) — increase if model is slow
+- Large prompts near context limit may cause long prefill — increase `FIRST_TOKEN_TIMEOUT` (default 300s)
 - Check `/health` endpoint for status
 
 ### Server freezes on requests
@@ -1572,35 +1645,36 @@ python tests/vl_test.py complete     # Non-streaming tests only
 python tests/vl_test.py stream       # Streaming tests only
 ```
 
-### Test Results (Orange Pi 5 Plus, Feb 2026)
+### Test Results (Orange Pi 5 Plus, March 2026)
 
 | Suite | Total | Pass | Fail | Warn | Time |
 |---|---|---|---|---|---|
-| `tests/diagnostic_test.py` | 108 | 108 | 0 | 0 | ~12 min |
-| `tests/vl_test.py` | 68 | 68 | 0 | 0 | ~8 min |
-| `tests/e2e_test.py` | 85 | 85 | 0 | 0 | ~25 min |
-| `tests/deep_diagnostic.py` | 72 | 71 | 0 | 1 | ~18 min |
+| `tests/diagnostic_test.py` | 91 | 91 | 0 | 0 | ~12 min |
+| `tests/vl_test.py` | 68 | 68 | 0 | 0 | ~5 min |
+| `tests/e2e_test.py` | 78 | 78 | 0 | 0 | ~11 min |
+| `tests/deep_diagnostic.py` | 84 | 84 | 0 | 1 | ~7 min |
 
 ### End-to-End Test (`tests/e2e_test.py`)
 
-Full integration test that exercises every model with real inference — **85 checks across 9 sections**, run against all 4 text models. Covers streaming, non-streaming, shortcircuits, RAG, cache, web search, KV multi-turn, per-model system prompts, database queries, and API compliance.
+Full integration test that exercises every model with real inference — **78 checks across 9 sections**, run against all 4 text models. Covers streaming, non-streaming, shortcircuits, RAG, cache, web search, KV multi-turn, prompt building, Open WebUI database config, and API compliance. WebUI/SearXNG URLs are auto-derived from `RKLLM_API` host.
 
 ```bash
 python tests/e2e_test.py                # Run all 9 sections against all models
 python tests/e2e_test.py --section 3    # Run only section 3
+python tests/e2e_test.py --fast          # Skip slow models (gemma, phi)
 ```
 
 | Section | Coverage |
 |---|---|
-| 1 | Health, models endpoint, model listing |
-| 2 | Per-model text generation (streaming + non-streaming, all 4 models) |
-| 3 | Shortcircuit detection (title gen, tag gen, query gen) |
-| 4 | RAG pipeline with real document context |
-| 5 | Response cache (hit/miss timing) |
-| 6 | Web search result handling |
-| 7 | KV cache multi-turn memory |
-| 8 | Per-model system prompts |
-| 9 | Database / API compliance edge cases |
+| 1 | Per-model text generation (streaming + non-streaming, all 4 models) |
+| 2 | Shortcircuit detection (title gen, tag gen, query gen) |
+| 3 | RAG pipeline with real document context |
+| 4 | RAG response cache (hit/miss timing) |
+| 5 | Web search flow (SearXNG integration) |
+| 6 | KV cache multi-turn memory |
+| 7 | Prompt building & detection (date, HA, summarization) |
+| 8 | Open WebUI database config |
+| 9 | API compliance & edge cases (alias resolution, stream_options) |
 
 ### Deep Diagnostic Test (`tests/deep_diagnostic.py`)
 
@@ -1962,7 +2036,7 @@ Qwen3-VL uses `patch_size=16` and `merge_size=2`, so resolution must be divisibl
 | `v1.0-subprocess-stable` | Last working subprocess version (V1) |
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
-| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + model-aware sampling + prompt cache + sliding window + NPU benchmarks + full test suites (333 checks, 0 failures) |
+| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + model-aware sampling + prompt cache + sliding window + NPU benchmarks + full test suites (321 checks, 0 failures) |
 
 ---
 

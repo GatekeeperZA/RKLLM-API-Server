@@ -25,8 +25,10 @@ import urllib.request, urllib.error
 # CONFIGURATION
 # =============================================================================
 API = os.environ.get("RKLLM_API", "http://localhost:8000")
-WEBUI = os.environ.get("RKLLM_WEBUI", "http://localhost:3000")
-SEARXNG = os.environ.get("RKLLM_SEARXNG", "http://localhost:8080")
+# Derive host from API URL so WebUI/SearXNG follow automatically
+_api_host = API.split("://")[1].split(":")[0] if "://" in API else "localhost"
+WEBUI = os.environ.get("RKLLM_WEBUI", f"http://{_api_host}:3000")
+SEARXNG = os.environ.get("RKLLM_SEARXNG", f"http://{_api_host}:8080")
 TIMEOUT = 180  # Per-request timeout (seconds)
 
 # Text models to test (skip deepseekocr — it's VL-only)
