@@ -3563,6 +3563,25 @@ def chat_completions():
             end_request(request_id)
             return make_error_response("Failed to build prompt from messages", 400, "invalid_request")
 
+        # Hard-reject prompts that exceed context length.
+        # The RKLLM runtime returns -1 for oversized prompts, but we can
+        # fail fast with a clear error instead of tying up the NPU.
+        # Use 1.1x multiplier to account for token estimation inaccuracy
+        # (we estimate ~4 chars/token but actual varies by language/content).
+        _ctx = config.get('context_length', CONTEXT_LENGTH_DEFAULT)
+        _approx_tok = len(prompt) // CHARS_PER_TOKEN_ESTIMATE
+        if _approx_tok > _ctx * 1.1:
+            logger.warning(
+                f"[{request_id}] Prompt rejected — estimated {_approx_tok} tokens "
+                f"exceeds context limit ({_ctx}) by >{int((_approx_tok / _ctx - 1) * 100)}%"
+            )
+            end_request(request_id)
+            return make_error_response(
+                f"Prompt too long (~{_approx_tok} tokens, model context is {_ctx}). "
+                f"Shorten your message or reduce conversation history.",
+                400, "context_length_exceeded"
+            )
+
         # KV cache strategy:
         # - RAG: always keep_history=0 (fresh context each time)
         # - Normal incremental: send only last user message, keep_history=1
