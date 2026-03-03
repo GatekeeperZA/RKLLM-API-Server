@@ -54,6 +54,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Prompt cache preloading** — saves KV state to disk after first inference; subsequent model loads restore it instantly, skipping system prompt re-prefill
 - **Model-aware sampling profiles** — per-family tuned sampling parameters (Qwen3, Gemma, Phi, DeepSeek) with `model_config.json` override support
 - **Context-aware sliding window** — automatically trims oldest conversation turns when history exceeds context length, keeping the most recent exchange intact
+- **Context overflow hard-rejection** — if the built prompt exceeds 110% of the model's context length (after sliding window), the request is rejected with a `400 context_length_exceeded` error instead of sending an oversized prompt to the NPU runtime
 - **Streaming & non-streaming** responses with proper SSE (Server-Sent Events) format
 - **Auto-detection** of all `.rkllm` models in `~/models` directory
 - **Context length auto-detection** from filename patterns (2k/4k/8k/16k/32k)
@@ -1653,6 +1654,15 @@ python tests/vl_test.py stream       # Streaming tests only
 | `tests/vl_test.py` | 68 | 68 | 0 | 0 | ~5 min |
 | `tests/e2e_test.py` | 78 | 78 | 0 | 0 | ~11 min |
 | `tests/deep_diagnostic.py` | 84 | 84 | 0 | 1 | ~7 min |
+| `tests/realworld_smoke.py` | 47 | 47 | 0 | 0 | ~4 min |
+
+### Real-World Smoke Test (`tests/realworld_smoke.py`)
+
+Ad-hoc real-world smoke test with 15 scenarios — **47 checks**. Exercises the API with natural prompts to verify end-to-end behavior including Q&A, streaming, reasoning, multi-turn context, RAG, shortcircuits, date awareness, Home Assistant, model switching, concurrent rejection, long output, and error handling.
+
+```bash
+python tests/realworld_smoke.py              # Run all 15 scenarios
+```
 
 ### End-to-End Test (`tests/e2e_test.py`)
 
@@ -1736,6 +1746,7 @@ RKLLM-API-Server/
 │   ├── e2e_test.py                 # End-to-end integration (9 sections, 85 checks, all models)
 │   ├── deep_diagnostic.py          # Deep diagnostic (12 sections, 72 checks, edge cases)
 │   ├── vl_test.py                  # Integration test suite (17 categories, 68 tests)
+│   ├── realworld_smoke.py           # Real-world smoke test (15 scenarios, 47 checks)
 │   ├── benchmark_test.py           # NPU model benchmark tool (tok/s, TTFT, memory)
 │   ├── benchmark_results.json      # Latest benchmark results
 │   ├── set_model_prompts.py        # Set system prompts on all OWUI models (DB script)
