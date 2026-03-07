@@ -402,7 +402,7 @@ fi
 # Verify
 info "Verifying RKLLM runtime..."
 RKLLM_BIN_FINAL=$(which rkllm 2>/dev/null || echo "")
-RKLLM_LIB_FINAL=$(ldconfig -p 2>/dev/null | grep librkllmrt | awk '{print $NF}' | head -1)
+RKLLM_LIB_FINAL=$(sudo ldconfig -p 2>/dev/null | grep librkllmrt | awk '{print $NF}' | head -1)
 
 if [[ -n "$RKLLM_LIB_FINAL" && -n "$RKLLM_BIN_FINAL" ]]; then
     success "Runtime verification passed"
