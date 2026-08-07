@@ -1362,30 +1362,95 @@ The API server automatically detects Home Assistant requests and:
 
 ## SearXNG Configuration
 
-The included `settings.yml` is optimized for Open WebUI on ARM hardware. Key settings:
+The included `settings.yml` is optimized for Open WebUI on ARM hardware. It uses only reliable, bot-friendly engines.
+
+> **Important:** Many SearXNG engines (including Bing and mwmbl) are `disabled: true` in SearXNG's bundled default settings. Using `use_default_settings: keep_only` inherits those disabled flags unless you explicitly override them with `disabled: false`. Without this, only DuckDuckGo will return results in combined queries — Bing and mwmbl silently stay off even though they appear in the `keep_only` list.
 
 ```yaml
 use_default_settings:
   engines:
     keep_only:
-      - google
-      - google news
       - duckduckgo
       - bing
-      - brave
+      - mwmbl
       - wikipedia
 
+server:
+  secret_key: "change-me-to-a-random-string"
+  limiter: false
+  image_proxy: false
+  request_timeout: 8
+
 search:
-  formats:
-    - html
-    - json    # REQUIRED for Open WebUI API access
+  formats: [html, json]    # json REQUIRED for Open WebUI API access
+  default_lang: en
+  safe_search: 0
+  autocomplete: ""
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 10.0
+  pool_connections: 50
+  pool_maxsize: 15
+
+redis:
+  url: redis://redis:6379/0
+
+engines:
+  - name: duckduckgo
+    weight: 1.5
+    shortcut: ddg
+    disabled: false          # Must be explicit — inherited default is false, but set it anyway
+    categories: [general, web]
+  - name: bing
+    weight: 1.4
+    shortcut: bi
+    disabled: false          # Bing is disabled: true in SearXNG defaults — must override
+    categories: [general, web]
+  - name: mwmbl
+    weight: 1.3
+    shortcut: mw
+    disabled: false          # mwmbl is disabled: true in SearXNG defaults — must override
+    categories: [general, web]
+  - name: wikipedia
+    weight: 1.2
+    shortcut: wp
+    disabled: false
+    categories: [general]
 ```
+
+**Why these engines:**
+
+| Engine | Reliability | Notes |
+|--------|-------------|-------|
+| DuckDuckGo | ✅ Good | Fast, low rate limiting, consistently available |
+| Bing | ✅ Good | Adds coverage — catches results DDG misses |
+| mwmbl | ✅ Good | Non-profit, bot-friendly, good long-tail coverage |
+| Wikipedia | ✅ Excellent | Always works, no rate limiting |
+| Brave | ❌ Avoid | Suspends for 180s on repeated queries (`suspended_time=180`) |
+| Startpage | ❌ Avoid | Redirects to CAPTCHA, suspended for 3600s |
+| Google | ❌ Avoid | Times out without a proxy; blocks headless requests |
+| Qwant | ❌ Avoid | CAPTCHA on any repeated use |
 
 **Installation:**
 ```bash
 cp settings.yml ~/Downloads/searxng-docker/searxng/settings.yml
 cd ~/Downloads/searxng-docker
 docker compose down && docker compose up -d
+
+# Verify all 4 engines are enabled (bing and mwmbl must show enabled: true):
+curl -s http://localhost:8080/config | python3 -c "
+import sys, json
+for e in json.load(sys.stdin).get('engines', []):
+    print(e['name'], '- enabled:', e.get('enabled'), '- cats:', e.get('categories'))
+"
+
+# Test combined search (should return results from multiple engines):
+curl -s 'http://localhost:8080/search?q=python+programming&format=json' | python3 -c "
+import sys, json; d = json.load(sys.stdin)
+from collections import Counter
+print('Total:', len(d.get('results', [])), '| Engines:', dict(Counter(r.get('engine') for r in d.get('results', []))))
+"
 ```
 
 ---

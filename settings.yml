@@ -6,60 +6,61 @@
 # INSTALL: Copy this file to ~/Downloads/searxng-docker/searxng/settings.yml
 #          then restart:  cd ~/Downloads/searxng-docker && docker compose down && docker compose up -d
 #
+# IMPORTANT: Many SearXNG engines are disabled: true in the bundled defaults.
+# Using keep_only inherits those disabled flags — you MUST set disabled: false
+# explicitly in the engines: section, or only DuckDuckGo will return results.
 
-# Instead of "use_default_settings: true" which loads ALL ~70 engines,
-# use keep_only to whitelist just the fast, reliable ones we need.
 use_default_settings:
   engines:
     keep_only:
-      - google
-      - google news
       - duckduckgo
       - bing
-      - brave
+      - mwmbl
       - wikipedia
 
 server:
   secret_key: "changeme-use-a-random-string"
   limiter: false              # No rate limiting (local-only API)
   image_proxy: false          # Not needed — Open WebUI fetches text only
-  request_timeout: 5          # Max wait for all engines (seconds)
+  request_timeout: 8          # Max wait for all engines (seconds)
 
 search:
-  formats:
-    - html
-    - json
+  formats: [html, json]       # json REQUIRED for Open WebUI API access
   default_lang: en
   safe_search: 0              # 0=off, 1=moderate, 2=strict
   autocomplete: ""            # Disable — saves resources, not used by API
 
 # Outgoing HTTP tuning — how SearXNG talks to search engines
 outgoing:
-  request_timeout: 4.0        # Per-engine timeout (must be < server timeout)
-  max_request_timeout: 6.0    # Absolute ceiling for slow engines
-  pool_connections: 50         # Connection pool size
-  pool_maxsize: 15             # Max connections per host
+  request_timeout: 6.0        # Per-engine timeout (must be < server timeout)
+  max_request_timeout: 10.0   # Absolute ceiling for slow engines
+  pool_connections: 50        # Connection pool size
+  pool_maxsize: 15            # Max connections per host
 
 redis:
   url: redis://redis:6379/0
 
-# Engine weights — boost the most reliable sources
+# Engine weights and overrides.
+# Note: disabled: false MUST be set explicitly for bing and mwmbl —
+# both are disabled: true in SearXNG's bundled settings.yml.
 engines:
-  - name: google
-    weight: 1.5               # Best general results
-    shortcut: g
-  - name: google news
-    weight: 1.3               # Current events — helps "what happened today" queries
-    shortcut: gn
   - name: duckduckgo
-    weight: 1.2               # Good fallback
+    weight: 1.5
     shortcut: ddg
+    disabled: false
+    categories: [general, web]
   - name: bing
-    weight: 1.0               # Backup
+    weight: 1.4
     shortcut: bi
-  - name: brave
-    weight: 1.2               # Good for recent content
-    shortcut: br
+    disabled: false           # Bing is disabled: true in SearXNG defaults — required
+    categories: [general, web]
+  - name: mwmbl
+    weight: 1.3
+    shortcut: mw
+    disabled: false           # mwmbl is disabled: true in SearXNG defaults — required
+    categories: [general, web]
   - name: wikipedia
-    weight: 1.3               # Great for factual lookups
+    weight: 1.2
     shortcut: wp
+    disabled: false
+    categories: [general]
