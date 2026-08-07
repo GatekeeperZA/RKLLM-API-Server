@@ -21,6 +21,10 @@ Runs against: RKLLM_API env var (default http://localhost:8000)
 import json, sys, time, os
 import urllib.request, urllib.error
 
+# Ensure stdout handles all Unicode (emoji etc.) on Windows CP1252 consoles
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================

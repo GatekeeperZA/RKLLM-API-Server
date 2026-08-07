@@ -14,6 +14,9 @@ Output is designed to be copy-pasted for analysis.
 import base64, json, os, struct, sys, time, threading
 import urllib.request, urllib.error
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================

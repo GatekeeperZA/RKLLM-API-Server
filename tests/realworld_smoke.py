@@ -27,6 +27,9 @@ Usage:
 """
 import json, os, re, sys, time, threading, urllib.request, urllib.error
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 API = os.environ.get("RKLLM_API", "http://192.168.2.180:8000")
 PASS = 0
 FAIL = 0

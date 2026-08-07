@@ -516,6 +516,7 @@ After=local-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=/bin/sleep 5
 ExecStart=/usr/local/bin/rk3588-npu-fix-freq.sh
 
 [Install]
@@ -525,6 +526,13 @@ EOF
     sudo systemctl enable fix-freq.service
     sudo systemctl start fix-freq.service 2>/dev/null || true
     success "Frequency fix service created and enabled"
+fi
+
+# Disable Armbian's cpu-governor.service which unconditionally sets schedutil
+# and would override our fix-freq.service at multi-user.target activation.
+if systemctl is-enabled cpu-governor.service &>/dev/null; then
+    sudo systemctl disable cpu-governor.service
+    info "Disabled cpu-governor.service (overridden by fix-freq.service)"
 fi
 
 # --- Main API service ---

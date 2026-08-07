@@ -7,6 +7,9 @@ Usage: python vl_test.py [complete|stream|all]
 """
 import base64, json, os, struct, sys, time, urllib.request, urllib.error, threading
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 API = os.environ.get("RKLLM_API", "http://localhost:8000")
 PASS = 0
 FAIL = 0

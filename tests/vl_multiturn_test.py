@@ -18,6 +18,9 @@ import time
 import subprocess
 import sys
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 API = os.getenv("RKLLM_API", "http://localhost:8000")
 
 # Generate a small valid test image

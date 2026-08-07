@@ -26,6 +26,9 @@ Usage:
 import argparse, json, os, re, sys, time, threading, base64, struct, zlib
 import requests
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
@@ -678,7 +681,7 @@ def test_usage_accuracy():
 
     check(sec, "total_tokens = prompt + completion",
           tt == pt + ct,
-          f"{tt} != {pt} + {ct}")
+          f"{tt} == {pt} + {ct}")
 
     # Prompt tokens should be reasonable (not 0, not millions)
     check(sec, "Prompt tokens in reasonable range (3-200)",
@@ -717,7 +720,7 @@ def test_usage_accuracy():
 
         check(sec, "Streaming total = prompt + completion",
               stt == spt + sct,
-              f"{stt} != {spt} + {sct}")
+              f"{stt} == {spt} + {sct}")
 
     # --- Without include_usage: no usage chunk should appear ---
     r3 = _stream_raw("/v1/chat/completions", {
