@@ -911,7 +911,7 @@ docker run -d \
   -e RAG_SYSTEM_CONTEXT=True \
   -e RAG_TOP_K=5 \
   -e RAG_TOP_K_RERANKER=3 \
-  -e RAG_RELEVANCE_THRESHOLD=0.0 \
+  -e RAG_RELEVANCE_THRESHOLD=0.3 \
   -e ENABLE_RAG_HYBRID_SEARCH=True \
   -e ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=True \
   -e RAG_HYBRID_BM25_WEIGHT=0.1 \
@@ -979,7 +979,7 @@ Answer the user'"'"'s question using ONLY the provided context. Be thorough and 
 | `RAG_HYBRID_BM25_WEIGHT` | `0.1` | 10% keyword / 90% semantic — heavily semantic-leaning since bge-small-en-v1.5 delivers strong retrieval. Higher values dilute precision |
 | `ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS` | `True` | Enriches BM25 index with document filenames, titles, and section headers — improves keyword recall for metadata-based queries |
 | `ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER` | `True` | Splits documents by Markdown headers (H1-H6) first, preserving document structure. The character splitter only runs as a secondary pass on oversized sections |
-| `RAG_RELEVANCE_THRESHOLD` | `0.0` | **Critical.** Must be `0.0` — higher values filter out valid results because cross-encoder sigmoid scores are often below 0.1 for cross-lingual or loosely-related content. The reranker handles quality filtering instead |
+| `RAG_RELEVANCE_THRESHOLD` | `0.3` | Filters chunks below 0.3 semantic similarity before LLM injection. The reranker further narrows quality from the passing chunks |
 | `CHUNK_SIZE` | `1000` | Maximum characters per chunk. Balanced for 4K context models — large enough for coherent passages, small enough to fit multiple chunks |
 | `CHUNK_OVERLAP` | `0` | Zero overlap — Chroma Research showed overlap actively hurts retrieval IoU by returning redundant tokens. With Hybrid Search, overlap is unnecessary |
 | `CHUNK_MIN_SIZE_TARGET` | `400` | Merges tiny fragments (<400 chars) with neighbors, preventing low-quality micro-chunks. Works with Markdown Header Splitter to reduce chunk count by up to 90% |
@@ -1246,7 +1246,7 @@ These settings control how Open WebUI chunks, embeds, and retrieves uploaded doc
 | **Hybrid Search** | **ON** | `ENABLE_RAG_HYBRID_SEARCH=True` | Combines semantic (vector) + keyword (BM25) search |
 | **Enrich Hybrid Search Text** | **ON** | `ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=True` | Enriches BM25 index with filenames, titles, and section headers |
 | **BM25 Weight** | `0.1` | `RAG_HYBRID_BM25_WEIGHT=0.1` | 10% keyword / 90% semantic — heavily semantic-leaning since bge-small-en-v1.5 delivers strong retrieval |
-| **Relevance Threshold** | `0` | `RAG_RELEVANCE_THRESHOLD=0.0` | **Must be 0.** Cross-encoder sigmoid scores are often below 0.1 for valid content — any threshold filters out real results. Let the reranker handle quality |
+| **Relevance Threshold** | `0.3` | `RAG_RELEVANCE_THRESHOLD=0.3` | Filters chunks below 0.3 semantic similarity. The reranker handles final quality selection from the passing chunks |
 
 > **RAG Template:** Use the **default template** (clear the field) — it includes inline citation support with `[id]` format and comprehensive guidelines. The API server's RAG pipeline works with the default template.
 
@@ -1856,6 +1856,30 @@ All suites default to `http://localhost:8000`. To target a remote server, set th
 RKLLM_API=http://192.168.x.x:8000 python tests/diagnostic_test.py
 ```
 
+### OpenWebUI Integration Test (`tests/test_openwebui.py`)
+
+End-to-end integration test that verifies the full stack through the OpenWebUI API layer — **24 checks across 9 sections**. Connects to OpenWebUI at `http://192.168.2.180:3000` using an API key and exercises every local model through the `/openai/chat/completions` proxy.
+
+```bash
+python tests/test_openwebui.py                          # Run against default host
+python tests/test_openwebui.py --host 192.168.2.180 --port 3000
+```
+
+| Section | Coverage |
+|---|---|
+| Health | `/health` endpoint responds |
+| Models | All 5 local models listed via `/api/models` |
+| Basic chat | PONG response from all 5 models |
+| Streaming | Multi-chunk SSE streaming |
+| VL model | Image + text response (inline base64 PNG) |
+| RAG | Document upload (`/api/v1/files/`), context retrieval, grounded answer |
+| Tool calling | `finish_reason=tool_calls`, correct function name and arguments |
+| System prompt | Prompt respected in response |
+| Multi-turn | Name remembered across turns |
+| Error handling | 4xx on bad model and empty messages |
+
+> **Requires:** OpenWebUI running with API key auth enabled. The test uses the admin API key stored in `webui.db`.
+
 ### Benchmark Tool (`tests/benchmark_test.py`)
 
 Automated NPU benchmark tool that measures cold load time, warm TTFT, generation speed (tok/s), and NPU memory usage. Fetches real perf stats from the server log via SSH.
@@ -1891,6 +1915,7 @@ RKLLM-API-Server/
 │   ├── deep_diagnostic.py          # Deep diagnostic (12 sections, 72 checks, edge cases)
 │   ├── vl_test.py                  # Integration test suite (17 categories, 68 tests)
 │   ├── realworld_smoke.py           # Real-world smoke test (15 scenarios, 47 checks)
+│   ├── test_openwebui.py           # OpenWebUI end-to-end integration test (24 checks)
 │   ├── benchmark_test.py           # NPU model benchmark tool (tok/s, TTFT, memory)
 │   ├── benchmark_results.json      # Latest benchmark results
 │   ├── set_model_prompts.py        # Set system prompts on all OWUI models (DB script)
