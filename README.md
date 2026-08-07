@@ -1927,10 +1927,7 @@ RKLLM-API-Server/
 │   ├── benchmark_results.json      # Latest benchmark results
 │   ├── set_model_prompts.py        # Set system prompts + capabilities on all RKLLM models (DB script)
 │   ├── fix_owui_config.py          # Sanitize config table — fix invalid JSON values (DB script)
-│   ├── remove_stale_models.py      # Mark old/removed models as inactive in OWUI DB
-│   ├── dump_owui_models_quick.py   # Quick dump of all OWUI model records
-│   ├── dump_owui_settings.py       # Dump all OWUI admin settings from DB
-│   ├── owui_set_compression.py     # Set OWUI image compression (DB + runtime API)
+│   ├── test_capabilities.py        # Quick capability detection and thinking-control verification
 │   ├── vl_multi_image_test.py      # Multi-image VL model integration test
 │   └── vl_multiturn_test.py        # VL multi-turn context + RAG integration test
 ├── archive/
