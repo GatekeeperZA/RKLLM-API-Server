@@ -535,6 +535,38 @@ if systemctl is-enabled cpu-governor.service &>/dev/null; then
     info "Disabled cpu-governor.service (overridden by fix-freq.service)"
 fi
 
+# --- Log rotation for RKLLM API ---
+LOGROTATE_FILE="/etc/logrotate.d/rkllm-api"
+if [[ ! -f "$LOGROTATE_FILE" ]]; then
+    info "Installing logrotate config for RKLLM API..."
+    sudo tee "$LOGROTATE_FILE" > /dev/null << 'EOF'
+/home/armbian/rkllm_api/rkllm_api.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+    success "Logrotate config installed: $LOGROTATE_FILE"
+fi
+
+# --- Systemd journal size limit ---
+JOURNAL_CONF="/etc/systemd/journald.conf.d/size-limit.conf"
+if [[ ! -f "$JOURNAL_CONF" ]]; then
+    info "Setting systemd journal size limit (200M)..."
+    sudo mkdir -p /etc/systemd/journald.conf.d/
+    sudo tee "$JOURNAL_CONF" > /dev/null << 'EOF'
+[Journal]
+SystemMaxUse=200M
+RuntimeMaxUse=50M
+EOF
+    sudo systemctl restart systemd-journald
+    success "Journal size limit configured"
+fi
+
 # --- Main API service ---
 # Detect the rkllm binary location for the service PATH
 RKLLM_BIN_DIR=$(dirname "$(which rkllm 2>/dev/null || echo /usr/local/bin/rkllm)")
