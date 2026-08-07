@@ -272,29 +272,8 @@ fi
 
 separator "Step 3/7 — Installing RKLLM Runtime (≥ v1.2.0)"
 
-# --- Detect existing rkllm binary (may be at /usr/bin or /usr/local/bin) ---
-RKLLM_BIN=""
-if command -v rkllm &>/dev/null; then
-    RKLLM_BIN=$(which rkllm)
-    success "rkllm binary already installed: $RKLLM_BIN"
-    SKIP_BINARY=true
-else
-    # Search common locations
-    for candidate in /usr/local/bin/rkllm /usr/bin/rkllm; do
-        if [[ -x "$candidate" ]]; then
-            RKLLM_BIN="$candidate"
-            success "rkllm binary found at: $RKLLM_BIN (not in PATH — will fix)"
-            # Add to PATH via profile if needed
-            break
-        fi
-    done
-    if [[ -z "$RKLLM_BIN" ]]; then
-        SKIP_BINARY=false
-        info "rkllm binary not found — will compile from source"
-    else
-        SKIP_BINARY=true
-    fi
-fi
+# NOTE: api.py uses librkllmrt.so via ctypes — the rkllm demo binary is NOT
+# needed by the API server. We only check for and install the shared library.
 
 # --- Detect existing runtime library (may be at /lib/ or /usr/lib/) ---
 LIB_INSTALLED=false
@@ -313,7 +292,7 @@ elif [[ -f /usr/lib/librkllmrt.so || -f /lib/librkllmrt.so ]]; then
 fi
 
 # --- Install missing components ---
-if [[ "$SKIP_BINARY" == false || "$LIB_INSTALLED" == false ]]; then
+if [[ "$LIB_INSTALLED" == false ]]; then
 
     # We need the rknn-llm repo for source files
     # Check common locations: $HOME/rknn-llm, $HOME/Downloads/ezrknpu/ezrknn-llm
@@ -355,62 +334,28 @@ if [[ "$SKIP_BINARY" == false || "$LIB_INSTALLED" == false ]]; then
     fi
 
     # Install librknnrt.so (required for VL vision encoder)
+    # Source: rknn_model_zoo repo (not rknn-llm — different SDK)
     if ! ldconfig -p 2>/dev/null | grep -q librknnrt; then
-        RKNN_LIB_SRC="$RKNN_LLM_DIR/rkllm-runtime/Linux/librkllm_api/aarch64/librknnrt.so"
-        if [[ ! -f "$RKNN_LIB_SRC" ]]; then
-            # Fallback: try rknn_model_zoo path
-            RKNN_LIB_SRC=$(find "$HOME" -name "librknnrt.so" -path "*/aarch64/*" 2>/dev/null | head -1)
-        fi
-        if [[ -f "$RKNN_LIB_SRC" ]]; then
+        RKNN_LIB_SRC=""
+        # Search locally first
+        RKNN_LIB_SRC=$(find "$HOME" -name "librknnrt.so" -path "*/aarch64/*" 2>/dev/null | head -1)
+        if [[ -n "$RKNN_LIB_SRC" ]]; then
             info "Installing librknnrt.so (VL vision encoder) to /usr/lib/..."
             sudo cp "$RKNN_LIB_SRC" /usr/lib/
             sudo ldconfig
-            success "librknnrt.so installed"
+            success "librknnrt.so installed from $RKNN_LIB_SRC"
         else
-            warn "librknnrt.so not found — VL (vision-language) models will not work"
-            warn "Download from: https://github.com/airockchip/rknn_model_zoo/raw/main/3rdparty/rknpu2/Linux/aarch64/librknnrt.so"
-        fi
-    fi
-
-    # Compile llm_demo binary if missing
-    if [[ "$SKIP_BINARY" == false ]]; then
-        # Search for llm_demo.cpp in the rknn-llm repo
-        DEMO_SRC=$(find "$RKNN_LLM_DIR" -name "llm_demo.cpp" -type f 2>/dev/null | head -1)
-
-        if [[ -n "$DEMO_SRC" ]]; then
-            DEMO_DIR=$(dirname "$DEMO_SRC")
-            DEPLOY_DIR=$(dirname "$DEMO_DIR")  # Go up from src/ to deploy/
-            info "Compiling rkllm (llm_demo) binary natively..."
-            info "Source: $DEMO_SRC"
-
-            cd "$DEPLOY_DIR"
-            g++ -O2 -o rkllm "$DEMO_SRC" \
-                -I"$RKNN_LLM_DIR/rkllm-runtime/Linux/librkllm_api/include" \
-                -L"$RKNN_LLM_DIR/rkllm-runtime/Linux/librkllm_api/aarch64" \
-                -lrkllmrt -lpthread
-
-            sudo cp rkllm /usr/local/bin/
-            RKLLM_BIN="/usr/local/bin/rkllm"
-            cd "$INSTALL_DIR"
-
-            success "rkllm binary compiled and installed to /usr/local/bin/rkllm"
-        else
-            error "llm_demo.cpp not found anywhere in $RKNN_LLM_DIR"
-            echo ""
-            echo "  This can happen if the rknn-llm repo structure changed or"
-            echo "  the examples were removed.  You have two options:"
-            echo ""
-            echo "  Option 1: Re-clone the full repo (not shallow):"
-            echo "    rm -rf $RKNN_LLM_DIR"
-            echo "    git clone https://github.com/airockchip/rknn-llm.git $RKNN_LLM_DIR"
-            echo "    Then re-run this script."
-            echo ""
-            echo "  Option 2: If you already have a compiled rkllm binary,"
-            echo "    copy it to /usr/local/bin/:"
-            echo "    sudo cp /path/to/rkllm /usr/local/bin/"
-            echo "    Then re-run this script."
-            echo ""
-            exit 1
+            info "librknnrt.so not found locally — downloading from rknn_model_zoo..."
+            if wget -q -O /tmp/librknnrt.so \
+                "https://raw.githubusercontent.com/airockchip/rknn_model_zoo/main/3rdparty/rknpu2/Linux/aarch64/librknnrt.so" 2>/dev/null; then
+                sudo cp /tmp/librknnrt.so /usr/lib/
+                sudo ldconfig
+                rm -f /tmp/librknnrt.so
+                success "librknnrt.so downloaded and installed"
+            else
+                warn "librknnrt.so download failed — VL (vision-language) models will not work"
+                warn "Install manually: sudo wget -O /usr/lib/librknnrt.so https://raw.githubusercontent.com/airockchip/rknn_model_zoo/main/3rdparty/rknpu2/Linux/aarch64/librknnrt.so && sudo ldconfig"
+            fi
         fi
     fi
 else
@@ -419,21 +364,19 @@ fi
 
 # Verify
 info "Verifying RKLLM runtime..."
-RKLLM_BIN_FINAL=$(which rkllm 2>/dev/null || echo "")
 RKLLM_LIB_FINAL=$(ldconfig -p 2>/dev/null | grep librkllmrt | awk '{print $NF}' | head -1)
+RKNN_LIB_FINAL=$(ldconfig -p 2>/dev/null | grep librknnrt | awk '{print $NF}' | head -1)
 
-if [[ -n "$RKLLM_LIB_FINAL" && -n "$RKLLM_BIN_FINAL" ]]; then
+if [[ -n "$RKLLM_LIB_FINAL" ]]; then
     success "Runtime verification passed"
-    success "  Binary : $RKLLM_BIN_FINAL"
-    success "  Library: $RKLLM_LIB_FINAL"
+    success "  librkllmrt.so : $RKLLM_LIB_FINAL"
+    if [[ -n "$RKNN_LIB_FINAL" ]]; then
+        success "  librknnrt.so  : $RKNN_LIB_FINAL (VL models supported)"
+    else
+        warn "  librknnrt.so  : not found (VL models will not work)"
+    fi
 else
-    if [[ -z "$RKLLM_LIB_FINAL" ]]; then
-        error "librkllmrt.so not found in ldconfig"
-    fi
-    if [[ -z "$RKLLM_BIN_FINAL" ]]; then
-        error "rkllm binary not found in PATH"
-    fi
-    error "Runtime verification failed. Check the output above."
+    error "librkllmrt.so not found in ldconfig — cannot continue."
     exit 1
 fi
 
@@ -494,8 +437,8 @@ else
     echo "    https://huggingface.co/GatekeeperZA"
     echo ""
     echo "  Quick download (Qwen3-1.7B — recommended):"
-    echo "    mkdir -p ~/models/Qwen3-1.7B-4K"
-    echo "    cd ~/models/Qwen3-1.7B-4K"
+    echo "    mkdir -p ~/models/Qwen3-1.7B"
+    echo "    cd ~/models/Qwen3-1.7B"
     echo "    git lfs install"
     echo "    git clone https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3 ."
     echo ""
@@ -747,16 +690,16 @@ echo "  │  Venv         : $VENV_DIR"
 echo "  │  Models       : $MODELS_DIR ($MODEL_COUNT model(s))"
 echo "  │  Service      : $SERVICE_NAME (systemd)"
 echo "  │  Endpoint     : http://0.0.0.0:$BIND_PORT/v1"
-echo "  │  rkllm binary : ${RKLLM_BIN_FINAL:-$(which rkllm 2>/dev/null || echo 'not found')}"
-echo "  │  Runtime lib  : ${RKLLM_LIB_FINAL:-$(ldconfig -p 2>/dev/null | grep librkllmrt | awk '{print $NF}' | head -1)}"
+echo "  │  librkllmrt   : ${RKLLM_LIB_FINAL:-not found}"
+echo "  │  librknnrt    : ${RKNN_LIB_FINAL:-not installed (VL models unavailable)}"
 echo "  │                                                         │"
 echo "  ├─────────────────────────────────────────────────────────┤"
 echo "  │  NEXT STEPS:                                            │"
 echo "  │                                                         │"
 if [[ "$MODEL_COUNT" -eq 0 ]]; then
 echo "  │  1. Download a model:                                   │"
-echo "  │     mkdir -p ~/models/Qwen3-1.7B-4K                    │"
-echo "  │     cd ~/models/Qwen3-1.7B-4K                          │"
+echo "  │     mkdir -p ~/models/Qwen3-1.7B                       │"
+echo "  │     cd ~/models/Qwen3-1.7B                             │"
 echo "  │     git clone https://huggingface.co/GatekeeperZA/\\    │"
 echo "  │       Qwen3-1.7B-RKLLM-v1.2.3 .                       │"
 echo "  │                                                         │"
