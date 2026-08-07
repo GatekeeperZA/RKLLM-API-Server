@@ -50,6 +50,10 @@ def main():
 
         # Set system prompt
         params["system"] = SYSTEM_PROMPT
+        # Force RAG-style web search (OpenWebUI v0.11+ skips web search unless
+        # function_calling == 'legacy'; without this, small models that can't do
+        # native function calling never trigger SearXNG via the globe toggle).
+        params["function_calling"] = "legacy"
 
         # Set capabilities
         caps = meta.get("capabilities", {})

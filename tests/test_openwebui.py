@@ -330,6 +330,25 @@ def test_multi_turn(c: OWClient):
         result("Multi-turn conversation", False, str(e)[:80])
 
 
+def test_web_search(c: OWClient):
+    section("WEB SEARCH (globe toggle ON)")
+    try:
+        r = c.sess.post(c.base + "/api/chat/completions", json={
+            "model": "qwen3-1.7b",
+            "messages": [{"role": "user", "content": "What is the capital city of South Africa?"}],
+            "features": {"web_search": True},
+        }, timeout=120)
+        ok = r.status_code == 200
+        text = ""
+        if ok:
+            text = r.json()["choices"][0]["message"]["content"] or ""
+            ok = "pretoria" in text.lower()
+        result("Web search returns correct capital (Pretoria)", ok,
+               text.strip()[:120] if not ok else text.strip()[:80])
+    except Exception as e:
+        result("Web search capital city", False, str(e)[:80])
+
+
 def test_error_handling(c: OWClient):
     section("ERROR HANDLING")
     r = c.post("/openai/chat/completions", json={
@@ -376,6 +395,7 @@ def main():
     test_tool_calling(c)
     test_system_prompt(c)
     test_multi_turn(c)
+    test_web_search(c)
     test_error_handling(c)
 
     print("\n" + "=" * 60)

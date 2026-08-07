@@ -1453,6 +1453,23 @@ print('Total:', len(d.get('results', [])), '| Engines:', dict(Counter(r.get('eng
 "
 ```
 
+**Open WebUI Globe Toggle (web_search feature):**
+
+> **Important — OpenWebUI v0.11+ requires `function_calling: legacy` on models for the web search globe toggle to work.** By default, OpenWebUI v0.11+ skips the forced RAG web search path and expects the model to call a `search_web` built-in tool via native function calling instead. Small NPU models cannot reliably do this. Setting `function_calling: legacy` forces OpenWebUI to use the RAG-style web search injection (query SearXNG → inject results as context) regardless of model capability.
+>
+> This is set automatically by `tests/set_model_prompts.py`. If you add new models, re-run the script.
+>
+> To set it manually via the API:
+> ```python
+> import requests, json
+> BASE = "http://192.168.2.180:3000"
+> HEADERS = {"Authorization": "Bearer <your-api-key>", "Content-Type": "application/json"}
+> model_id = "qwen3-1.7b"
+> model = requests.get(f"{BASE}/api/v1/models/model?id={model_id}", headers=HEADERS).json()
+> model.setdefault("params", {})["function_calling"] = "legacy"
+> requests.post(f"{BASE}/api/v1/models/model/update", headers=HEADERS, json=model)
+> ```
+
 ---
 
 ## Backup & Update
