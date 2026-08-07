@@ -1,5 +1,7 @@
 # RKLLM API Server
 
+[![Build and Push Docker Image](https://github.com/GatekeeperZA/RKLLM-API-Server/actions/workflows/docker.yml/badge.svg)](https://github.com/GatekeeperZA/RKLLM-API-Server/actions/workflows/docker.yml)
+
 **OpenAI-compatible API server for Rockchip NPU (RK3588/RK3576) running RKLLM models, designed as a drop-in backend for [Open WebUI](https://github.com/open-webui/open-webui).**
 
 Built for single-board computers like the **Orange Pi 5 Plus**, this server bridges the gap between the `librkllmrt.so` C runtime and any OpenAI-compatible frontend — enabling local, private LLM inference on ARM hardware with zero cloud dependency.
@@ -291,11 +293,15 @@ docker compose up -d
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `RKLLM_MODELS_ROOT` | `/root/models` | Path to models directory inside the container |
+| `RKLLM_API_LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARNING`) |
+| `RKLLM_API_LOG_FILE` | *(stderr only in container)* | Set to a path to also write a log file |
+| `RKLLM_LIB_PATH` | auto-detected | Override path to `librkllmrt.so` |
+| `RKNN_LIB_PATH` | auto-detected | Override path to `librknnrt.so` (VL models) |
 | `GUNICORN_WORKERS` | `1` | Always keep at 1 — NPU is single-instance |
 | `GUNICORN_THREADS` | `4` | Request handler threads |
 | `GUNICORN_TIMEOUT` | `300` | Request timeout in seconds |
 | `GUNICORN_BIND` | `0.0.0.0:8000` | Bind address |
-| `RKLLM_API_LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARNING`) |
 
 **Check health:**
 ```bash
@@ -1493,7 +1499,8 @@ When `PROMPT_CACHE_ENABLED = True` (default), the server saves the KV state to d
 
 - Cache file: `<model_dir>/prompt_cache.bin` (e.g., `~/models/Qwen3-1.7B/prompt_cache.bin`)
 - **Save**: Triggered on the first KV reset (new conversation) after model load, if no cache file exists yet
-- **Load**: Called automatically during `load_model()` if a cache file is found
+- **Load**: Called automatically during `load_model()` if a valid cache file is found
+- **Staleness guard**: A `.meta` sidecar file records the model file's mtime + size at save time. On load, the guard re-checks — if the model file changed (update/replace), the stale cache is automatically deleted and regenerated on the next request
 - Uses the RKLLM SDK's `rkllm_load_prompt_cache()` / `rkllm_release_prompt_cache()` API
 - Graceful fallback: if the SDK version doesn't support the cache API, the feature is silently disabled
 
@@ -1510,7 +1517,16 @@ When conversation history exceeds the model's context window, the server automat
 
 ## Configuration Reference
 
-All configuration is at the top of `api.py`:
+All configuration is at the top of `api.py`. Key values are overridable via environment variable for Docker deployments:
+
+### Paths & Logging (env var overridable)
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `MODELS_ROOT` | `RKLLM_MODELS_ROOT` | `~/models` | Directory scanned for `.rkllm` model folders |
+| `LOG_FILE` | `RKLLM_API_LOG_FILE` | `api.log` (next to api.py) | Log file path; falls back to stderr-only if not writable |
+| `RKLLM_LIB_PATH` | `RKLLM_LIB_PATH` | auto-detected | Path to `librkllmrt.so` |
+| `RKNN_LIB_PATH` | `RKNN_LIB_PATH` | auto-detected | Path to `librknnrt.so` (VL models) |
 
 ### Timeouts
 

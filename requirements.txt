@@ -1,0 +1,7 @@
+flask
+flask-cors
+gunicorn
+numpy
+Pillow
+prometheus-flask-exporter
+prometheus-client

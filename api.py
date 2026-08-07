@@ -128,8 +128,8 @@ except ImportError:
 # CONFIGURATION
 # =============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_FILE = os.path.join(SCRIPT_DIR, 'api.log')
-MODELS_ROOT = os.path.expanduser("~/models")
+LOG_FILE = os.environ.get('RKLLM_API_LOG_FILE', os.path.join(SCRIPT_DIR, 'api.log'))
+MODELS_ROOT = os.path.expanduser(os.environ.get('RKLLM_MODELS_ROOT', "~/models"))
 SYSTEM_FINGERPRINT = "rkllm-v2.0.0-ctypes"
 
 # Path to rkllm shared library — auto-detected or set via environment
@@ -408,13 +408,16 @@ def _detect_repetition_loop(text, window=REPETITION_WINDOW, max_hits=REPETITION_
 _log_env = os.environ.get('RKLLM_API_LOG_LEVEL', 'DEBUG')
 LOG_LEVEL = getattr(logging, _log_env.upper(), logging.DEBUG)
 
+_log_handlers = [logging.StreamHandler()]
+try:
+    _log_handlers.append(RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=3))
+except (OSError, PermissionError) as _log_err:
+    print(f"[RKLLM] WARNING: Cannot write log file {LOG_FILE!r}: {_log_err} — logging to stderr only")
+
 logging.basicConfig(
     level=LOG_LEVEL,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=3)
-    ]
+    handlers=_log_handlers
 )
 logger = logging.getLogger(__name__)
 
@@ -2282,7 +2285,10 @@ def build_prompt(messages, model_name):
         if _skip_reason:
             logger.info(f"RAG SKIP: {_skip_reason} — using normal mode with chat history")
             rag_parts = None
-            system_text = ""
+            # Preserve any non-RAG system instructions (persona, format rules).
+            # Only strip the RAG reference block itself, not the whole system prompt.
+            system_text = re.sub(r'<source[^>]*>.*?</source>', '', system_text,
+                                 flags=re.DOTALL | re.IGNORECASE).strip()
 
     if rag_parts and user_question:
         # === RAG MODE ===
@@ -3101,6 +3107,22 @@ def list_models():
     return jsonify({"object": "list", "data": data})
 
 
+@app.route('/v1/models/<path:model_id>', methods=['GET'])
+def get_model(model_id):
+    """OpenAI-compatible single model retrieval."""
+    name, cfg = resolve_model(model_id)
+    if cfg is None:
+        return make_error_response(f"Model '{model_id}' not found", 404, "not_found")
+    return jsonify({
+        "id": name,
+        "object": "model",
+        "created": SERVER_START_TIME,
+        "owned_by": "rkllm",
+        "capabilities": cfg.get("capabilities", []),
+        "context_length": cfg.get("context_length", CONTEXT_LENGTH_DEFAULT),
+    })
+
+
 @app.route('/v1/models/select', methods=['POST'])
 def select_model():
     """Pre-load a model without generating (useful for warm-up)."""
@@ -3234,12 +3256,24 @@ def chat_completions():
         logger.debug(f"[{request_id}] max_tokens={req_max_tokens} requested "
                      f"(rkllm uses model-config value; per-request override not supported)")
 
-    # Log ignored sampling parameters
+    # Stop sequences — checked in the token loop via sliding buffer.
+    _stop_raw = body.get('stop')
+    if isinstance(_stop_raw, str):
+        req_stop = [_stop_raw] if _stop_raw else []
+    elif isinstance(_stop_raw, list):
+        req_stop = [s for s in _stop_raw if isinstance(s, str) and s]
+    else:
+        req_stop = []
+    _stop_buf_len = max((len(s) for s in req_stop), default=0)
+
+    # Log ignored sampling parameters; surface as response header so callers know.
     ignored_params = {k: body[k] for k, default in _SAMPLING_DEFAULTS.items()
                       if body.get(k) is not None and body[k] != default}
+    _sampling_warning = None
     if ignored_params:
         summary = ', '.join(f'{k}={v}' for k, v in ignored_params.items())
         logger.debug(f"[{request_id}] Ignored sampling params: {summary} (rkllm uses model-compiled sampling)")
+        _sampling_warning = f"Sampling params ignored (rkllm uses model-compiled values): {summary}"
 
     logger.info(f"Request {request_id} model: '{requested_model}' stream: {stream}")
 
@@ -3597,6 +3631,10 @@ def chat_completions():
                 'image_height': _vision_encoder.model_height,
             }
 
+            _extra_hdrs = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+                           'Connection': 'keep-alive'}
+            if _sampling_warning:
+                _extra_hdrs['X-RKLLM-Warning'] = _sampling_warning
             if stream:
                 return Response(
                     stream_with_context(_generate_stream(
@@ -3604,19 +3642,21 @@ def chat_completions():
                         keep_history=0, enable_thinking=False,
                         include_usage=include_usage, messages=messages,
                         is_rag=False, rag_cache_info=None,
-                        kv_is_reset=True, vl_data=vl_data,
+                        kv_is_reset=True, vl_data=vl_data, req_stop=req_stop,
                     )),
                     mimetype='text/event-stream',
-                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
-                             'Connection': 'keep-alive'},
+                    headers=_extra_hdrs,
                 )
             else:
-                return _generate_complete(
+                _r = _generate_complete(
                     vl_prompt, request_id, vl_name, created,
                     keep_history=0, enable_thinking=False,
                     is_rag=False, messages=messages,
-                    rag_cache_info=None, kv_is_reset=True, vl_data=vl_data,
+                    rag_cache_info=None, kv_is_reset=True, vl_data=vl_data, req_stop=req_stop,
                 )
+                if _sampling_warning:
+                    _r.headers['X-RKLLM-Warning'] = _sampling_warning
+                return _r
 
         # =================================================================
         # TEXT PATH -- normal text-only request (existing logic unchanged)
@@ -3755,6 +3795,13 @@ def chat_completions():
         # Prepare cache info for RAG queries
         rag_cache_info = (name, user_question, prompt) if is_rag and RAG_CACHE_TTL > 0 else None
 
+        _stream_hdrs = {
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive',
+        }
+        if _sampling_warning:
+            _stream_hdrs['X-RKLLM-Warning'] = _sampling_warning
         if stream:
             return Response(
                 stream_with_context(_generate_stream(
@@ -3766,16 +3813,13 @@ def chat_completions():
                     is_rag=is_rag,
                     rag_cache_info=rag_cache_info,
                     kv_is_reset=kv_is_reset,
+                    req_stop=req_stop,
                 )),
                 mimetype='text/event-stream',
-                headers={
-                    'Cache-Control': 'no-cache',
-                    'X-Accel-Buffering': 'no',
-                    'Connection': 'keep-alive',
-                },
+                headers=_stream_hdrs,
             )
         else:
-            return _generate_complete(
+            _r = _generate_complete(
                 prompt, request_id, name, created,
                 keep_history=keep_history,
                 enable_thinking=enable_thinking,
@@ -3783,7 +3827,11 @@ def chat_completions():
                 messages=messages,
                 rag_cache_info=rag_cache_info,
                 kv_is_reset=kv_is_reset,
+                req_stop=req_stop,
             )
+            if _sampling_warning:
+                _r.headers['X-RKLLM-Warning'] = _sampling_warning
+            return _r
 
     except Exception as e:
         logger.error(f"[{request_id}] Unexpected error: {e}", exc_info=True)
@@ -3800,12 +3848,14 @@ def _generate_stream(prompt, request_id, model_name, created,
                      keep_history=1, enable_thinking=True,
                      include_usage=False, messages=None,
                      is_rag=False, rag_cache_info=None,
-                     kv_is_reset=False, vl_data=None):
+                     kv_is_reset=False, vl_data=None, req_stop=None):
     """Generator that yields SSE chunks from rkllm token callback queue."""
     global _worker_thread
 
     _is_vl = vl_data is not None
     _active_wrapper = _vl_rkllm_wrapper if _is_vl else _rkllm_wrapper
+    _req_stop = req_stop or []
+    _stop_buf_len = max((len(s) for s in _req_stop), default=0)
 
     logger.info(f"[{request_id}] Starting STREAMING generation "
                 f"(rag={is_rag}, keep_history={keep_history}, thinking={enable_thinking}"
@@ -3856,6 +3906,7 @@ def _generate_stream(prompt, request_id, model_name, created,
             _token_queue.put(("error", str(e)))
 
     with PROCESS_LOCK:
+        GENERATION_COMPLETE.clear()
         _worker_thread = Thread(target=_worker, daemon=True)
         _worker_thread.start()
 
@@ -3871,7 +3922,6 @@ def _generate_stream(prompt, request_id, model_name, created,
     think_parser = ThinkTagParser()
 
     try:
-        GENERATION_COMPLETE.clear()
         update_request_activity()  # Refresh after model load delay
 
         # First chunk: role
@@ -3945,6 +3995,16 @@ def _generate_stream(prompt, request_id, model_name, created,
                         total_content += chunk_text
                         yield make_sse_chunk(request_id, model_name, created,
                                              delta={"content": chunk_text})
+                        # Stop sequence check — scan sliding window of recent content
+                        if _req_stop:
+                            _window = total_content[-max(_stop_buf_len + 32, 64):]
+                            for _seq in _req_stop:
+                                if _seq in _window:
+                                    _cut = total_content.rfind(_seq)
+                                    total_content = total_content[:_cut]
+                                    logger.debug(f"[{request_id}] Stop sequence matched: {_seq!r}")
+                                    _active_wrapper.abort()
+                                    break
 
                 # Repetition loop detection — runs every token but the
                 # _detect_repetition_loop() call is O(n) worst-case: it only
@@ -4053,6 +4113,8 @@ def _generate_stream(prompt, request_id, model_name, created,
         try:
             if generation_clean and not is_rag and not _is_vl and messages:
                 _update_kv_tracking(model_name, messages, is_reset=kv_is_reset)
+            elif not generation_clean and not is_rag and not _is_vl:
+                _reset_kv_tracking()
         except Exception as _kv_exc:
             logger.error(f"[{request_id}] KV tracking update error: {_kv_exc}")
 
@@ -4093,12 +4155,14 @@ def _generate_stream(prompt, request_id, model_name, created,
 def _generate_complete(prompt, request_id, model_name, created,
                        keep_history=1, enable_thinking=True,
                        is_rag=False, messages=None, rag_cache_info=None,
-                       kv_is_reset=False, vl_data=None):
+                       kv_is_reset=False, vl_data=None, req_stop=None):
     """Collect all output and return a non-streaming JSON response."""
     global _worker_thread
 
     _is_vl = vl_data is not None
     _active_wrapper = _vl_rkllm_wrapper if _is_vl else _rkllm_wrapper
+    _req_stop = req_stop or []
+    _stop_buf_len = max((len(s) for s in _req_stop), default=0)
 
     logger.info(f"[{request_id}] Starting NON-STREAMING generation "
                 f"(rag={is_rag}, keep_history={keep_history}, thinking={enable_thinking}"
@@ -4145,6 +4209,7 @@ def _generate_complete(prompt, request_id, model_name, created,
             _token_queue.put(("error", str(e)))
 
     with PROCESS_LOCK:
+        GENERATION_COMPLETE.clear()
         _worker_thread = Thread(target=_worker, daemon=True)
         _worker_thread.start()
 
@@ -4160,7 +4225,6 @@ def _generate_complete(prompt, request_id, model_name, created,
 
     try:
         update_request_activity()  # Refresh after model load delay
-        GENERATION_COMPLETE.clear()
         while True:
             if ABORT_EVENT.is_set():
                 _active_wrapper.abort()
@@ -4201,6 +4265,18 @@ def _generate_complete(prompt, request_id, model_name, created,
                 update_request_activity()
                 content_parts.append(msg_data)
                 combined_output += msg_data
+
+                # Stop sequence check (non-streaming)
+                if _req_stop:
+                    _window = combined_output[-max(_stop_buf_len + 32, 64):]
+                    for _seq in _req_stop:
+                        if _seq in _window:
+                            _cut = combined_output.rfind(_seq)
+                            combined_output = combined_output[:_cut]
+                            content_parts = [combined_output]
+                            logger.debug(f"[{request_id}] Stop sequence matched: {_seq!r}")
+                            _active_wrapper.abort()
+                            break
 
                 # Repetition loop detection (non-streaming path)
                 # Strip completed <think> blocks — thinking models often
@@ -4299,6 +4375,8 @@ def _generate_complete(prompt, request_id, model_name, created,
         try:
             if generation_clean and not is_rag and not _is_vl and messages:
                 _update_kv_tracking(model_name, messages, is_reset=kv_is_reset)
+            elif not generation_clean and not is_rag and not _is_vl:
+                _reset_kv_tracking()
         except Exception as _kv_exc:
             logger.error(f"[{request_id}] KV tracking update error: {_kv_exc}")
 
@@ -4345,12 +4423,42 @@ def _generate_complete(prompt, request_id, model_name, created,
 # STARTUP
 # =============================================================================
 
+@app.route('/v1/completions', methods=['POST'])
+@app.route('/completions', methods=['POST'])
+def legacy_completions():
+    """Legacy /v1/completions shim — wraps prompt string into chat completions format."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return make_error_response("Request body must be a JSON object", 400, "invalid_request")
+    prompt = body.get('prompt', '')
+    if not prompt:
+        return make_error_response("'prompt' field required", 400, "invalid_request")
+    if isinstance(prompt, list):
+        content = "\n".join(str(p) for p in prompt)
+    else:
+        content = str(prompt)
+    body = {k: v for k, v in body.items() if k != 'prompt'}
+    body['messages'] = [{"role": "user", "content": content}]
+    from io import BytesIO
+    body_bytes = json.dumps(body).encode()
+    environ = request.environ.copy()
+    environ['PATH_INFO'] = '/v1/chat/completions'
+    environ['wsgi.input'] = BytesIO(body_bytes)
+    environ['CONTENT_LENGTH'] = str(len(body_bytes))
+    environ['CONTENT_TYPE'] = 'application/json'
+    with app.request_context(environ):
+        return chat_completions()
+
+
+# Register signal handlers at module level so gunicorn workers also clean up the NPU
+# on SIGTERM (gunicorn graceful shutdown). Guards prevent errors in non-main threads.
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    try:
+        signal.signal(_sig, signal_handler)
+    except (OSError, ValueError):
+        pass
+
 if __name__ == "__main__":
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            signal.signal(sig, signal_handler)
-        except (OSError, ValueError):
-            pass
 
     _vl_models = [n for n, c in MODELS.items() if 'vl_config' in c]
     _text_models = [n for n, c in MODELS.items() if 'vl_config' not in c]

@@ -1,0 +1,11 @@
+.git
+.github
+tests/
+*.md
+*.log
+*.bin
+*.meta
+__pycache__/
+*.pyc
+.env
+prompt_cache*

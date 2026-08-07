@@ -354,6 +354,24 @@ if [[ "$SKIP_BINARY" == false || "$LIB_INSTALLED" == false ]]; then
         fi
     fi
 
+    # Install librknnrt.so (required for VL vision encoder)
+    if ! ldconfig -p 2>/dev/null | grep -q librknnrt; then
+        RKNN_LIB_SRC="$RKNN_LLM_DIR/rkllm-runtime/Linux/librkllm_api/aarch64/librknnrt.so"
+        if [[ ! -f "$RKNN_LIB_SRC" ]]; then
+            # Fallback: try rknn_model_zoo path
+            RKNN_LIB_SRC=$(find "$HOME" -name "librknnrt.so" -path "*/aarch64/*" 2>/dev/null | head -1)
+        fi
+        if [[ -f "$RKNN_LIB_SRC" ]]; then
+            info "Installing librknnrt.so (VL vision encoder) to /usr/lib/..."
+            sudo cp "$RKNN_LIB_SRC" /usr/lib/
+            sudo ldconfig
+            success "librknnrt.so installed"
+        else
+            warn "librknnrt.so not found — VL (vision-language) models will not work"
+            warn "Download from: https://github.com/airockchip/rknn_model_zoo/raw/main/3rdparty/rknpu2/Linux/aarch64/librknnrt.so"
+        fi
+    fi
+
     # Compile llm_demo binary if missing
     if [[ "$SKIP_BINARY" == false ]]; then
         # Search for llm_demo.cpp in the rknn-llm repo
