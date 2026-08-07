@@ -1047,7 +1047,7 @@ The goal is **minimal user configuration** — a fresh install should work corre
 | Layer | How | Survives Container Recreate | Survives Volume Delete |
 |-------|-----|:---------------------------:|:----------------------:|
 | **Docker env vars** (`docker-compose.yml`) | `PersistentConfig` — env var sets the initial default, DB value takes precedence once changed in UI | Yes | Yes (re-applies) |
-| **Database scripts** (`tests/set_model_prompts.py`, `tests/fix_owui_models.py`) | Directly write to `webui.db` inside the container | Yes (data on Docker volume) | No (must re-run) |
+| **Database scripts** (`tests/set_model_prompts.py`, `tests/fix_owui_config.py`) | Directly write to `webui.db` inside the container | Yes (data on Docker volume) | No (must re-run) |
 | **Admin UI only** | No env var or script — must configure manually | Yes (data on Docker volume) | No (must redo) |
 
 **Settings hardcoded via Docker env vars** (auto-restore on fresh install):
@@ -1069,8 +1069,8 @@ The goal is **minimal user configuration** — a fresh install should work corre
 
 | Script | What it sets |
 |--------|-------------|
-| `tests/set_model_prompts.py` | System prompt on all models (date/time context) |
-| `tests/fix_owui_models.py` | Model capability flags (vision, image_gen, code_interpreter, etc.) |
+| `tests/set_model_prompts.py` | System prompt + full capability flags on all RKLLM models (web_search, memory, vision, etc.) |
+| `tests/fix_owui_config.py` | Sanitizes config table — detects and fixes empty/invalid JSON values that crash `Config.get()` |
 
 **Settings only configurable via Admin UI** (no env var available, must redo manually after volume reset):
 
@@ -1089,11 +1089,18 @@ docker compose up -d
 # 2. Create admin account in browser, then run DB scripts:
 docker cp tests/set_model_prompts.py open-webui:/tmp/
 docker exec open-webui python3 /tmp/set_model_prompts.py
-docker cp tests/fix_owui_models.py open-webui:/tmp/
-docker exec open-webui python3 /tmp/fix_owui_models.py
+docker cp tests/fix_owui_config.py open-webui:/tmp/
+docker exec open-webui python3 /tmp/fix_owui_config.py
 
 # 3. Re-configure Admin UI-only settings manually (domain filters, model order, prompt suggestions)
 ```
+
+> **Config DB safety note:** OpenWebUI's `config` table stores all values as JSON-encoded strings.
+> If a value is written as a raw empty string `''` (not the JSON null `'null'`), every chat
+> request will crash with `JSONDecodeError: Expecting value: line 1 column 1 (char 0)` before
+> the model is even called. This happens when config keys are written via direct SQL without
+> proper JSON encoding. Always run `fix_owui_config.py` after any direct DB manipulation, and
+> use `'null'` (not `''`) for unset optional string config values.
 
 ### Connection
 
@@ -1918,8 +1925,8 @@ RKLLM-API-Server/
 │   ├── test_openwebui.py           # OpenWebUI end-to-end integration test (24 checks)
 │   ├── benchmark_test.py           # NPU model benchmark tool (tok/s, TTFT, memory)
 │   ├── benchmark_results.json      # Latest benchmark results
-│   ├── set_model_prompts.py        # Set system prompts on all OWUI models (DB script)
-│   ├── fix_owui_models.py          # Set model capabilities: vision, tools, etc. (DB script)
+│   ├── set_model_prompts.py        # Set system prompts + capabilities on all RKLLM models (DB script)
+│   ├── fix_owui_config.py          # Sanitize config table — fix invalid JSON values (DB script)
 │   ├── remove_stale_models.py      # Mark old/removed models as inactive in OWUI DB
 │   ├── dump_owui_models_quick.py   # Quick dump of all OWUI model records
 │   ├── dump_owui_settings.py       # Dump all OWUI admin settings from DB
