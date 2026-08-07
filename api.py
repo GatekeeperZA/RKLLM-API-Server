@@ -2540,14 +2540,18 @@ def build_prompt(messages, model_name):
             cleaned_sys = _strip_system_fluff(system_text)
             if cleaned_sys:
                 if _is_date_only_system(cleaned_sys):
-                    date_related = bool(re.search(
-                        r'\b(?:date|time|today|tonight|tomorrow|yesterday'
-                        r'|day|week|month|year|when|clock|hour|minute|schedule)\b',
-                        user_question, re.IGNORECASE))
-                    if date_related:
+                    if not user_question:
+                        # No user turn — keep system prompt to avoid an empty prompt
                         parts.append(cleaned_sys)
                     else:
-                        logger.debug(f"Omitting date-only system prompt for non-date question")
+                        date_related = bool(re.search(
+                            r'\b(?:date|time|today|tonight|tomorrow|yesterday'
+                            r'|day|week|month|year|when|clock|hour|minute|schedule)\b',
+                            user_question, re.IGNORECASE))
+                        if date_related:
+                            parts.append(cleaned_sys)
+                        else:
+                            logger.debug(f"Omitting date-only system prompt for non-date question")
                 else:
                     parts.append(cleaned_sys)
 
@@ -3745,8 +3749,23 @@ def chat_completions():
         # Build prompt
         prompt, is_rag, enable_thinking = build_prompt(messages, name)
         if not prompt:
+            # System-only or empty requests (e.g. OpenWebUI title-gen meta tasks)
+            # return a valid empty completion so callers don't see a parse error.
+            logger.info(f"[{request_id}] Empty prompt — returning synthetic empty completion")
             end_request(request_id)
-            return make_error_response("Failed to build prompt from messages", 400, "invalid_request")
+            _empty_resp = {
+                "id": request_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": name,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            }
+            return jsonify(_empty_resp)
 
         # Hard-reject prompts that exceed context length.
         # The RKLLM runtime returns -1 for oversized prompts, but we can
