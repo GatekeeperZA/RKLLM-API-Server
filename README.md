@@ -12,6 +12,9 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Installation](#installation)
+  - [Docker (Recommended)](#docker-recommended)
+  - [Automated Setup (systemd)](#automated-setup-recommended)
+  - [Manual Installation](#manual-installation)
 - [Pre-Built Models](#pre-built-models)
 - [Model Setup](#model-setup)
 - [Running the Server](#running-the-server)
@@ -231,6 +234,77 @@ pip install numpy Pillow
 
 ## Installation
 
+### Docker (Recommended)
+
+The fastest way to get running. A pre-built ARM64 image is published automatically to GitHub Container Registry on every push to `main`.
+
+**Prerequisites:** Docker installed, NPU driver 0.9.8+ on the host (the container shares the host kernel — the driver runs on the host, not inside Docker).
+
+```bash
+docker run -d \
+  --name rkllm \
+  --privileged \
+  -p 8000:8000 \
+  -v /home/armbian/models:/root/models \
+  --restart unless-stopped \
+  ghcr.io/gatekeeperza/rkllm-api-server:latest
+```
+
+> **`--privileged` is required** — the NPU kernel driver (`/dev/rknpu`, `/dev/dri`) requires elevated device access.
+
+**With Open WebUI as a compose stack:**
+
+```yaml
+# docker-compose.yml
+services:
+  rkllm:
+    image: ghcr.io/gatekeeperza/rkllm-api-server:latest
+    privileged: true
+    ports:
+      - "8000:8000"
+    volumes:
+      - /home/armbian/models:/root/models
+    restart: unless-stopped
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "3000:8080"
+    environment:
+      OPENAI_API_BASE_URL: http://rkllm:8000/v1
+      OPENAI_API_KEY: none
+    volumes:
+      - open-webui:/app/backend/data
+    depends_on:
+      - rkllm
+    restart: unless-stopped
+
+volumes:
+  open-webui:
+```
+
+```bash
+docker compose up -d
+```
+
+**Environment variables** (all optional):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GUNICORN_WORKERS` | `1` | Always keep at 1 — NPU is single-instance |
+| `GUNICORN_THREADS` | `4` | Request handler threads |
+| `GUNICORN_TIMEOUT` | `300` | Request timeout in seconds |
+| `GUNICORN_BIND` | `0.0.0.0:8000` | Bind address |
+| `RKLLM_API_LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARNING`) |
+
+**Check health:**
+```bash
+docker logs rkllm -f
+curl http://localhost:8000/v1/models
+```
+
+---
+
 ### Automated Setup (Recommended)
 
 A zero-configuration setup script is included that handles **everything** — system packages, Python venv, RKLLM runtime installation, kernel module/driver verification, udev rules, systemd service, and NPU frequency fix:
@@ -281,7 +355,7 @@ git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
 cd RKLLM-API-Server
 
 # Install Python dependencies
-pip install flask flask-cors gunicorn
+pip install flask flask-cors gunicorn numpy Pillow
 
 # Create models directory
 mkdir -p ~/models
@@ -546,6 +620,10 @@ Aliases are only created when unambiguous (one model claims the alias). If two m
 ### Production (Recommended)
 
 ```bash
+# Using the included gunicorn.config.py (env-var driven):
+gunicorn --config gunicorn.config.py api:app
+
+# Or with explicit flags:
 gunicorn -w 1 -k gthread --threads 4 --timeout 300 -b 0.0.0.0:8000 api:app
 ```
 
@@ -1737,10 +1815,14 @@ Results are saved to `tests/benchmark_results.json` and printed as formatted mar
 ```
 RKLLM-API-Server/
 ├── api.py                          # Main API server (ctypes, v2.0)
+├── Dockerfile                      # Container image (ARM64, python:3.12-slim)
+├── gunicorn.config.py              # Gunicorn config (env-var driven)
+├── healthcheck.py                  # Docker HEALTHCHECK script
 ├── docker-compose.yml              # Open WebUI Docker config (all settings hardcoded)
 ├── setup.sh                        # Zero-config installer (762 lines)
 ├── settings.yml                    # SearXNG configuration for Open WebUI
 ├── README.md                       # This file
+├── .github/workflows/docker.yml    # CI: builds and pushes ARM64 image to GHCR on main push
 ├── tests/
 │   ├── diagnostic_test.py          # Section-by-section diagnostic (17 sections, 108 tests)
 │   ├── e2e_test.py                 # End-to-end integration (9 sections, 85 checks, all models)
