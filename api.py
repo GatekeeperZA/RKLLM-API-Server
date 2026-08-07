@@ -335,7 +335,7 @@ _rag_cache_lock = Lock()
 def _rag_cache_key(model_name, question):
     """Generate a deterministic cache key from model + question."""
     raw = f"{model_name}:{question.strip().lower()}"
-    return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
 def _rag_cache_get(model_name, question):
@@ -470,6 +470,19 @@ MODEL_CAPABILITY_RULES = [
 
 
 def detect_context_length(path_or_name, default=4096):
+    # Check for model_config.json in the same directory first
+    model_dir = os.path.dirname(path_or_name) if os.path.sep in path_or_name else None
+    if model_dir:
+        cfg_path = os.path.join(model_dir, 'model_config.json')
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path, 'r') as f:
+                    cfg = json.load(f)
+                if isinstance(cfg.get('context_length'), int):
+                    return cfg['context_length']
+            except Exception:
+                pass
+
     s = path_or_name.lower()
 
     for k in (32768, 16384, 8192, 4096, 2048):
@@ -1671,9 +1684,9 @@ def _update_kv_tracking(model_name, messages, is_reset):
             # Full reset — track all user messages from this conversation
             _kv_cache_state["user_messages"] = list(user_msgs)
         else:
-            # Incremental — append only the latest user message
+            # Incremental — append only the latest user message (cap at 50 to prevent unbounded growth)
             if user_msgs:
-                _kv_cache_state["user_messages"].append(user_msgs[-1])
+                _kv_cache_state["user_messages"] = _kv_cache_state["user_messages"][-49:] + [user_msgs[-1]]
 
 
 def _reset_kv_tracking():
@@ -2621,7 +2634,7 @@ def load_model(model_name, config):
                     # Load prompt cache (same logic as normal path)
                     if PROMPT_CACHE_ENABLED:
                         cache_file = os.path.join(os.path.dirname(model_path), 'prompt_cache.bin')
-                        if os.path.isfile(cache_file):
+                        if _prompt_cache_is_valid(cache_file, model_path):
                             _rkllm_wrapper.load_prompt_cache(cache_file)
                         else:
                             logger.debug(f"No prompt cache for {model_name} (will save on first request)")
@@ -2641,7 +2654,7 @@ def load_model(model_name, config):
         if PROMPT_CACHE_ENABLED:
             model_dir = os.path.dirname(model_path)
             cache_file = os.path.join(model_dir, 'prompt_cache.bin')
-            if os.path.isfile(cache_file):
+            if _prompt_cache_is_valid(cache_file, model_path):
                 _rkllm_wrapper.load_prompt_cache(cache_file)
             else:
                 logger.debug(f"No prompt cache for {model_name} (will save on first request)")
@@ -2649,17 +2662,75 @@ def load_model(model_name, config):
         return True
 
 
+def _prompt_cache_meta_path(cache_file):
+    return cache_file + '.meta'
+
+
+def _prompt_cache_model_fingerprint(model_path):
+    """Return (mtime, size) for the model file — fast staleness check."""
+    try:
+        st = os.stat(model_path)
+        return {"mtime": st.st_mtime, "size": st.st_size}
+    except OSError:
+        return None
+
+
+def _prompt_cache_is_valid(cache_file, model_path):
+    """Return True if the cache file exists and its meta matches the current model file."""
+    if not os.path.isfile(cache_file):
+        return False
+    meta_path = _prompt_cache_meta_path(cache_file)
+    if not os.path.isfile(meta_path):
+        # Cache exists but no meta — treat as stale
+        logger.warning(f"Prompt cache missing meta file; invalidating: {cache_file}")
+        try:
+            os.remove(cache_file)
+        except OSError:
+            pass
+        return False
+    try:
+        with open(meta_path, 'r') as f:
+            saved = json.load(f)
+        current = _prompt_cache_model_fingerprint(model_path)
+        if current and saved.get('mtime') == current['mtime'] and saved.get('size') == current['size']:
+            return True
+        logger.warning(f"Prompt cache is stale (model changed); invalidating: {cache_file}")
+        os.remove(cache_file)
+        os.remove(meta_path)
+        return False
+    except Exception as e:
+        logger.warning(f"Prompt cache meta check failed ({e}); invalidating: {cache_file}")
+        try:
+            os.remove(cache_file)
+        except OSError:
+            pass
+        return False
+
+
+def _prompt_cache_write_meta(cache_file, model_path):
+    """Write meta file for the prompt cache after it has been saved."""
+    fp = _prompt_cache_model_fingerprint(model_path)
+    if fp is None:
+        return
+    try:
+        with open(_prompt_cache_meta_path(cache_file), 'w') as f:
+            json.dump(fp, f)
+    except Exception as e:
+        logger.warning(f"Failed to write prompt cache meta: {e}")
+
+
 def _get_prompt_cache_path(model_name):
-    """Return the prompt cache file path for a model, or None."""
+    """Return the prompt cache file path for a model, or None if cache is already valid."""
     if not PROMPT_CACHE_ENABLED:
         return None
     config = MODELS.get(model_name)
     if not config:
         return None
-    model_dir = os.path.dirname(config['path'])
+    model_path = config['path']
+    model_dir = os.path.dirname(model_path)
     cache_file = os.path.join(model_dir, 'prompt_cache.bin')
-    if os.path.isfile(cache_file):
-        return None  # Already exists — don't re-save
+    if _prompt_cache_is_valid(cache_file, model_path):
+        return None  # Valid cache exists — don't re-save
     return cache_file
 
 
@@ -3775,6 +3846,9 @@ def _generate_stream(prompt, request_id, model_name, created,
             elif _save_cache_path:
                 if os.path.isfile(_save_cache_path):
                     logger.info(f"Prompt cache saved: {_save_cache_path}")
+                    config = MODELS.get(model_name)
+                    if config:
+                        _prompt_cache_write_meta(_save_cache_path, config['path'])
                 else:
                     logger.warning(f"Prompt cache save may have failed — file not found: {_save_cache_path}")
         except Exception as e:
@@ -4061,6 +4135,9 @@ def _generate_complete(prompt, request_id, model_name, created,
             elif _save_cache_path:
                 if os.path.isfile(_save_cache_path):
                     logger.info(f"Prompt cache saved: {_save_cache_path}")
+                    config = MODELS.get(model_name)
+                    if config:
+                        _prompt_cache_write_meta(_save_cache_path, config['path'])
                 else:
                     logger.warning(f"Prompt cache save may have failed — file not found: {_save_cache_path}")
         except Exception as e:
