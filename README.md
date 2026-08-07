@@ -1706,6 +1706,15 @@ Logs are written to both **stderr** and a rotating log file (`api.log` in the sc
 - Verify NPU driver is loaded: `dmesg | grep -i npu`
 - Check `api.log` for init failure messages — may indicate corrupt `.rkllm` file or version mismatch
 
+### VL model fails with "max_context must be less than max_context_limit"
+The full error in `api.log`: `E rkllm: max_context[8192] must be less than the model's max_context_limit[4096]`
+
+The `context_length` in `model_config.json` exceeds what the model was compiled with. Fix:
+```json
+{ "context_length": 4096 }
+```
+The compiled context limit is reported in the load log line: `rkllm-toolkit version: ..., max_context_limit: 4096`
+
 ### "Another request is currently being processed" (503)
 - NPU is single-task — only one request at a time
 - Previous request may be stuck — check `/health` endpoint
