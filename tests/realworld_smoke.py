@@ -372,18 +372,18 @@ check("Health shows new model", (h2 or {}).get("current_model") == ALT_MODEL,
 
 # --- 13. Concurrent request rejection ---
 print(f"\n[13] CONCURRENT REQUEST REJECTION")
-# Start a request in background — use ALT_MODEL (non-thinking) with a short prompt
-# so it finishes quickly enough that we can proceed without blocking later tests
+# Start a longer request in background so it's definitely still generating
+# when the concurrent check fires after the sleep.
 bg_result = {}
 
 def _bg_request():
     bg_result["data"] = stream_chat(ALT_MODEL, [
-        {"role": "user", "content": "What is 2 + 2?"}
+        {"role": "user", "content": "Write a short paragraph (4-5 sentences) about the water cycle."}
     ], timeout=120)
 
 t = threading.Thread(target=_bg_request, daemon=True)
 t.start()
-time.sleep(2)  # Let it start generating
+time.sleep(3)  # Let it start generating (longer sleep for model-load + first tokens)
 
 # Try to send a second request while first is in flight
 code_busy, data_busy, _ = req("POST", "/v1/chat/completions", {
@@ -394,11 +394,14 @@ code_busy, data_busy, _ = req("POST", "/v1/chat/completions", {
 check("Concurrent request rejected with 503", code_busy == 503,
       f"status={code_busy}")
 
-# Wait for background thread to finish (should be fast for "2+2")
+# Wait for background thread to finish
 t.join(timeout=180)
 bg_total = len(bg_result.get("data", {}).get("content", "")) + len(bg_result.get("data", {}).get("reasoning", ""))
 check("Background request completed", bg_total > 0,
       f"content+reasoning={bg_total}")
+
+# Let server fully clear ACTIVE_REQUEST before proceeding
+time.sleep(2)
 
 # --- 14. Long output generation ---
 print(f"\n[14] LONG OUTPUT GENERATION ({THINK_MODEL})")
@@ -444,7 +447,7 @@ check("Missing model field: error", code_nomodel in (400, 404),
 # Wait for any lingering request to complete — poll health until server is idle
 for _ in range(30):
     _hc, _hd, _ = req("GET", "/health")
-    if _hd and not _hd.get("request_in_progress", False):
+    if _hd and _hd.get("active_request") is None:
         break
     time.sleep(2)
 
