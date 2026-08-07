@@ -53,7 +53,8 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 ## Features
 
 ### Core
-- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/models` endpoints work with any OpenAI client
+- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/models`, `/v1/models/<id>`, `/v1/completions` endpoints work with any OpenAI client
+- **Stop sequences** — `stop` parameter fully implemented (string or array); generation aborts at first match
 - **Direct NPU access** via ctypes binding to `librkllmrt.so` (no subprocess overhead)
 - **KV cache incremental mode** — follow-up turns only prefill the new message (~50ms vs ~500ms)
 - **Prompt cache preloading** — saves KV state to disk after first inference; subsequent model loads restore it instantly, skipping system prompt re-prefill
@@ -595,14 +596,28 @@ The server auto-detects each model's capabilities from its folder name. This con
 
 Any model with a `.rknn` vision encoder file automatically gains the `vl` capability.
 
-**Override with `model_config.json`:** Place a JSON file in the model folder to override auto-detection:
+**Override with `model_config.json`:** Place a JSON file in the model folder to override any auto-detected value:
 
 ```json
 // ~/models/MyCustomModel/model_config.json
 {
-  "capabilities": ["thinking", "instruct"]
+  "context_length": 8192,
+  "capabilities": ["thinking", "instruct"],
+  "sampling": {
+    "temperature": 0.6,
+    "top_k": 20,
+    "top_p": 0.95,
+    "repeat_penalty": 1.1,
+    "presence_penalty": 1.5
+  }
 }
 ```
+
+| Key | Effect |
+|-----|--------|
+| `context_length` | Override the auto-detected context window (tokens) |
+| `capabilities` | Override capability list (`instruct`, `thinking`, `vl`, etc.) |
+| `sampling` | Override model-family sampling defaults for this specific model |
 
 **Effect on thinking:** Only models with the `thinking` capability get `enable_thinking=True` on the RKLLM runtime. Non-thinking models (Phi-3, Gemma, etc.) always run with `enable_thinking=False`, preventing wasted tokens on models that don't support `<think>` blocks.
 
@@ -765,12 +780,34 @@ curl http://localhost:8000/v1/chat/completions \
 | `model` | string | *required* | Model ID or alias |
 | `messages` | array | *required* | OpenAI messages format |
 | `stream` | bool | `false` | Enable SSE streaming |
-| `max_tokens` | int | `2048` | Max completion tokens |
+| `stop` | string or array | `null` | Stop sequences — generation halts when any string is matched |
+| `max_tokens` | int | `2048` | Max completion tokens (accepted; rkllm uses model-compiled value) |
 | `temperature` | float | *(ignored)* | Accepted but has no effect — rkllm uses model-compiled sampling |
 | `top_p` | float | *(ignored)* | Accepted but has no effect |
 | `frequency_penalty` | float | *(ignored)* | Accepted but has no effect |
 | `presence_penalty` | float | *(ignored)* | Accepted but has no effect |
 | `stream_options.include_usage` | bool | `false` | Include token counts in stream |
+
+> **Note:** When `temperature`, `top_p`, `frequency_penalty`, or `presence_penalty` are sent with non-default values, the response will include an `X-RKLLM-Warning` header explaining that these are not honoured by the rkllm runtime.
+
+### `POST /v1/completions`
+
+Legacy text completions endpoint — wraps a `prompt` string into chat completions format and forwards to `/v1/chat/completions`. Accepts all the same parameters as chat completions plus `prompt` in place of `messages`.
+
+```bash
+curl http://localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "qwen3-1.7b", "prompt": "The capital of France is"}'
+```
+
+### `GET /v1/models/<model_id>`
+
+Retrieve a single model by ID or alias.
+
+```bash
+curl http://localhost:8000/v1/models/qwen3-1.7b
+curl http://localhost:8000/v1/models/phi   # alias works too
+```
 
 ### `POST /v1/models/select`
 
@@ -2003,6 +2040,8 @@ Measured on **Orange Pi 5 Plus (16 GB)** — RK3588, 3 NPU cores, RKNPU driver 0
 ## VL Model Evaluation
 
 We tested all available pre-converted VL models to find the best option for real-world OCR tasks (reading gas meters from phone photos). All models use the same 448×448 (or lower) vision encoder, which crushes high-resolution phone photos (14-15 MP) down to a tiny thumbnail — a fundamental bottleneck for OCR accuracy.
+
+> **RKLLM Version Compatibility:** `.rkllm` model files are compiled for a specific RKLLM runtime version and are **not cross-compatible**. If your model fails with `"Model failed to initialize"`, the model was compiled for a different runtime version than what is installed. Symptom: running `strings model.rkllm | grep rkllm_spilt` returns results — the old weight naming convention (`_spilt_N`, a typo of "split") was used in v1.1.x; v1.2.x uses `_split_N`. Download the model again from a source that provides RKLLM v1.2.x builds.
 
 ### Test Setup
 
