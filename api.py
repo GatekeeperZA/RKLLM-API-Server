@@ -291,6 +291,21 @@ _HOME_ASSISTANT_SIGNATURES = (
     'execute_services function',
 )
 
+# Tool calling — Qwen3 native format injected as system prompt when tools are present.
+_TOOL_SYSTEM_TEMPLATE = (
+    "# Tools\n\n"
+    "You may call one or more functions to assist with the user query.\n\n"
+    "You are provided with function signatures within <tools></tools> XML tags:\n"
+    "<tools>\n"
+    "{tools_json}\n"
+    "</tools>\n\n"
+    "For each function call, return a json object with function name and arguments "
+    "within <tool_call></tool_call> XML tags:\n"
+    "<tool_call>\n"
+    '{{"name": <function-name>, "arguments": <args-json-object>}}\n'
+    "</tool_call>"
+)
+
 # RAG quality controls
 RAG_MIN_QUALITY_SCORE = 2
 RAG_MAX_PARAGRAPHS = 10
@@ -376,6 +391,31 @@ def _jaccard_similarity(text_a, text_b):
     intersection = words_a & words_b
     union = words_a | words_b
     return len(intersection) / len(union)
+
+
+_RE_TOOL_CALL = re.compile(r'<tool_call>\s*(.*?)\s*</tool_call>', re.DOTALL)
+
+
+def _parse_tool_calls(text):
+    """Extract <tool_call>...</tool_call> blocks from model output.
+
+    Returns a list of OpenAI-format tool_call dicts, or None if none found.
+    """
+    calls = []
+    for m in _RE_TOOL_CALL.finditer(text):
+        try:
+            data = json.loads(m.group(1))
+            calls.append({
+                'id': f"call_{uuid.uuid4().hex[:8]}",
+                'type': 'function',
+                'function': {
+                    'name': data.get('name', ''),
+                    'arguments': json.dumps(data.get('arguments', {}), ensure_ascii=False),
+                }
+            })
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    return calls or None
 
 
 def _detect_repetition_loop(text, window=REPETITION_WINDOW, max_hits=REPETITION_MAX_HITS):
@@ -2191,6 +2231,7 @@ def build_prompt(messages, model_name):
     for msg in messages:
         role = msg.get('role', 'user')
         content = msg.get('content', '')
+        tool_calls_data = msg.get('tool_calls')
         # OpenAI multimodal: content can be a list of {"type":"text","text":"..."}
         if isinstance(content, list):
             content = " ".join(
@@ -2199,11 +2240,31 @@ def build_prompt(messages, model_name):
             )
         if not isinstance(content, str):
             content = str(content) if content else ''
-        if not content:
-            continue
+
         if role == 'system':
-            system_parts.append(content)
+            if content:
+                system_parts.append(content)
+        elif role == 'tool':
+            # Tool result from function execution — format as tool response
+            conversation.append(('user', f'<tool_response>\n{content}\n</tool_response>'))
+        elif role == 'assistant' and tool_calls_data and not content:
+            # Assistant turn that only contains a tool call (content is null/empty)
+            tc_parts = []
+            for tc in tool_calls_data:
+                fn = tc.get('function', {})
+                name = fn.get('name', '')
+                args_raw = fn.get('arguments', '{}')
+                try:
+                    args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                tc_parts.append(
+                    f'<tool_call>\n{json.dumps({"name": name, "arguments": args}, ensure_ascii=False)}\n</tool_call>'
+                )
+            conversation.append(('assistant', '\n'.join(tc_parts)))
         else:
+            if not content:
+                continue
             conversation.append((role, content))
     if len(system_parts) > 1:
         logger.warning(f"Multiple system messages ({len(system_parts)}) — concatenating")
@@ -3266,6 +3327,19 @@ def chat_completions():
         req_stop = []
     _stop_buf_len = max((len(s) for s in req_stop), default=0)
 
+    # Tool calling — extract tools and inject Qwen3 tool system prompt
+    _req_tools = body.get('tools')
+    _tool_choice = body.get('tool_choice', 'auto')
+    if isinstance(_tool_choice, dict):
+        _tool_choice = _tool_choice.get('type', 'auto')
+    _has_tools = bool(_req_tools and isinstance(_req_tools, list) and _tool_choice != 'none')
+    if _has_tools:
+        _tools_defs = [t.get('function', t) for t in _req_tools if isinstance(t, dict)]
+        _tools_json = json.dumps(_tools_defs, ensure_ascii=False, indent=2)
+        _tool_sys_content = _TOOL_SYSTEM_TEMPLATE.format(tools_json=_tools_json)
+        messages = [{'role': 'system', 'content': _tool_sys_content}] + messages
+        logger.info(f"[{request_id}] Tool calling: {len(_tools_defs)} tool(s) injected")
+
     # Log ignored sampling parameters; surface as response header so callers know.
     ignored_params = {k: body[k] for k, default in _SAMPLING_DEFAULTS.items()
                       if body.get(k) is not None and body[k] != default}
@@ -3814,6 +3888,7 @@ def chat_completions():
                     rag_cache_info=rag_cache_info,
                     kv_is_reset=kv_is_reset,
                     req_stop=req_stop,
+                    has_tools=_has_tools,
                 )),
                 mimetype='text/event-stream',
                 headers=_stream_hdrs,
@@ -3828,6 +3903,7 @@ def chat_completions():
                 rag_cache_info=rag_cache_info,
                 kv_is_reset=kv_is_reset,
                 req_stop=req_stop,
+                has_tools=_has_tools,
             )
             if _sampling_warning:
                 _r.headers['X-RKLLM-Warning'] = _sampling_warning
@@ -3848,7 +3924,8 @@ def _generate_stream(prompt, request_id, model_name, created,
                      keep_history=1, enable_thinking=True,
                      include_usage=False, messages=None,
                      is_rag=False, rag_cache_info=None,
-                     kv_is_reset=False, vl_data=None, req_stop=None):
+                     kv_is_reset=False, vl_data=None, req_stop=None,
+                     has_tools=False):
     """Generator that yields SSE chunks from rkllm token callback queue."""
     global _worker_thread
 
@@ -3988,13 +4065,14 @@ def _generate_stream(prompt, request_id, model_name, created,
                 for kind, chunk_text in think_parser.feed(msg_data):
                     if kind == 'thinking':
                         total_reasoning += chunk_text
-                        if chunk_text.strip():
+                        if not has_tools and chunk_text.strip():
                             yield make_sse_chunk(request_id, model_name, created,
                                                  delta={"reasoning_content": chunk_text})
                     else:
                         total_content += chunk_text
-                        yield make_sse_chunk(request_id, model_name, created,
-                                             delta={"content": chunk_text})
+                        if not has_tools:
+                            yield make_sse_chunk(request_id, model_name, created,
+                                                 delta={"content": chunk_text})
                         # Stop sequence check — scan sliding window of recent content
                         if _req_stop:
                             _window = total_content[-max(_stop_buf_len + 32, 64):]
@@ -4061,7 +4139,37 @@ def _generate_stream(prompt, request_id, model_name, created,
                     yield make_sse_chunk(request_id, model_name, created,
                                          delta={"content": flush_text})
 
-        # Final chunk — "stop" for clean generation, "length" for timeout/abort
+        # Tool call detection — if tools were active and model output a <tool_call>,
+        # emit a structured tool_calls response instead of a normal content response.
+        if has_tools and generation_clean:
+            _tool_calls = _parse_tool_calls(total_content)
+            if _tool_calls:
+                logger.info(f"[{request_id}] Tool call detected: {[c['function']['name'] for c in _tool_calls]}")
+                # Emit tool_calls delta (OpenAI streaming format)
+                _tc_delta = {"role": "assistant", "content": None, "tool_calls": [
+                    {"index": i, "id": c["id"], "type": "function",
+                     "function": {"name": c["function"]["name"], "arguments": c["function"]["arguments"]}}
+                    for i, c in enumerate(_tool_calls)
+                ]}
+                yield make_sse_chunk(request_id, model_name, created, delta=_tc_delta)
+                yield make_sse_chunk(request_id, model_name, created, finish_reason="tool_calls")
+                if include_usage:
+                    prompt_text = "".join(m.get("content", "") for m in (messages or [])
+                                          if isinstance(m.get("content"), str))
+                    _pt = max(1, len(prompt_text) // CHARS_PER_TOKEN_ESTIMATE)
+                    _ct = stats_data.get('generate_tokens', max(1, len(total_content) // CHARS_PER_TOKEN_ESTIMATE))
+                    yield make_sse_chunk(request_id, model_name, created,
+                                         usage={"prompt_tokens": _pt, "completion_tokens": _ct,
+                                                "total_tokens": _pt + _ct})
+                yield "data: [DONE]\n\n"
+                return
+
+        # Normal finish — "stop" for clean generation, "length" for timeout/abort
+        if has_tools:
+            # Tools were active but model chose not to call one — emit buffered content now
+            if total_content:
+                yield make_sse_chunk(request_id, model_name, created, delta={"content": total_content})
+
         _finish_reason = "stop" if generation_clean else "length"
         yield make_sse_chunk(request_id, model_name, created, finish_reason=_finish_reason)
 
@@ -4155,7 +4263,8 @@ def _generate_stream(prompt, request_id, model_name, created,
 def _generate_complete(prompt, request_id, model_name, created,
                        keep_history=1, enable_thinking=True,
                        is_rag=False, messages=None, rag_cache_info=None,
-                       kv_is_reset=False, vl_data=None, req_stop=None):
+                       kv_is_reset=False, vl_data=None, req_stop=None,
+                       has_tools=False):
     """Collect all output and return a non-streaming JSON response."""
     global _worker_thread
 
@@ -4319,6 +4428,29 @@ def _generate_complete(prompt, request_id, model_name, created,
             _worker_thread = None
 
         full_content = "".join(content_parts).rstrip()
+
+        # Tool call detection — check BEFORE stripping think tags
+        if has_tools and generation_clean:
+            _tool_calls = _parse_tool_calls(full_content)
+            if _tool_calls:
+                logger.info(f"[{request_id}] Tool call detected: {[c['function']['name'] for c in _tool_calls]}")
+                prompt_text = "".join(m.get("content", "") for m in (messages or [])
+                                      if isinstance(m.get("content"), str))
+                _pt = max(1, len(prompt_text) // CHARS_PER_TOKEN_ESTIMATE)
+                _ct = stats_data.get('generate_tokens', max(1, len(full_content) // CHARS_PER_TOKEN_ESTIMATE))
+                return jsonify({
+                    "id": request_id, "object": "chat.completion",
+                    "created": created, "model": model_name,
+                    "system_fingerprint": SYSTEM_FINGERPRINT,
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": None, "tool_calls": _tool_calls},
+                        "logprobs": None,
+                        "finish_reason": "tool_calls",
+                    }],
+                    "usage": {"prompt_tokens": _pt, "completion_tokens": _ct,
+                              "total_tokens": _pt + _ct},
+                })
 
         # Parse think tags
         reasoning_content, cleaned_content = parse_think_tags(full_content)
