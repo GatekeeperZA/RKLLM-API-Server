@@ -6,11 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Download RKLLM runtime library (v1.2.3) and RKNN runtime library (v2.3.2)
+# Download RKLLM runtime library and RKNN runtime library
 RUN wget -q -O /usr/lib/librkllmrt.so \
-    https://github.com/airockchip/rknn-llm/raw/refs/heads/master/rkllm-runtime/Linux/librkllm_api/aarch64/librkllmrt.so \
+    https://raw.githubusercontent.com/airockchip/rknn-llm/main/rkllm-runtime/Linux/librkllm_api/aarch64/librkllmrt.so \
  && wget -q -O /usr/lib/librknnrt.so \
-    https://github.com/airockchip/rknn_model_zoo/raw/refs/heads/main/libs/Linux/aarch64/librknnrt.so \
+    https://raw.githubusercontent.com/airockchip/rknn_model_zoo/main/3rdparty/rknpu2/Linux/aarch64/librknnrt.so \
  && ldconfig
 
 # Install Python dependencies
@@ -37,6 +37,7 @@ EXPOSE 8000
 
 ENV RKLLM_LOG_LEVEL=1 \
     RKLLM_API_LOG_LEVEL=INFO \
+    RKLLM_MODELS_ROOT=/root/models \
     GUNICORN_BIND=0.0.0.0:8000 \
     GUNICORN_WORKERS=1 \
     GUNICORN_THREADS=4 \
