@@ -1781,10 +1781,15 @@ def try_start_request(request_id, model):
 def force_clear_if_orphaned():
     """Clear orphaned request tracking if model changed or unloaded."""
     loaded = is_model_loaded()
+    # Snapshot CURRENT_MODEL under its own lock before entering ACTIVE_LOCK
+    # to avoid a TOCTOU race (C-2): CURRENT_MODEL is only written under
+    # PROCESS_LOCK, so reading it outside that lock is unsynchronised.
+    with PROCESS_LOCK:
+        current_model_snap = CURRENT_MODEL
     with ACTIVE_LOCK:
         if ACTIVE_REQUEST["id"] is None:
             return
-        if CURRENT_MODEL != ACTIVE_REQUEST["model"]:
+        if current_model_snap != ACTIVE_REQUEST["model"]:
             # Model switched — only clear if request is stale
             elapsed = time.time() - ACTIVE_REQUEST["last_activity"]
             if elapsed <= REQUEST_STALE_TIMEOUT:
@@ -3603,8 +3608,9 @@ def chat_completions():
                 end_request(request_id)
                 return make_error_response(f"Failed to load VL model '{vl_name}'", 500)
             update_request_activity()
-            global VL_LAST_REQUEST_TIME
-            VL_LAST_REQUEST_TIME = time.time()
+            with PROCESS_LOCK:
+                global VL_LAST_REQUEST_TIME
+                VL_LAST_REQUEST_TIME = time.time()
 
             # --- Multi-image support: encode each image, concatenate embeddings ---
             MAX_VL_IMAGES = 4  # Safety cap to prevent NPU OOM on 16GB device
@@ -4251,12 +4257,27 @@ def _generate_stream(prompt, request_id, model_name, created,
             _active_wrapper.abort()
     except Exception as e:
         logger.error(f"[{request_id}] Stream error: {e}", exc_info=True)
+        # Abort worker first so it stops pushing tokens before we try to
+        # yield the error chunk — avoids writing into a broken stream (C-6).
+        if _active_wrapper:
+            _active_wrapper.abort()
         try:
             yield make_sse_chunk(request_id, model_name, created, finish_reason="length")
             yield "data: [DONE]\n\n"
         except Exception:
             pass
     finally:
+        # Drain any orphaned tokens left by an aborted or failed generation
+        # so the next request doesn't inherit stale output (C-4).
+        _drained = 0
+        while True:
+            try:
+                _token_queue.get_nowait()
+                _drained += 1
+            except queue.Empty:
+                break
+        if _drained:
+            logger.debug(f"[{request_id}] Drained {_drained} orphaned token(s) from queue")
         if not request_ended:
             end_request(request_id)
         # Ensure worker thread is cleaned up
@@ -4567,6 +4588,17 @@ def _generate_complete(prompt, request_id, model_name, created,
                     _active_wrapper.abort()
                 _worker_thread.join(timeout=5)
                 _worker_thread = None
+        # Drain any orphaned tokens left by an aborted or failed generation
+        # so the next request doesn't inherit stale output (C-4).
+        _drained = 0
+        while True:
+            try:
+                _token_queue.get_nowait()
+                _drained += 1
+            except queue.Empty:
+                break
+        if _drained:
+            logger.debug(f"[{request_id}] Drained {_drained} orphaned token(s) from queue")
         GENERATION_COMPLETE.set()
 
 
