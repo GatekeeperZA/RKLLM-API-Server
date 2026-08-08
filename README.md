@@ -220,6 +220,8 @@ This project was developed and tested on:
 - **RKNN Runtime** (optional) — `librknnrt.so` shared library (only needed for VL/multimodal models with `.rknn` vision encoders)
 
 > **SDK Version Coupling:** The ctypes struct definitions in `api.py` target the RKLLM SDK v1.2.x C header (`rkllm.h`). Older SDK versions used a flat 112-byte reserved blob in `RKLLMExtendParam` and lacked fields like `n_keep`, `n_batch`, `use_cross_attn`, and `enable_thinking`. Running this server against an older `librkllmrt.so` (pre-1.2) will cause **silent struct-offset misalignment** — the parameter block passed to `rkllm_init()` would be corrupted, producing wrong sampling behaviour rather than a crash. Always use the runtime from the [v1.2.x release](https://github.com/airockchip/rknn-llm) or later.
+>
+> **Do not upgrade to v1.3.0 without updating `api.py` first.** RKLLM v1.3.0 adds new fields to `RKLLMInferParam` (`max_new_tokens`, `sampling_params`) and `RKLLMParam` (`ignore_eos_token`), and changes the multimodal input interface. Swapping the `.so` without updating the ctypes struct definitions will cause silent struct-offset corruption or crashes. The v1.3.0 upgrade requires a deliberate api.py update pass against the new SDK headers before the library is replaced.
 
 ### Python Dependencies
 ```bash
