@@ -657,7 +657,6 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=$INSTALL_DIR $MODELS_DIR /tmp
 SupplementaryGroups=render
-DeviceAllow=/dev/rknpu rw
 
 [Install]
 WantedBy=multi-user.target

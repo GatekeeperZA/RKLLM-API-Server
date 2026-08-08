@@ -1218,6 +1218,12 @@ class RKNNVisionEncoder:
                 self.model_image_token = output_attr.dims[i]
                 self.model_embed_size = output_attr.dims[i + 1]
                 break
+        if self.model_image_token == 0 or self.model_embed_size == 0:
+            logger.error(f"VL encoder dims parsing failed: no dim > 1 found in "
+                         f"{list(output_attr.dims[:4])}. model_image_token=0 would "
+                         f"produce empty embeddings.")
+            self.destroy()
+            return False
         logger.info(f"Vision encoder output: image_token={self.model_image_token}, "
                     f"embed_size={self.model_embed_size}, n_output={self.n_output}")
 
@@ -1260,26 +1266,29 @@ class RKNNVisionEncoder:
         embed_len = self.model_image_token * self.model_embed_size * self.n_output
         result = np.zeros(embed_len, dtype=np.float32)
 
-        if self.n_output == 1:
-            ctypes.memmove(result.ctypes.data, outputs[0].buf, outputs[0].size)
-        else:
-            # Interleave outputs from multiple encoder heads into the result buffer.
-            # outputs[j].buf is a raw void* pointing into RKNN-owned memory; use
-            # ctypes.cast to an integer (c_void_p) for pointer arithmetic instead of
-            # dereferencing via .contents (which copies the value, not the address).
-            for i in range(self.model_image_token):
-                for j in range(self.n_output):
-                    dst_offset = (i * self.n_output * self.model_embed_size +
-                                  j * self.model_embed_size)
-                    src_base = ctypes.cast(outputs[j].buf, ctypes.c_void_p).value
-                    src_ptr = src_base + i * self.model_embed_size * 4
-                    ctypes.memmove(
-                        result.ctypes.data + dst_offset * 4,
-                        src_ptr,
-                        self.model_embed_size * 4,
-                    )
+        try:
+            if self.n_output == 1:
+                ctypes.memmove(result.ctypes.data, outputs[0].buf, outputs[0].size)
+            else:
+                # Interleave outputs from multiple encoder heads into the result buffer.
+                # outputs[j].buf is a raw void* pointing into RKNN-owned memory; use
+                # ctypes.cast to an integer (c_void_p) for pointer arithmetic instead of
+                # dereferencing via .contents (which copies the value, not the address).
+                for i in range(self.model_image_token):
+                    for j in range(self.n_output):
+                        dst_offset = (i * self.n_output * self.model_embed_size +
+                                      j * self.model_embed_size)
+                        src_base = ctypes.cast(outputs[j].buf, ctypes.c_void_p).value
+                        src_ptr = src_base + i * self.model_embed_size * 4
+                        ctypes.memmove(
+                            result.ctypes.data + dst_offset * 4,
+                            src_ptr,
+                            self.model_embed_size * 4,
+                        )
+        finally:
+            # Always release RKNN-owned output buffers, even if memmove raises
+            self.lib.rknn_outputs_release(self.ctx, self.n_output, outputs)
 
-        self.lib.rknn_outputs_release(self.ctx, self.n_output, outputs)
         return result
 
     def destroy(self):
@@ -1417,39 +1426,33 @@ class RKLLMWrapper:
         # rkllm_clear_kv_cache(handle, keep_system_prompt, start_pos*, end_pos*) -> int
         # 4-arg signature confirmed in SDK v1.2.1+. start_pos/end_pos=NULL clears
         # the full cache (or system-prompt-preserving portion based on keep_system_prompt).
-        try:
+        # Note: ctypes attribute access never raises AttributeError — the error only
+        # surfaces at call time if the symbol is missing. Use hasattr() to guard.
+        if hasattr(self.lib, 'rkllm_clear_kv_cache'):
             self.lib.rkllm_clear_kv_cache.argtypes = [
                 ctypes.c_void_p, ctypes.c_int,
                 ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
             ]
             self.lib.rkllm_clear_kv_cache.restype = ctypes.c_int
-        except AttributeError:
-            pass  # May not exist in older library versions
 
         # rkllm_set_chat_template(handle, system_prompt, prompt_prefix, prompt_postfix) -> int
-        try:
+        if hasattr(self.lib, 'rkllm_set_chat_template'):
             self.lib.rkllm_set_chat_template.argtypes = [
                 ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
             ]
             self.lib.rkllm_set_chat_template.restype = ctypes.c_int
-        except AttributeError:
-            pass  # May not exist in all library versions
 
         # rkllm_load_prompt_cache(handle, prompt_cache_path) -> int
-        try:
+        if hasattr(self.lib, 'rkllm_load_prompt_cache'):
             self.lib.rkllm_load_prompt_cache.argtypes = [
                 ctypes.c_void_p, ctypes.c_char_p,
             ]
             self.lib.rkllm_load_prompt_cache.restype = ctypes.c_int
-        except AttributeError:
-            pass
 
         # rkllm_release_prompt_cache(handle) -> int
-        try:
+        if hasattr(self.lib, 'rkllm_release_prompt_cache'):
             self.lib.rkllm_release_prompt_cache.argtypes = [ctypes.c_void_p]
             self.lib.rkllm_release_prompt_cache.restype = ctypes.c_int
-        except AttributeError:
-            pass
 
     def init_model(self, model_path, ctx_len, max_tokens, vl_config=None, sampling=None):
         """Initialize a model.  Returns True on success.
@@ -1697,8 +1700,9 @@ LAST_REQUEST_TIME = 0
 # the runtime keeps all prior turns — we just need to add the new one.
 _KV_LOCK = Lock()
 _kv_cache_state = {
-    "model": None,          # Model name currently in KV cache
-    "user_messages": [],    # User messages (in order) the KV cache covers
+    "model": None,               # Model name currently in KV cache
+    "user_messages": [],         # User messages (in order) the KV cache covers
+    "system_prompt_hash": None,  # Hash of system prompt(s) in the cached context
 }
 
 
@@ -1711,8 +1715,16 @@ def _check_kv_incremental(model_name, messages):
         if _kv_cache_state["model"] != model_name:
             return None
 
+        # System prompt must match exactly — a different persona or instruction
+        # set means the cached KV state is wrong for the new request.
+        _sys_parts = tuple(m.get('content', '') for m in messages
+                           if m.get('role') == 'system' and m.get('content'))
+        if hash(_sys_parts) != _kv_cache_state["system_prompt_hash"]:
+            return None
+
         user_msgs = [m['content'] for m in messages
-                     if m.get('role') == 'user' and m.get('content')]
+                     if m.get('role') == 'user' and isinstance(m.get('content'), str)
+                     and m.get('content')]
         if not user_msgs:
             return None
 
@@ -1727,9 +1739,13 @@ def _check_kv_incremental(model_name, messages):
 def _update_kv_tracking(model_name, messages, is_reset):
     """Update KV cache tracking after successful generation."""
     user_msgs = [m['content'] for m in messages
-                 if m.get('role') == 'user' and m.get('content')]
+                 if m.get('role') == 'user' and isinstance(m.get('content'), str)
+                 and m.get('content')]
+    _sys_parts = tuple(m.get('content', '') for m in messages
+                       if m.get('role') == 'system' and m.get('content'))
     with _KV_LOCK:
         _kv_cache_state["model"] = model_name
+        _kv_cache_state["system_prompt_hash"] = hash(_sys_parts)
         if is_reset:
             # Full reset — track all user messages from this conversation
             _kv_cache_state["user_messages"] = list(user_msgs)
@@ -1744,6 +1760,7 @@ def _reset_kv_tracking():
     with _KV_LOCK:
         _kv_cache_state["model"] = None
         _kv_cache_state["user_messages"] = []
+        _kv_cache_state["system_prompt_hash"] = None
 
 
 # =============================================================================
@@ -1803,7 +1820,7 @@ def force_clear_if_orphaned():
                 return  # Model may still be loading
             logger.warning(f"Clearing orphaned request {ACTIVE_REQUEST['id']} "
                           f"- model mismatch ({ACTIVE_REQUEST['model']} vs "
-                          f"{CURRENT_MODEL}) after {elapsed:.0f}s")
+                          f"{current_model_snap}) after {elapsed:.0f}s")
         elif not loaded:
             logger.warning(f"Clearing orphaned request {ACTIVE_REQUEST['id']} "
                           f"- model not loaded")
@@ -2259,8 +2276,8 @@ def build_prompt(messages, model_name):
         elif role == 'tool':
             # Tool result from function execution — format as tool response
             conversation.append(('user', f'<tool_response>\n{content}\n</tool_response>'))
-        elif role == 'assistant' and tool_calls_data and not content:
-            # Assistant turn that only contains a tool call (content is null/empty)
+        elif role == 'assistant' and tool_calls_data:
+            # Assistant turn with tool call(s); may also carry a text preamble
             tc_parts = []
             for tc in tool_calls_data:
                 fn = tc.get('function', {})
@@ -2273,7 +2290,10 @@ def build_prompt(messages, model_name):
                 tc_parts.append(
                     f'<tool_call>\n{json.dumps({"name": name, "arguments": args}, ensure_ascii=False)}\n</tool_call>'
                 )
-            conversation.append(('assistant', '\n'.join(tc_parts)))
+            combined = '\n'.join(tc_parts)
+            if content:
+                combined = f"{content}\n{combined}"
+            conversation.append(('assistant', combined))
         else:
             if not content:
                 continue
@@ -2474,7 +2494,7 @@ def build_prompt(messages, model_name):
                 last_nl = reference_data.rfind('\n')
                 if last_nl > max_ref_chars // 2:
                     reference_data = reference_data[:last_nl]
-            logger.warning(f"Reference data truncated: {original_ref} -> {len(reference_data)} chars")
+            logger.debug(f"Reference data truncated: {original_ref} -> {len(reference_data)} chars")
 
         # Quality floor check
         if (_rag_best_score is not None
@@ -2483,7 +2503,12 @@ def build_prompt(messages, model_name):
                           f"threshold={RAG_QUALITY_FLOOR_THRESHOLD}. "
                           f"Dropping RAG context, falling back to model knowledge.")
             rag_parts = None
-            system_text = ""
+            # Strip only the RAG <source> blocks — preserve any non-RAG instructions
+            # (persona, language, formatting rules) that were in the system message.
+            system_text = re.sub(
+                r'<source[^>]*>.*?</source>', '', system_text,
+                flags=re.DOTALL | re.IGNORECASE
+            ).strip()
 
     # Re-check after quality floor may have cleared rag_parts
     if rag_parts and user_question:
@@ -2967,7 +2992,9 @@ def model_monitor():
                     and GENERATION_COMPLETE.is_set()  # Never unload during active inference
                     and LAST_REQUEST_TIME > 0
                     and (time.time() - LAST_REQUEST_TIME) > IDLE_UNLOAD_TIMEOUT):
-                logger.info(f"Auto-unloading {CURRENT_MODEL} after "
+                with PROCESS_LOCK:
+                    _idle_model = CURRENT_MODEL
+                logger.info(f"Auto-unloading {_idle_model} after "
                             f"{int(time.time() - LAST_REQUEST_TIME)}s idle")
                 unload_current("idle timeout")
 
@@ -3599,11 +3626,15 @@ def chat_completions():
                                            f"title gen — '{_title}'")
 
     # === SHORTCIRCUIT: Tag generation ===
-    # Open WebUI asks the model to generate 1-3 tags.
+    # Open WebUI sends a boilerplate system prompt alongside the tag request.
+    # Require OWUI-specific phrasing to avoid false-matching real user messages
+    # like "can you generate 1-3 tags for my blog post?".
     _is_tag_gen = (
         ('generate 1-3 tags' in _luc_lower
          or 'categorize the chat' in _luc_lower)
         and 'tag' in _luc_lower
+        and ('chat history' in _luc_lower or 'conversation' in _luc_lower
+             or 'following conversation' in _luc_lower or '<chat_history>' in _luc_lower)
     )
     if _is_tag_gen:
         return _make_shortcircuit_response('general',
@@ -4123,6 +4154,7 @@ def _generate_stream(prompt, request_id, model_name, created,
                 update_request_activity()
 
                 # Route through think-tag parser
+                _stop_hit = False
                 for kind, chunk_text in think_parser.feed(msg_data):
                     if kind == 'thinking':
                         total_reasoning += chunk_text
@@ -4130,20 +4162,32 @@ def _generate_stream(prompt, request_id, model_name, created,
                             yield make_sse_chunk(request_id, model_name, created,
                                                  delta={"reasoning_content": chunk_text})
                     else:
+                        _prev_len = len(total_content)
                         total_content += chunk_text
-                        if not has_tools:
-                            yield make_sse_chunk(request_id, model_name, created,
-                                                 delta={"content": chunk_text})
-                        # Stop sequence check — scan sliding window of recent content
+                        # Stop sequence check — scan before yielding so stop markers
+                        # never reach the client (only yield content up to the cut).
                         if _req_stop:
                             _window = total_content[-max(_stop_buf_len + 32, 64):]
                             for _seq in _req_stop:
                                 if _seq in _window:
                                     _cut = total_content.rfind(_seq)
+                                    if not has_tools and _cut > _prev_len:
+                                        _tail = total_content[_prev_len:_cut]
+                                        if _tail:
+                                            yield make_sse_chunk(request_id, model_name, created,
+                                                                 delta={"content": _tail})
                                     total_content = total_content[:_cut]
                                     logger.debug(f"[{request_id}] Stop sequence matched: {_seq!r}")
                                     _active_wrapper.abort()
+                                    _stop_hit = True
                                     break
+                        if _stop_hit:
+                            break
+                        if not has_tools:
+                            yield make_sse_chunk(request_id, model_name, created,
+                                                 delta={"content": chunk_text})
+                if _stop_hit:
+                    break
 
                 # Repetition loop detection — runs every token but the
                 # _detect_repetition_loop() call is O(n) worst-case: it only
@@ -4175,11 +4219,8 @@ def _generate_stream(prompt, request_id, model_name, created,
                 logger.error(f"[{request_id}] rkllm_run error: {msg_data}")
                 break
 
-        # End request tracking immediately
-        end_request(request_id)
-        request_ended = True
-
-        # Wait for worker thread to finish
+        # Wait for worker thread to finish before post-processing yields,
+        # so no new request can start on the same worker while we still yield.
         with PROCESS_LOCK:
             if _worker_thread and _worker_thread.is_alive():
                 _worker_thread.join(timeout=5)
@@ -4298,6 +4339,7 @@ def _generate_stream(prompt, request_id, model_name, created,
         # yield the error chunk — avoids writing into a broken stream (C-6).
         if _active_wrapper:
             _active_wrapper.abort()
+        _reset_kv_tracking()
         try:
             yield make_sse_chunk(request_id, model_name, created, finish_reason="length")
             yield "data: [DONE]\n\n"
@@ -4614,6 +4656,7 @@ def _generate_complete(prompt, request_id, model_name, created,
 
     except Exception as e:
         logger.error(f"[{request_id}] Generation error: {e}", exc_info=True)
+        _reset_kv_tracking()
         return make_error_response(f"Generation failed: {e}", 500)
     finally:
         if not request_ended:
