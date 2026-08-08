@@ -539,8 +539,8 @@ fi
 LOGROTATE_FILE="/etc/logrotate.d/rkllm-api"
 if [[ ! -f "$LOGROTATE_FILE" ]]; then
     info "Installing logrotate config for RKLLM API..."
-    sudo tee "$LOGROTATE_FILE" > /dev/null << 'EOF'
-/home/armbian/rkllm_api/rkllm_api.log {
+    sudo tee "$LOGROTATE_FILE" > /dev/null << EOF
+$INSTALL_DIR/rkllm_api.log {
     daily
     rotate 7
     compress

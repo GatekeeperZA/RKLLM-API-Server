@@ -1047,7 +1047,7 @@ The goal is **minimal user configuration** — a fresh install should work corre
 | Layer | How | Survives Container Recreate | Survives Volume Delete |
 |-------|-----|:---------------------------:|:----------------------:|
 | **Docker env vars** (`docker-compose.yml`) | `PersistentConfig` — env var sets the initial default, DB value takes precedence once changed in UI | Yes | Yes (re-applies) |
-| **Database scripts** (`tests/set_model_prompts.py`, `tests/fix_owui_config.py`) | Directly write to `webui.db` inside the container | Yes (data on Docker volume) | No (must re-run) |
+| **Database scripts** (`tests/set_model_prompts.py`, `tests/db_fix.py`) | Directly write to `webui.db` inside the container | Yes (data on Docker volume) | No (must re-run) |
 | **Admin UI only** | No env var or script — must configure manually | Yes (data on Docker volume) | No (must redo) |
 
 **Settings hardcoded via Docker env vars** (auto-restore on fresh install):
@@ -1070,7 +1070,7 @@ The goal is **minimal user configuration** — a fresh install should work corre
 | Script | What it sets |
 |--------|-------------|
 | `tests/set_model_prompts.py` | System prompt + full capability flags on all RKLLM models (web_search, memory, vision, etc.) |
-| `tests/fix_owui_config.py` | Sanitizes config table — detects and fixes empty/invalid JSON values that crash `Config.get()` |
+| `tests/db_fix.py` | Writes 14 settings directly to the config table — task model, compaction, query prompts, and more |
 
 **Settings only configurable via Admin UI** (no env var available, must redo manually after volume reset):
 
@@ -1089,8 +1089,8 @@ docker compose up -d
 # 2. Create admin account in browser, then run DB scripts:
 docker cp tests/set_model_prompts.py open-webui:/tmp/
 docker exec open-webui python3 /tmp/set_model_prompts.py
-docker cp tests/fix_owui_config.py open-webui:/tmp/
-docker exec open-webui python3 /tmp/fix_owui_config.py
+docker cp tests/db_fix.py open-webui:/tmp/
+docker exec open-webui python3 /tmp/db_fix.py
 
 # 3. Re-configure Admin UI-only settings manually (domain filters, model order, prompt suggestions)
 ```
@@ -1099,8 +1099,7 @@ docker exec open-webui python3 /tmp/fix_owui_config.py
 > If a value is written as a raw empty string `''` (not the JSON null `'null'`), every chat
 > request will crash with `JSONDecodeError: Expecting value: line 1 column 1 (char 0)` before
 > the model is even called. This happens when config keys are written via direct SQL without
-> proper JSON encoding. Always run `fix_owui_config.py` after any direct DB manipulation, and
-> use `'null'` (not `''`) for unset optional string config values.
+> proper JSON encoding. Always use `'null'` (not `''`) for unset optional string config values.
 
 ### Connection
 
@@ -1914,6 +1913,7 @@ python tests/vl_test.py stream       # Streaming tests only
 | `tests/e2e_test.py` | 78 | 78 | 0 | 0 | ~11 min |
 | `tests/deep_diagnostic.py` | 84 | 84 | 0 | 1 | ~7 min |
 | `tests/realworld_smoke.py` | 47 | 47 | 0 | 0 | ~4 min |
+| `tests/test_features.py` | 27 | 27 | 0 | 0 | ~4 min |
 
 ### Real-World Smoke Test (`tests/realworld_smoke.py`)
 
@@ -1974,6 +1974,32 @@ All suites default to `http://localhost:8000`. To target a remote server, set th
 ```bash
 RKLLM_API=http://192.168.x.x:8000 python tests/diagnostic_test.py
 ```
+
+### OpenWebUI Feature Test (`tests/test_features.py`)
+
+End-to-end feature verification suite for OpenWebUI + RKLLM — **27 checks across 8 sections**. Connects directly to the OpenWebUI API and verifies every major capability: settings correctness, memory (ChromaDB store/retrieve/isolation), RAG (file upload → chunking → embedding → retrieval), web search (SearXNG), tool calling, and multi-turn context continuity.
+
+```bash
+python tests/test_features.py                              # Run against default host
+python tests/test_features.py --host 192.168.2.180 --port 3000
+```
+
+| Section | Coverage |
+|---|---|
+| SETTINGS — task config | Task model, tag gen, follow-up gen, autocomplete, title gen, query gen prompts |
+| SETTINGS — context compaction | Compaction model set, health check |
+| MEMORY | Add memory via API, DB persistence, context injection, isolation when feature OFF |
+| RAG | File upload with sync processing, file ID assigned, sources returned, answer retrieved, answer absent without file |
+| WEB SEARCH | SearXNG correct answer, model answers from training without search |
+| TOOL CALLING | `finish_reason=tool_calls`, correct function name, arguments extracted |
+| CONTEXT CONTINUITY | Code remembered across turns |
+| LOGS | Health endpoint, all 5 models listed |
+
+> **Requires:** OpenWebUI running with API key auth enabled and `db_fix.py` + `set_model_prompts.py` applied.
+>
+> **Note on 503 errors in logs:** During a test run, OpenWebUI logs will show `HTTP 503 Another request is currently being processed` entries. These are **expected** — the retry logic in the test client deliberately re-sends requests when the NPU is busy. All retries resolve cleanly; no real errors occur.
+>
+> **RAG API format:** Files must be passed in the top-level `files` key of the request body, not nested inside `metadata.files`. OpenWebUI's `main.py` reads `body.get('files')` before reconstructing `body['metadata']`, so anything sent in `body.metadata.files` is silently discarded.
 
 ### OpenWebUI Integration Test (`tests/test_openwebui.py`)
 
@@ -2038,7 +2064,8 @@ RKLLM-API-Server/
 │   ├── benchmark_test.py           # NPU model benchmark tool (tok/s, TTFT, memory)
 │   ├── benchmark_results.json      # Latest benchmark results
 │   ├── set_model_prompts.py        # Set system prompts + capabilities on all RKLLM models (DB script)
-│   ├── fix_owui_config.py          # Sanitize config table — fix invalid JSON values (DB script)
+│   ├── db_fix.py                   # Write 14 OpenWebUI settings directly to SQLite (DB script)
+│   ├── test_features.py            # OpenWebUI feature test — 27 checks (memory, RAG, web search, tools)
 │   ├── test_capabilities.py        # Quick capability detection and thinking-control verification
 │   ├── vl_multi_image_test.py      # Multi-image VL model integration test
 │   └── vl_multiturn_test.py        # VL multi-turn context + RAG integration test
