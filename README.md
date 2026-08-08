@@ -1470,6 +1470,36 @@ print('Total:', len(d.get('results', [])), '| Engines:', dict(Counter(r.get('eng
 > requests.post(f"{BASE}/api/v1/models/model/update", headers=HEADERS, json=model)
 > ```
 
+**OpenWebUI Interface Settings for Single-NPU Hardware:**
+
+Every background generation task (tags, follow-up suggestions, autocomplete) fires an additional LLM call on the same NPU. On a single-NPU device, these cause 503 collisions and add latency after every chat. The `docker-compose.yml` hardens these as env vars that survive container recreates:
+
+| Setting | Value | Reason |
+|---|---|---|
+| `TASK_MODEL` | `qwen3-1.7b` | Fastest model handles all background tasks |
+| `ENABLE_TAGS_GENERATION` | `False` | Auto-labels chats — not worth an NPU call |
+| `ENABLE_FOLLOW_UP_GENERATION` | `False` | Suggests next questions — NPU waste |
+| `ENABLE_AUTOCOMPLETE_GENERATION` | `False` | Fires every keystroke — most expensive |
+| `ENABLE_TITLE_GENERATION` | `True` | Once per chat at natural pause — worth keeping |
+| `ENABLE_CONTEXT_COMPACTION` | `True` | Essential for phi-3-mini (4K context) |
+| `CONTEXT_COMPACTION_MODEL` | `qwen3-1.7b` | Prevent phi-3-mini summarising itself (4K window) |
+| `CONTEXT_COMPACTION_TOKEN_THRESHOLD` | `3000` | Fires before phi-3-mini's 4K limit |
+| `CONTEXT_COMPACTION_TOKEN_CAP` | `32000` | Matches largest model (Qwen3 4B) |
+| `CONTEXT_COMPACTION_RETENTION_PERCENTAGE` | `30` | Leaves room for summary + new messages |
+
+> **PersistentConfig gotcha:** OpenWebUI env vars only take effect on a **fresh volume** (`docker compose down -v`). Once a setting is saved via the admin UI, the database value takes precedence over the env var. After a fresh install the env vars apply automatically. For an existing install, settings must be updated via UI or via the DB fix script below.
+
+**DB fix script** (run after any in-place upgrade to re-apply settings without wiping data):
+```bash
+docker cp tests/db_fix.py open-webui:/tmp/db_fix.py
+docker exec open-webui python3 /tmp/db_fix.py
+```
+
+**Custom prompts hardcoded in `docker-compose.yml`:**
+
+- **`QUERY_GENERATION_PROMPT_TEMPLATE`** — The default (200+ words) causes small models to add commentary before the JSON, breaking query parsing. Replaced with a minimal version that reliably returns `{ "queries": [...] }`.
+- **`CONTEXT_COMPACTION_PROMPT_TEMPLATE`** — Default is good but omits technical detail preservation. Added one line: *"Preserve exact technical details: command syntax, file paths, IP addresses, model names, version numbers, error messages, and configuration values."* — critical for config/debugging sessions.
+
 ---
 
 ## Backup & Update

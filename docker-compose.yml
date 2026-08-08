@@ -147,6 +147,44 @@ services:
       - ENABLE_TITLE_GENERATION=True
 
       # -----------------------------------------------------------------
+      # Custom Prompts
+      # -----------------------------------------------------------------
+      # Query generation (shared for web search + RAG retrieval):
+      # Default prompt is 200+ words — small models add commentary before
+      # the JSON which breaks parsing. This stripped-down version is reliable.
+      - |
+        QUERY_GENERATION_PROMPT_TEMPLATE=Generate 1-3 web search queries to find information needed to answer the question.
+        Today: {{CURRENT_DATE}}
+        Return ONLY JSON, no other text: { "queries": ["query1", "query2"] }
+        If no search is needed: { "queries": [] }
+        <chat_history>
+        {{MESSAGES:END:6}}
+        </chat_history>
+
+      # Context compaction prompt: default is good but misses technical detail
+      # preservation — critical for config/debugging sessions on this hardware.
+      - |
+        CONTEXT_COMPACTION_PROMPT_TEMPLATE=### Task:
+        Summarize the conversation history that will be compacted out of the active chat context.
+
+        ### Instructions:
+        - Preserve key decisions, user preferences, and constraints.
+        - Preserve files, artifacts, tool results, and code changes that matter going forward.
+        - Preserve the current task state, unresolved questions, and next steps.
+        - Preserve exact technical details: command syntax, file paths, IP addresses, model names, version numbers, error messages, and configuration values.
+        - Be factual and specific. Do not invent details.
+        - Keep the summary concise, but complete enough for the assistant to continue without the removed messages.
+
+        ### Previous Summary:
+        {{PREVIOUS_SUMMARY}}
+
+        ### Messages Being Compacted:
+        {{COMPACTED_MESSAGES}}
+
+        ### Recent Messages Kept In Context:
+        {{RECENT_MESSAGES}}
+
+      # -----------------------------------------------------------------
       # Features
       # -----------------------------------------------------------------
       - ENABLE_CHANNELS=True
