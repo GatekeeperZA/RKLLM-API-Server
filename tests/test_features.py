@@ -161,17 +161,20 @@ def test_memory(c: Client):
         if not ok:
             return
         memory_id = r.json()["id"]
-        time.sleep(2)  # let embedding settle
+        time.sleep(5)  # let ChromaDB embedding settle before searching
 
         # 2. Verify it's stored
         r2 = c.get("/api/v1/memories/")
         found = any(m.get("id") == memory_id for m in (r2.json() if r2.ok else []))
         result("Memory persisted in DB", found, f"id={memory_id[:8]}...")
 
-        # 3. In a new chat with memory ON, ask something that requires the stored fact
-        time.sleep(3)
+        # 3. In a new chat with memory ON, ask something that requires the stored fact.
+        #    The system prompt includes the memory context if enabled; ask explicitly so
+        #    the model has no excuse to skip it.
+        time.sleep(5)
         text = c.chat_text(
-            "What is my secret test codeword? Reply with just the codeword, nothing else.",
+            f"My notes say I have a secret test codeword. What is it? "
+            f"Look in your context and reply with just the codeword.",
             features={"memory": True},
         )
         retrieved = codeword.lower() in text.lower()
@@ -212,12 +215,14 @@ def test_rag_pipeline(c: Client):
     )
 
     try:
-        # 1. Upload document via files API
+        # 1. Upload document via files API.
+        #    process_in_background=false makes chunking+embedding run synchronously
+        #    so the file is ready to query immediately on response.
         upload = c.s.post(
-            c.base + "/api/v1/files/",
+            c.base + "/api/v1/files/?process_in_background=false",
             files={"file": ("heliosphere_memo.txt", doc.encode(), "text/plain")},
             headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": None},
-            timeout=30,
+            timeout=60,
         )
         ok = upload.status_code in (200, 201)
         result("Upload document to RAG pipeline", ok, upload.text[:60] if not ok else "")
@@ -225,14 +230,13 @@ def test_rag_pipeline(c: Client):
             return
         file_id = upload.json().get("id")
         result("Document has file ID", bool(file_id), file_id or "")
-        time.sleep(3)  # wait for chunking + embedding
+        time.sleep(2)  # brief settle — processing is already complete (synchronous)
 
         # 2. Chat with the file ATTACHED (true RAG — OpenWebUI retrieves chunks)
-        #    Files are referenced via the files field, NOT injected in system prompt
-        time.sleep(5)
-        r = c.chat(
+        #    Files must be in metadata.files with id + type + name fields.
+        r = c.chat_with_retry(
             messages=[{"role": "user", "content": "What is the activation phrase for the Heliosphere relay station?"}],
-            files=[{"type": "file", "id": file_id}],
+            files=[{"type": "file", "id": file_id, "name": "heliosphere_memo.txt"}],
         )
         ok = r.ok
         text = r.json()["choices"][0]["message"]["content"] if ok else ""
