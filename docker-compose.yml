@@ -46,7 +46,7 @@ services:
       - RAG_SYSTEM_CONTEXT=True
       - RAG_TOP_K=5
       - RAG_TOP_K_RERANKER=3
-      - RAG_RELEVANCE_THRESHOLD=0.3
+      - RAG_RELEVANCE_THRESHOLD=0.0
       - ENABLE_RAG_HYBRID_SEARCH=True
       - ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=True
       - RAG_HYBRID_BM25_WEIGHT=0.1
@@ -111,6 +111,40 @@ services:
       # wastes time or produces wrong results. Disable both features.
       - ENABLE_CODE_EXECUTION=False
       - ENABLE_CODE_INTERPRETER=False
+
+      # -----------------------------------------------------------------
+      # Task Model — Qwen3 1.7B handles all background LLM tasks
+      # (title gen, tags, follow-up, compaction, query rewriting)
+      # -----------------------------------------------------------------
+      - TASK_MODEL=qwen3-1.7b
+
+      # -----------------------------------------------------------------
+      # Context Compaction
+      # -----------------------------------------------------------------
+      # Fires at 3000 tokens — protects phi-3-mini-4k (4K context limit).
+      # All other models benefit too; compaction runs on Qwen3 1.7B, not
+      # the chat model, so phi-3-mini can't try to summarize itself.
+      - ENABLE_CONTEXT_COMPACTION=True
+      - CONTEXT_COMPACTION_MODEL=qwen3-1.7b
+      - CONTEXT_COMPACTION_TOKEN_THRESHOLD=3000
+      - CONTEXT_COMPACTION_TOKEN_CAP=32000
+      - CONTEXT_COMPACTION_RETENTION_PERCENTAGE=30
+
+      # -----------------------------------------------------------------
+      # Background Generation Tasks — OFF
+      # Each fires a separate LLM call on the single NPU, adding latency
+      # and risking 503 collisions. None are useful enough to justify the cost.
+      # -----------------------------------------------------------------
+      # Tags: auto-labels every chat from content — not worth an NPU call
+      - ENABLE_TAGS_GENERATION=False
+      # Follow-up: suggests next questions after every response — NPU waste
+      - ENABLE_FOLLOW_UP_GENERATION=False
+      # Autocomplete: fires on every keystroke while typing — most expensive
+      - ENABLE_AUTOCOMPLETE_GENERATION=False
+
+      # Title generation stays ON: fires once per new chat, at a natural
+      # pause after the first response. Low cost, high UX value.
+      - ENABLE_TITLE_GENERATION=True
 
       # -----------------------------------------------------------------
       # Features
