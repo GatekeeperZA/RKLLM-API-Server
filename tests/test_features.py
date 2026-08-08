@@ -73,8 +73,10 @@ class Client:
         if features:
             body["features"] = features
         if files:
-            # Files for RAG go in metadata.files, not the top-level files field
-            body.setdefault("metadata", {})["files"] = files
+            # Files must be at the top-level body field, not nested in metadata.
+            # OpenWebUI's main.py reads metadata['files'] from form_data.get('files')
+            # before overwriting form_data['metadata']; metadata.files is lost.
+            body["files"] = files
         if tools:
             body["tools"] = tools
         return self.post("/api/chat/completions", json=body)
@@ -232,15 +234,17 @@ def test_rag_pipeline(c: Client):
         result("Document has file ID", bool(file_id), file_id or "")
         time.sleep(2)  # brief settle — processing is already complete (synchronous)
 
-        # 2. Chat with the file ATTACHED (true RAG — OpenWebUI retrieves chunks)
-        #    Files must be in metadata.files with id + type + name fields.
+        # 2. Chat with the file ATTACHED (full RAG pipeline: embed → retrieve → inject).
         r = c.chat_with_retry(
             messages=[{"role": "user", "content": "What is the activation phrase for the Heliosphere relay station?"}],
             files=[{"type": "file", "id": file_id, "name": "heliosphere_memo.txt"}],
         )
         ok = r.ok
-        text = r.json()["choices"][0]["message"]["content"] if ok else ""
+        rj = r.json() if ok else {}
+        text = rj.get("choices", [{}])[0].get("message", {}).get("content", "") if ok else ""
+        sources = rj.get("sources", [])
         retrieved = "cobalt-meridian-7" in text.lower() or "cobalt" in text.lower()
+        result("RAG: sources returned", ok and len(sources) > 0, f"{len(sources)} source(s)")
         result("RAG: answer retrieved from document chunks", retrieved,
                text.strip()[:100] if not retrieved else text.strip()[:80])
 
