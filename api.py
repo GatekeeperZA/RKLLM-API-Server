@@ -1821,7 +1821,11 @@ def force_clear_if_orphaned():
             logger.warning(f"Clearing orphaned request {ACTIVE_REQUEST['id']} "
                           f"- model mismatch ({ACTIVE_REQUEST['model']} vs "
                           f"{current_model_snap}) after {elapsed:.0f}s")
-        elif not loaded:
+        elif not loaded and current_model_snap is None:
+            # Only clear if CURRENT_MODEL is gone entirely (not mid-load).
+            # is_loaded can be transiently False while load_model holds
+            # PROCESS_LOCK during init — CURRENT_MODEL stays set until
+            # unload_current clears it, so this guards against false positives.
             logger.warning(f"Clearing orphaned request {ACTIVE_REQUEST['id']} "
                           f"- model not loaded")
         else:
