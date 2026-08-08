@@ -297,7 +297,7 @@ docker compose up -d
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RKLLM_MODELS_ROOT` | `/root/models` | Path to models directory inside the container |
-| `RKLLM_API_LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARNING`) |
+| `RKLLM_API_LOG_LEVEL` | `DEBUG` | Log verbosity (`DEBUG`, `INFO`, `WARNING`) |
 | `RKLLM_API_LOG_FILE` | *(stderr only in container)* | Set to a path to also write a log file |
 | `RKLLM_LIB_PATH` | auto-detected | Override path to `librkllmrt.so` |
 | `RKNN_LIB_PATH` | auto-detected | Override path to `librknnrt.so` (VL models) |
@@ -601,7 +601,6 @@ Any model with a `.rknn` vision encoder file automatically gains the `vl` capabi
 **Override with `model_config.json`:** Place a JSON file in the model folder to override any auto-detected value:
 
 ```json
-// ~/models/MyCustomModel/model_config.json
 {
   "context_length": 8192,
   "capabilities": ["thinking", "instruct"],
@@ -913,7 +912,7 @@ docker run -d \
   -e RAG_SYSTEM_CONTEXT=True \
   -e RAG_TOP_K=5 \
   -e RAG_TOP_K_RERANKER=3 \
-  -e RAG_RELEVANCE_THRESHOLD=0.3 \
+  -e RAG_RELEVANCE_THRESHOLD=0.0 \
   -e ENABLE_RAG_HYBRID_SEARCH=True \
   -e ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=True \
   -e RAG_HYBRID_BM25_WEIGHT=0.1 \
@@ -982,7 +981,7 @@ Answer the user'"'"'s question using ONLY the provided context. Be thorough and 
 | `RAG_HYBRID_BM25_WEIGHT` | `0.1` | 10% keyword / 90% semantic — heavily semantic-leaning since bge-small-en-v1.5 delivers strong retrieval. Higher values dilute precision |
 | `ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS` | `True` | Enriches BM25 index with document filenames, titles, and section headers — improves keyword recall for metadata-based queries |
 | `ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER` | `True` | Splits documents by Markdown headers (H1-H6) first, preserving document structure. The character splitter only runs as a secondary pass on oversized sections |
-| `RAG_RELEVANCE_THRESHOLD` | `0.3` | Filters chunks below 0.3 semantic similarity before LLM injection. The reranker further narrows quality from the passing chunks |
+| `RAG_RELEVANCE_THRESHOLD` | `0.0` | Threshold is disabled by default — the reranker handles quality filtering. Set to 0.3 to pre-filter chunks below 0.3 semantic similarity |
 | `CHUNK_SIZE` | `1000` | Maximum characters per chunk. Balanced for 4K context models — large enough for coherent passages, small enough to fit multiple chunks |
 | `CHUNK_OVERLAP` | `0` | Zero overlap — Chroma Research showed overlap actively hurts retrieval IoU by returning redundant tokens. With Hybrid Search, overlap is unnecessary |
 | `CHUNK_MIN_SIZE_TARGET` | `400` | Merges tiny fragments (<400 chars) with neighbors, preventing low-quality micro-chunks. Works with Markdown Header Splitter to reduce chunk count by up to 90% |
@@ -1898,7 +1897,7 @@ Four test suites verify every code path against a live server — from unit-leve
 
 ### Diagnostic Test (`tests/diagnostic_test.py`)
 
-Section-by-section diagnostic covering 17 areas of the codebase — **108 tests total**. Designed for copy-paste output analysis.
+Section-by-section diagnostic covering 17 areas of the codebase — **91 tests total**. Designed for copy-paste output analysis.
 
 ```bash
 python tests/diagnostic_test.py                # Run all 17 sections
@@ -1979,7 +1978,7 @@ python tests/e2e_test.py --fast          # Skip slow models (gemma, phi)
 
 ### Deep Diagnostic Test (`tests/deep_diagnostic.py`)
 
-Targeted deep-dive into 12 under-tested areas identified via gap analysis — **72 checks** covering protocol compliance, edge cases, and stress scenarios.
+Targeted deep-dive into 12 under-tested areas identified via gap analysis — **84 checks** covering protocol compliance, edge cases, and stress scenarios.
 
 ```bash
 python tests/deep_diagnostic.py                # Run all 12 sections
@@ -2110,12 +2109,13 @@ A collection of standalone scripts for managing and diagnosing the OpenWebUI ins
 | Script | What it does |
 |--------|-------------|
 | `check_owui_config.py` | Print current OpenWebUI config values via the API |
+| `check_owui_config2.py` | Updated version using current OWUI DB schema |
 | `check_owui_models.py` | List all models visible via `/api/models` |
 | `dump_owui_config.py` | Full JSON dump of the config table |
 | `dump_owui_connections.py` | Dump all API connection entries |
 | `dump_owui_models_quick.py` | Fast model listing with capability flags |
 | `dump_owui_settings.py` | Dump all OpenWebUI settings |
-| `dump_owui_apiconfigs.py` | Dump OpenAI-compatible API connection configs |
+| `dump_owui_apiconfigs2.py` | Dump OpenAI-compatible API connection configs (current schema) |
 | `diag_config.py` | Diagnostic dump highlighting unusual config values |
 | `fix_capabilities.py` | Fix/re-apply capability flags on RKLLM models via the API |
 | `fix_owui_models.py` | Fix stale model metadata in the DB |
@@ -2145,9 +2145,9 @@ RKLLM-API-Server/
 ├── README.md                       # This file
 ├── .github/workflows/docker.yml    # CI: builds and pushes ARM64 image to GHCR on main push
 ├── tests/
-│   ├── diagnostic_test.py          # Section-by-section diagnostic (17 sections, 108 tests)
-│   ├── e2e_test.py                 # End-to-end integration (9 sections, 85 checks, all models)
-│   ├── deep_diagnostic.py          # Deep diagnostic (12 sections, 72 checks, edge cases)
+│   ├── diagnostic_test.py          # Section-by-section diagnostic (17 sections, 91 tests)
+│   ├── e2e_test.py                 # End-to-end integration (9 sections, 78 checks, all models)
+│   ├── deep_diagnostic.py          # Deep diagnostic (12 sections, 84 checks, edge cases)
 │   ├── vl_test.py                  # Integration test suite (17 categories, 68 tests)
 │   ├── realworld_smoke.py           # Real-world smoke test (15 scenarios, 47 checks)
 │   ├── test_openwebui.py           # OpenWebUI end-to-end integration test (24 checks)
@@ -2161,7 +2161,8 @@ RKLLM-API-Server/
 │   ├── vl_multi_image_test.py      # Multi-image VL model integration test
 │   └── vl_multiturn_test.py        # VL multi-turn context + RAG integration test
 ├── owui_tools/                     # Standalone OpenWebUI admin utilities (see below)
-│   ├── check_owui_config.py        # Print current OpenWebUI config via API
+│   ├── check_owui_config.py        # Print current OpenWebUI config via API (legacy schema)
+│   ├── check_owui_config2.py       # Updated version using current OWUI DB schema
 │   ├── check_owui_models.py        # List models visible from OpenWebUI API
 │   ├── clear_model_filters.py      # Clear model filter settings
 │   ├── diag_config.py              # Diagnostic dump of all config keys
@@ -2169,7 +2170,8 @@ RKLLM-API-Server/
 │   ├── dump_owui_connections.py    # Dump model connection entries
 │   ├── dump_owui_models_quick.py   # Fast model list
 │   ├── dump_owui_settings.py       # Dump all settings
-│   ├── dump_owui_apiconfigs.py     # Dump API connection configs
+│   ├── dump_owui_apiconfigs.py     # Dump API connection configs (legacy schema)
+│   ├── dump_owui_apiconfigs2.py    # Updated version using current OWUI DB schema
 │   ├── enforce_free_models.py      # Set free-access flags on models
 │   ├── fix_capabilities.py         # Fix capability flags on RKLLM models via API
 │   ├── fix_owui_models.py          # Fix stale model metadata in DB

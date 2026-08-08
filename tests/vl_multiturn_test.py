@@ -22,6 +22,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 API = os.getenv("RKLLM_API", "http://localhost:8000")
+SSH_HOST = os.getenv("RKLLM_SSH_HOST", "orangepi")
+LOG_PATH = os.getenv("RKLLM_LOG_PATH", "/home/armbian/rkllm_api/rkllm_api.log")
 
 # Generate a small valid test image
 from PIL import Image
@@ -97,14 +99,14 @@ print(f"\n\nFull response ({len(full_text)} chars):\n{full_text}")
 time.sleep(1)
 print("\n--- Checking logs for VL multi-turn activation ---")
 result = subprocess.run(
-    ["ssh", "orangepi", "grep", "-c", "VL multi-turn", "/home/armbian/rkllm_api/rkllm_api.log"],
+    ["ssh", SSH_HOST, "grep", "-c", "VL multi-turn", LOG_PATH],
     capture_output=True, text=True,
 )
 count = result.stdout.strip()
 print(f"VL multi-turn log entries: {count}")
 
 result2 = subprocess.run(
-    ["ssh", "orangepi", "tail", "-20", "/home/armbian/rkllm_api/rkllm_api.log"],
+    ["ssh", SSH_HOST, "tail", "-20", LOG_PATH],
     capture_output=True, text=True,
 )
 print("\nRecent log lines:")

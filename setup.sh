@@ -199,7 +199,7 @@ fi
 
 if [[ -n "$DRIVER_VERSION" ]]; then
     success "RKNPU driver version: $DRIVER_VERSION"
-    if [[ "$DRIVER_VERSION" < "0.9.6" ]]; then
+    if ! printf '%s\n' "0.9.6" "$DRIVER_VERSION" | sort -V -C 2>/dev/null; then
         warn "Driver $DRIVER_VERSION is older than recommended (0.9.8)."
         warn "Consider using Pelochus Armbian builds which include 0.9.8:"
         warn "  https://github.com/Pelochus/armbian-build-rknpu-updates/releases"
@@ -627,6 +627,7 @@ WorkingDirectory=$INSTALL_DIR
 Environment="PATH=$VENV_DIR/bin:$RKLLM_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 Environment="RKLLM_LOG_LEVEL=$RKLLM_LOG_LEVEL"
 Environment="RKLLM_API_LOG_LEVEL=INFO"
+Environment="RKLLM_MODELS_ROOT=$MODELS_DIR"
 
 # Run with gunicorn (single worker — NPU loads one model at a time)
 # Reads workers/threads/timeout/bind from gunicorn.config.py via env vars below
@@ -655,6 +656,8 @@ ProtectHome=no
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=$INSTALL_DIR $MODELS_DIR /tmp
+SupplementaryGroups=render
+DeviceAllow=/dev/rknpu rw
 
 [Install]
 WantedBy=multi-user.target

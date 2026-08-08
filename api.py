@@ -1213,7 +1213,7 @@ class RKNNVisionEncoder:
             self.destroy()
             return False
 
-        for i in range(4):
+        for i in range(3):  # range(3): i+1 never reads past dims[3] (safe)
             if output_attr.dims[i] > 1:
                 self.model_image_token = output_attr.dims[i]
                 self.model_embed_size = output_attr.dims[i + 1]
@@ -1501,6 +1501,7 @@ class RKLLMWrapper:
             ctypes.byref(self.handle), ctypes.byref(param), _rkllm_callback
         )
         if ret != 0:
+            logger.error(f"rkllm_init failed (ret={ret}) for model '{param.model_path.decode()}'")
             self._model_loaded = False
             return False
         self._model_loaded = True
@@ -2371,7 +2372,7 @@ def build_prompt(messages, model_name):
                      f"rag_question='{rag_question[:80]}', "
                      f"user_question='{user_question[:80]}'")
 
-        max_ref_chars = int(ctx * 1.5) - len(user_question) - 200
+        max_ref_chars = int(ctx * CHARS_PER_TOKEN_ESTIMATE * 0.65) - len(user_question) - 200
         max_ref_chars = max(500, max_ref_chars)
 
         _rag_best_score = None
@@ -3238,8 +3239,9 @@ def unload_model():
                     "Cannot unload model while a request is in progress",
                     503, "service_unavailable")
 
-    if CURRENT_MODEL:
+    with PROCESS_LOCK:
         model = CURRENT_MODEL
+    if model:
         unload_current("explicit unload request")
         return jsonify({"status": "ok", "unloaded": model})
     return jsonify({"status": "ok", "message": "no model loaded"})
@@ -3398,8 +3400,9 @@ def chat_completions():
                                  "finish_reason": "stop"}]
                 }
                 if include_usage:
+                    _sc_tok = max(1, len(content) // CHARS_PER_TOKEN_ESTIMATE)
                     d["usage"] = {"prompt_tokens": 0,
-                                  "completion_tokens": 1, "total_tokens": 1}
+                                  "completion_tokens": _sc_tok, "total_tokens": _sc_tok}
                 yield f"data: {json.dumps(d)}\n\n"
                 yield "data: [DONE]\n\n"
             return Response(
@@ -3415,8 +3418,9 @@ def chat_completions():
             "system_fingerprint": SYSTEM_FINGERPRINT,
             "choices": [{"index": 0, "message": {"role": "assistant",
                          "content": content}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 1,
-                      "total_tokens": 1}
+            "usage": {"prompt_tokens": 0,
+                      "completion_tokens": max(1, len(content) // CHARS_PER_TOKEN_ESTIMATE),
+                      "total_tokens": max(1, len(content) // CHARS_PER_TOKEN_ESTIMATE)}
         })
 
     # ---- Detect Open WebUI meta-task type from last user message ----
@@ -4287,6 +4291,7 @@ def _generate_stream(prompt, request_id, model_name, created,
         logger.warning(f"[{request_id}] Client DISCONNECTED / stopped")
         if _active_wrapper:
             _active_wrapper.abort()
+        _reset_kv_tracking()
     except Exception as e:
         logger.error(f"[{request_id}] Stream error: {e}", exc_info=True)
         # Abort worker first so it stops pushing tokens before we try to

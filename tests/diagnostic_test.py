@@ -1290,7 +1290,7 @@ def main():
     # Version detection hint
     print("  DEPLOY CHECK:")
     print("    If Section 4 'Bad base64 image => 400' shows FAIL (got 200),")
-    print("    the Orange Pi is running OLD code. Deploy commit d3537a1.")
+    print("    the Orange Pi is running OLD code. Re-deploy api.py.")
     print("    If Section 14 VL model name shows 'qwen3-1.7b' instead of")
     print("    the VL model name, same issue — old code.")
     print()

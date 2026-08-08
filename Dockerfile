@@ -43,7 +43,7 @@ ENV RKLLM_LOG_LEVEL=1 \
     GUNICORN_THREADS=4 \
     GUNICORN_TIMEOUT=300
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
     CMD python /app/healthcheck.py
 
 CMD ["gunicorn", "--config", "gunicorn.config.py", "api:app"]
