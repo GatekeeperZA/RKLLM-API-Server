@@ -3464,6 +3464,32 @@ def chat_completions():
         _real_q = _all_user[-1].strip() if _all_user else 'general query'
         _prev_asst = _all_asst[-1].strip() if _all_asst else ''
 
+        # --- 1b. Strip conversational openers for cleaner search queries ---
+        # "Tell me a random fun fact about X" → "facts about X"
+        # Prevents Bing/engines from interpreting casual words as query intent.
+        _conv_prefix = re.compile(
+            r'^(?:(?:can\s+you\s+|please\s+)?'
+            r'(?:tell\s+me|explain|describe|give\s+me|show\s+me|'
+            r'what\s+(?:is|are|was|were)|who\s+(?:is|was)|'
+            r'where\s+(?:is|are)|when\s+(?:is|did|was)|'
+            r'how\s+(?:does|do|did)|why\s+(?:does|do|did)|'
+            r'i\s+want\s+to\s+know|find)\s+(?:(?:a|an|the|me|us)\s+)*)',
+            re.IGNORECASE
+        )
+        _filler = re.compile(
+            r'\b(?:random|interesting|cool|awesome|amazing|quick|brief|simple)\s+',
+            re.IGNORECASE
+        )
+        # Normalise "fun fact(s)" → "facts" so "fun" isn't parsed as a topic
+        _fun_fact = re.compile(r'\bfun\s+facts?\b', re.IGNORECASE)
+        _cleaned = _conv_prefix.sub('', _real_q).strip()
+        _cleaned = _filler.sub('', _cleaned).strip()
+        _cleaned = _fun_fact.sub('facts', _cleaned).strip()
+        if len(_cleaned) >= 5:
+            if _cleaned != _real_q:
+                logger.debug(f"Query cleaned: '{_real_q}' → '{_cleaned}'")
+            _real_q = _cleaned
+
         # --- 2. Context-enrich short/vague follow-up questions ---
         # A question is considered "vague" when it's short and uses
         # pronouns / demonstratives instead of naming things directly.
