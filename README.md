@@ -939,10 +939,11 @@ Answer the user'"'"'s question using ONLY the provided context. Be thorough and 
 {{QUERY}}
 </user_query>' \
   -e ENABLE_WEB_SEARCH=True \
+  -e ENABLE_WEB_SEARCH_DEFAULT=False \
   -e WEB_SEARCH_ENGINE=searxng \
   -e SEARXNG_QUERY_URL=http://host.docker.internal:8080/search?q=<query> \
   -e WEB_SEARCH_RESULT_COUNT=5 \
-  -e WEB_SEARCH_CONCURRENT_REQUESTS=3 \
+  -e WEB_SEARCH_CONCURRENT_REQUESTS=1 \
   -e BYPASS_WEB_SEARCH_WEB_LOADER=True \
   -e BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=True \
   -e FILE_IMAGE_COMPRESSION_WIDTH=672 \
@@ -997,7 +998,8 @@ Answer the user'"'"'s question using ONLY the provided context. Be thorough and 
 | `WEB_SEARCH_ENGINE` | `searxng` | Uses the self-hosted SearXNG instance for privacy and JSON API support |
 | `SEARXNG_QUERY_URL` | `http://host.docker.internal:8080/search?q=<query>` | SearXNG instance URL. Uses `host.docker.internal` to reach the host-side SearXNG container. Change if your SearXNG is on a different host or port |
 | `WEB_SEARCH_RESULT_COUNT` | `5` | Number of search results to fetch. 5 gives good coverage — the API server's quality-floor filtering drops irrelevant results automatically |
-| `WEB_SEARCH_CONCURRENT_REQUESTS` | `3` | Limits concurrent web search requests to 3 — prevents overwhelming SearXNG while keeping searches fast |
+| `WEB_SEARCH_CONCURRENT_REQUESTS` | `1` | One search request at a time — prevents hammering engines simultaneously, which triggers rate limits and CAPTCHAs |
+| `ENABLE_WEB_SEARCH_DEFAULT` | `False` | Globe toggle is off by default — users enable it per-query when they need live data. Reduces engine query volume by ~80% |
 | `BYPASS_WEB_SEARCH_WEB_LOADER` | `True` | Uses search engine snippets instead of scraping full pages — cleaner, faster, and more reliable for small models |
 | `BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL` | `True` | Sends search snippets directly to the model without embedding/retrieving — the API server builds its own optimized prompt internally |
 
@@ -1368,24 +1370,26 @@ The API server automatically detects Home Assistant requests and:
 
 ## SearXNG Configuration
 
-The included `settings.yml` is optimized for Open WebUI on ARM hardware. It uses only reliable, bot-friendly engines.
+The included `settings.yml` is optimized for Open WebUI on ARM hardware with a home/residential IP. Engine selection matters significantly — several widely-recommended engines are now broken or will block automated queries within minutes.
 
-> **Important:** Many SearXNG engines (including Bing and mwmbl) are `disabled: true` in SearXNG's bundled default settings. Using `use_default_settings: keep_only` inherits those disabled flags unless you explicitly override them with `disabled: false`. Without this, only DuckDuckGo will return results in combined queries — Bing and mwmbl silently stay off even though they appear in the `keep_only` list.
+> **Important:** Many SearXNG engines are `disabled: true` in SearXNG's bundled defaults. Using `use_default_settings: keep_only` inherits those flags unless you explicitly override them with `disabled: false`. Without this, engines silently stay off even though they appear in the `keep_only` list.
 
 ```yaml
 use_default_settings:
   engines:
     keep_only:
-      - duckduckgo
-      - bing
+      - mojeek
+      - brave
+      - qwant
       - mwmbl
       - wikipedia
+      - duckduckgo
 
 server:
   secret_key: "change-me-to-a-random-string"
   limiter: false
   image_proxy: false
-  request_timeout: 8
+  request_timeout: 10
 
 search:
   formats: [html, json]    # json REQUIRED for Open WebUI API access
@@ -1394,49 +1398,69 @@ search:
   autocomplete: ""
 
 outgoing:
-  request_timeout: 6.0
-  max_request_timeout: 10.0
-  pool_connections: 50
-  pool_maxsize: 15
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  pool_connections: 100
+  pool_maxsize: 20
+  retries: 2
+  keepalive_expiry: 5.0
 
 redis:
   url: redis://redis:6379/0
 
 engines:
-  - name: duckduckgo
+  - name: mojeek
     weight: 1.5
-    shortcut: ddg
-    disabled: false          # Must be explicit — inherited default is false, but set it anyway
+    shortcut: mj
+    disabled: false           # Own independent index — lowest block rate of any engine
     categories: [general, web]
-  - name: bing
+  - name: brave
     weight: 1.4
-    shortcut: bi
-    disabled: false          # Bing is disabled: true in SearXNG defaults — must override
+    shortcut: brave
+    disabled: false           # Own index — good quality, moderate rate limits
+    categories: [general, web]
+  - name: qwant
+    weight: 1.3
+    shortcut: qw
+    disabled: false           # French search engine — generally stable
     categories: [general, web]
   - name: mwmbl
-    weight: 1.3
+    weight: 1.0
     shortcut: mw
-    disabled: false          # mwmbl is disabled: true in SearXNG defaults — must override
+    disabled: false           # Non-profit, bot-friendly, never blocks
     categories: [general, web]
   - name: wikipedia
     weight: 1.2
     shortcut: wp
-    disabled: false
+    disabled: false           # Always reliable, no rate limiting
     categories: [general]
+  - name: duckduckgo
+    weight: 1.0
+    shortcut: ddg
+    disabled: true            # Gets CAPTCHAed quickly on automated queries — re-enable
+    categories: [general, web] # manually after 24-48h of no traffic if desired
 ```
 
-**Why these engines:**
+**Engine reliability reference:**
 
-| Engine | Reliability | Notes |
-|--------|-------------|-------|
-| DuckDuckGo | ✅ Good | Fast, low rate limiting, consistently available |
-| Bing | ✅ Good | Adds coverage — catches results DDG misses |
-| mwmbl | ✅ Good | Non-profit, bot-friendly, good long-tail coverage |
-| Wikipedia | ✅ Excellent | Always works, no rate limiting |
-| Brave | ❌ Avoid | Suspends for 180s on repeated queries (`suspended_time=180`) |
-| Startpage | ❌ Avoid | Redirects to CAPTCHA, suspended for 3600s |
-| Google | ❌ Avoid | Times out without a proxy; blocks headless requests |
-| Qwant | ❌ Avoid | CAPTCHA on any repeated use |
+| Engine | Status | Notes |
+|--------|--------|-------|
+| **Mojeek** | ✅ Best | Own crawl index, lowest block rate, best long-term choice |
+| **Brave** | ✅ Good | Own index, suspends for ~3 min under heavy load, recovers quickly |
+| **Qwant** | ✅ Good | Generally stable, occasional CAPTCHA under burst load |
+| **mwmbl** | ✅ Reliable | Non-profit index, never blocks, smaller coverage |
+| **Wikipedia** | ✅ Always | No rate limiting, excellent for factual queries |
+| DuckDuckGo | ⚠️ Fragile | CAPTCHAed within hours of automated use — keep disabled |
+| **Bing** | ❌ Broken | Scraper API **retired August 11, 2025** — returns garbage results, do not use |
+| Startpage | ❌ Broken | Proxies Google, CAPTCHAed immediately, 1h suspension |
+| Google | ❌ Broken | Blocks headless requests, times out |
+| Yahoo | ❌ Broken | Unreliable for automated queries |
+
+> **Search query quality:** The API server's shortcircuit automatically strips conversational openers from web search queries. "Tell me a random fun fact about South Africa" becomes "facts about South Africa" before it reaches SearXNG, preventing engines from misinterpreting casual words ("fun") as topic keywords.
+
+**OpenWebUI setting to prevent engine hammering:**
+
+Set `WEB_SEARCH_CONCURRENT_REQUESTS=1` in your OpenWebUI environment (docker-compose or systemd). The default of 3 fires parallel queries at all engines simultaneously and triggers rate limits quickly. Also consider setting web search **off by default** in OpenWebUI settings (Admin > Settings > Web Search) so users only enable it when they genuinely need live data — this reduces query volume by ~80%.
 
 **Installation:**
 ```bash
@@ -1444,15 +1468,16 @@ cp settings.yml ~/Downloads/searxng-docker/searxng/settings.yml
 cd ~/Downloads/searxng-docker
 docker compose down && docker compose up -d
 
-# Verify all 4 engines are enabled (bing and mwmbl must show enabled: true):
+# Verify engines are active:
 curl -s http://localhost:8080/config | python3 -c "
 import sys, json
 for e in json.load(sys.stdin).get('engines', []):
-    print(e['name'], '- enabled:', e.get('enabled'), '- cats:', e.get('categories'))
+    if e.get('enabled'):
+        print(e['name'], '- cats:', e.get('categories'))
 "
 
-# Test combined search (should return results from multiple engines):
-curl -s 'http://localhost:8080/search?q=python+programming&format=json' | python3 -c "
+# Test search quality (should return relevant results from multiple engines):
+curl -s 'http://localhost:8080/search?q=facts+about+South+Africa&format=json' | python3 -c "
 import sys, json; d = json.load(sys.stdin)
 from collections import Counter
 print('Total:', len(d.get('results', [])), '| Engines:', dict(Counter(r.get('engine') for r in d.get('results', []))))
