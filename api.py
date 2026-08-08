@@ -1414,11 +1414,11 @@ class RKLLMWrapper:
         self.lib.rkllm_abort.argtypes = [ctypes.c_void_p]
         self.lib.rkllm_abort.restype = ctypes.c_int
 
-        # rkllm_clear_kv_cache(handle, keep_system_prompt, start_pos*, end_pos*) -> int
+        # rkllm_clear_kv_cache(handle, keep_system_prompt) -> int
+        # Public SDK signature is 2-arg; start_pos*/end_pos* are internal-only.
         try:
             self.lib.rkllm_clear_kv_cache.argtypes = [
                 ctypes.c_void_p, ctypes.c_int,
-                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
             ]
             self.lib.rkllm_clear_kv_cache.restype = ctypes.c_int
         except AttributeError:
@@ -1635,7 +1635,7 @@ class RKLLMWrapper:
             return
         try:
             ret = self.lib.rkllm_clear_kv_cache(
-                self.handle, ctypes.c_int(0), None, None
+                self.handle, ctypes.c_int(0)
             )
             if ret != 0:
                 logger.warning(f"rkllm_clear_kv_cache returned error code {ret}")
