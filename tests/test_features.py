@@ -14,6 +14,7 @@ time so tests run sequentially with short pauses between them.
 
 import argparse
 import json
+import os
 import sys
 import time
 import uuid
@@ -25,9 +26,9 @@ import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-DEFAULT_HOST = "192.168.2.180"
-DEFAULT_PORT = 3000
-API_KEY = "sk-owui-eae7cdfc8d566d50a2b9ac6f5e22d0913c01d057ec8a991e"
+DEFAULT_HOST = os.environ.get("OWUI_HOST", "192.168.2.180")
+DEFAULT_PORT = int(os.environ.get("OWUI_PORT", "3000"))
+API_KEY = os.environ.get("OWUI_API_KEY", "sk-owui-eae7cdfc8d566d50a2b9ac6f5e22d0913c01d057ec8a991e")
 MODEL = "qwen3-1.7b"
 TASK_MODEL = "qwen3-1.7b"
 

@@ -55,7 +55,8 @@ PROMPTS = {
 }
 
 # Chars per token estimate (for tok/s from client side when server doesn't return it)
-CHARS_PER_TOKEN = 3.5
+# Must match CHARS_PER_TOKEN_ESTIMATE in api.py (currently 4)
+CHARS_PER_TOKEN = 4
 
 
 # =============================================================================

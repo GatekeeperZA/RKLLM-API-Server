@@ -406,9 +406,10 @@ source "$VENV_DIR/bin/activate"
 pip install --upgrade pip --quiet
 pip install flask flask-cors gunicorn --quiet
 pip install numpy Pillow --quiet  # VL (vision-language) dependencies
+pip install prometheus-flask-exporter prometheus-client --quiet  # optional /metrics endpoint
 
 success "Python dependencies installed:"
-pip list --format=columns | grep -iE "flask|gunicorn|numpy|pillow" | while read -r line; do
+pip list --format=columns | grep -iE "flask|gunicorn|numpy|pillow|prometheus" | while read -r line; do
     echo "    $line"
 done
 
@@ -441,6 +442,7 @@ else
     echo "    cd ~/models/Qwen3-1.7B"
     echo "    git lfs install"
     echo "    git clone https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3 ."
+    echo "    git lfs pull   # download the actual .rkllm binary (git lfs install --skip-smudge skips it)"
     echo ""
 fi
 
@@ -540,7 +542,7 @@ LOGROTATE_FILE="/etc/logrotate.d/rkllm-api"
 if [[ ! -f "$LOGROTATE_FILE" ]]; then
     info "Installing logrotate config for RKLLM API..."
     sudo tee "$LOGROTATE_FILE" > /dev/null << EOF
-$INSTALL_DIR/rkllm_api.log {
+$INSTALL_DIR/api.log {
     daily
     rotate 7
     compress
@@ -627,15 +629,16 @@ Environment="RKLLM_LOG_LEVEL=$RKLLM_LOG_LEVEL"
 Environment="RKLLM_API_LOG_LEVEL=INFO"
 
 # Run with gunicorn (single worker — NPU loads one model at a time)
+# Reads workers/threads/timeout/bind from gunicorn.config.py via env vars below
 ExecStart=$VENV_DIR/bin/gunicorn \\
-    -w 1 \\
-    -k gthread \\
-    --threads 4 \\
-    --timeout $GUNICORN_TIMEOUT \\
-    -b ${BIND_ADDRESS}:${BIND_PORT} \\
-    --access-logfile - \\
-    --error-logfile - \\
+    --config $INSTALL_DIR/gunicorn.config.py \\
     api:app
+
+# Gunicorn tuning — consumed by gunicorn.config.py
+Environment="GUNICORN_WORKERS=1"
+Environment="GUNICORN_THREADS=4"
+Environment="GUNICORN_TIMEOUT=$GUNICORN_TIMEOUT"
+Environment="GUNICORN_BIND=${BIND_ADDRESS}:${BIND_PORT}"
 
 # Restart policy
 Restart=on-failure
@@ -742,6 +745,7 @@ echo "  │     mkdir -p ~/models/Qwen3-1.7B                       │"
 echo "  │     cd ~/models/Qwen3-1.7B                             │"
 echo "  │     git clone https://huggingface.co/GatekeeperZA/\\    │"
 echo "  │       Qwen3-1.7B-RKLLM-v1.2.3 .                       │"
+echo "  │     git lfs pull  # fetch the actual .rkllm binary     │"
 echo "  │                                                         │"
 echo "  │  2. Start the server:                                   │"
 echo "  │     sudo systemctl start $SERVICE_NAME                     │"

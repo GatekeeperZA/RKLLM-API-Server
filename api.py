@@ -1263,15 +1263,19 @@ class RKNNVisionEncoder:
         if self.n_output == 1:
             ctypes.memmove(result.ctypes.data, outputs[0].buf, outputs[0].size)
         else:
+            # Interleave outputs from multiple encoder heads into the result buffer.
+            # outputs[j].buf is a raw void* pointing into RKNN-owned memory; use
+            # ctypes.cast to an integer (c_void_p) for pointer arithmetic instead of
+            # dereferencing via .contents (which copies the value, not the address).
             for i in range(self.model_image_token):
                 for j in range(self.n_output):
-                    offset = (i * self.n_output * self.model_embed_size +
-                              j * self.model_embed_size)
-                    src = ctypes.cast(outputs[j].buf, ctypes.POINTER(ctypes.c_float))
-                    src_offset = i * self.model_embed_size
+                    dst_offset = (i * self.n_output * self.model_embed_size +
+                                  j * self.model_embed_size)
+                    src_base = ctypes.cast(outputs[j].buf, ctypes.c_void_p).value
+                    src_ptr = src_base + i * self.model_embed_size * 4
                     ctypes.memmove(
-                        ctypes.cast(result.ctypes.data + offset * 4, ctypes.c_void_p),
-                        ctypes.cast(ctypes.addressof(src.contents) + src_offset * 4, ctypes.c_void_p),
+                        result.ctypes.data + dst_offset * 4,
+                        src_ptr,
                         self.model_embed_size * 4,
                     )
 

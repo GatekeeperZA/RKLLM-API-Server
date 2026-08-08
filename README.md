@@ -1071,6 +1071,7 @@ The goal is **minimal user configuration** — a fresh install should work corre
 |--------|-------------|
 | `tests/set_model_prompts.py` | System prompt + full capability flags on all RKLLM models (web_search, memory, vision, etc.) |
 | `tests/db_fix.py` | Writes 14 settings directly to the config table — task model, compaction, query prompts, and more |
+| `tests/fix_owui_config.py` | Audits the config table for invalid JSON values (empty strings, raw nulls) that crash `Config.get()` — run this if the UI breaks after any direct DB manipulation |
 
 **Settings only configurable via Admin UI** (no env var available, must redo manually after volume reset):
 
@@ -1091,6 +1092,10 @@ docker cp tests/set_model_prompts.py open-webui:/tmp/
 docker exec open-webui python3 /tmp/set_model_prompts.py
 docker cp tests/db_fix.py open-webui:/tmp/
 docker exec open-webui python3 /tmp/db_fix.py
+
+# Optional: sanitize any invalid JSON left by manual DB edits
+docker cp tests/fix_owui_config.py open-webui:/tmp/
+docker exec open-webui python3 /tmp/fix_owui_config.py
 
 # 3. Re-configure Admin UI-only settings manually (domain filters, model order, prompt suggestions)
 ```
@@ -2039,6 +2044,64 @@ python tests/benchmark_test.py --remote-log                         # Fetch NPU 
 
 Results are saved to `tests/benchmark_results.json` and printed as formatted markdown tables.
 
+### DB Maintenance Scripts (`tests/`)
+
+Three scripts write directly to the OpenWebUI SQLite database inside the container. Run them after initial setup and after any volume reset:
+
+| Script | Purpose | When to run |
+|--------|---------|-------------|
+| `tests/set_model_prompts.py` | Sets system prompt + capability flags (`web_search`, `memory`, `file_context`, `function_calling=legacy`, `vision`) on all 5 RKLLM models | After setup or volume reset |
+| `tests/db_fix.py` | Writes 14 config keys (task model, context compaction settings, query-gen prompts, memory enable) | After setup or volume reset |
+| `tests/fix_owui_config.py` | Audits all config rows for invalid JSON values (empty strings that crash `Config.get()`). Safe to run any time; dry-run with `--dry-run` | After any direct DB manipulation |
+
+```bash
+# Run all three inside the container:
+docker cp tests/set_model_prompts.py open-webui:/tmp/ && docker exec open-webui python3 /tmp/set_model_prompts.py
+docker cp tests/db_fix.py open-webui:/tmp/ && docker exec open-webui python3 /tmp/db_fix.py
+docker cp tests/fix_owui_config.py open-webui:/tmp/ && docker exec open-webui python3 /tmp/fix_owui_config.py
+```
+
+### Test Environment Variables
+
+All test files respect environment variables for connection config:
+
+| Variable | Used By | Default |
+|----------|---------|---------|
+| `RKLLM_API` | `realworld_smoke.py`, `e2e_test.py`, `diagnostic_test.py` | `http://localhost:8000` |
+| `RKLLM_HOST` | `realworld_smoke.py` | `192.168.2.180` |
+| `RKLLM_PORT` | `realworld_smoke.py` | `8000` |
+| `OWUI_HOST` | `test_features.py`, `test_openwebui.py` | `192.168.2.180` |
+| `OWUI_PORT` | `test_features.py`, `test_openwebui.py` | `3000` |
+| `OWUI_API_KEY` | `test_features.py`, `test_openwebui.py` | (dev key — set this on any other install) |
+
+---
+
+## OpenWebUI Admin Utilities (`owui_tools/`)
+
+A collection of standalone scripts for managing and diagnosing the OpenWebUI instance. These operate via the OpenWebUI API or direct DB access. They are not part of the automated test suite.
+
+| Script | What it does |
+|--------|-------------|
+| `check_owui_config.py` | Print current OpenWebUI config values via the API |
+| `check_owui_models.py` | List all models visible via `/api/models` |
+| `dump_owui_config.py` | Full JSON dump of the config table |
+| `dump_owui_connections.py` | Dump all API connection entries |
+| `dump_owui_models_quick.py` | Fast model listing with capability flags |
+| `dump_owui_settings.py` | Dump all OpenWebUI settings |
+| `dump_owui_apiconfigs.py` | Dump OpenAI-compatible API connection configs |
+| `diag_config.py` | Diagnostic dump highlighting unusual config values |
+| `fix_capabilities.py` | Fix/re-apply capability flags on RKLLM models via the API |
+| `fix_owui_models.py` | Fix stale model metadata in the DB |
+| `clear_model_filters.py` | Clear model filter settings |
+| `enforce_free_models.py` / `set_owui_free_models.py` | Set free-access flags on all models |
+| `set_owui_model_filters.py` | Configure model filter allowlist/blocklist |
+| `owui_set_compression.py` | Set image compression width/height (matched to VL model input size) |
+| `remove_openrouter.py` | Remove any OpenRouter connection entries |
+| `remove_stale_models.py` | Remove stale model entries left by a previous RKLLM API instance |
+| `enforce-owui-models.sh` / `test_providers.sh` | Shell wrappers for bulk enforcement and provider connectivity testing |
+
+> **Note:** `owui_tools/set_model_prompts.py` is an older copy of `tests/set_model_prompts.py`. Use the `tests/` version — it is kept up to date.
+
 ---
 
 ## File Structure
@@ -2066,9 +2129,31 @@ RKLLM-API-Server/
 │   ├── set_model_prompts.py        # Set system prompts + capabilities on all RKLLM models (DB script)
 │   ├── db_fix.py                   # Write 14 OpenWebUI settings directly to SQLite (DB script)
 │   ├── test_features.py            # OpenWebUI feature test — 27 checks (memory, RAG, web search, tools)
+│   ├── fix_owui_config.py          # Audit/fix invalid JSON in config table (run after direct DB edits)
 │   ├── test_capabilities.py        # Quick capability detection and thinking-control verification
 │   ├── vl_multi_image_test.py      # Multi-image VL model integration test
 │   └── vl_multiturn_test.py        # VL multi-turn context + RAG integration test
+├── owui_tools/                     # Standalone OpenWebUI admin utilities (see below)
+│   ├── check_owui_config.py        # Print current OpenWebUI config via API
+│   ├── check_owui_models.py        # List models visible from OpenWebUI API
+│   ├── clear_model_filters.py      # Clear model filter settings
+│   ├── diag_config.py              # Diagnostic dump of all config keys
+│   ├── dump_owui_config.py         # Dump full config JSON
+│   ├── dump_owui_connections.py    # Dump model connection entries
+│   ├── dump_owui_models_quick.py   # Fast model list
+│   ├── dump_owui_settings.py       # Dump all settings
+│   ├── dump_owui_apiconfigs.py     # Dump API connection configs
+│   ├── enforce_free_models.py      # Set free-access flags on models
+│   ├── fix_capabilities.py         # Fix capability flags on RKLLM models via API
+│   ├── fix_owui_models.py          # Fix stale model metadata in DB
+│   ├── owui_set_compression.py     # Set image compression dimensions
+│   ├── remove_openrouter.py        # Remove OpenRouter connection entries
+│   ├── remove_stale_models.py      # Remove stale model entries
+│   ├── set_model_prompts.py        # (older copy — use tests/set_model_prompts.py instead)
+│   ├── set_owui_free_models.py     # Set free-access flags
+│   ├── set_owui_model_filters.py   # Configure model filter settings
+│   ├── enforce-owui-models.sh      # Shell wrapper to enforce model config
+│   └── test_providers.sh           # Test provider connectivity
 ├── archive/
 │   ├── api_v1_subprocess.py        # Original subprocess version (archived)
 │   └── CTYPES_MIGRATION_PLAN.md    # V1→V2 migration planning document

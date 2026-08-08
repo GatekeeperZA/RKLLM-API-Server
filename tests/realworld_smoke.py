@@ -23,14 +23,18 @@ Tests:
  15. Error handling (bad model, empty messages)
 
 Usage:
-    python tests/realworld_smoke.py
+    python tests/realworld_smoke.py [--host 192.168.2.180] [--port 8000]
 """
-import json, os, re, sys, time, threading, urllib.request, urllib.error
+import argparse, json, os, re, sys, time, threading, urllib.request, urllib.error
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-API = os.environ.get("RKLLM_API", "http://192.168.2.180:8000")
+_ap = argparse.ArgumentParser(description="RKLLM real-world smoke tests")
+_ap.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.168.2.180"))
+_ap.add_argument("--port", type=int, default=int(os.environ.get("RKLLM_PORT", "8000")))
+_args = _ap.parse_args()
+API = os.environ.get("RKLLM_API", f"http://{_args.host}:{_args.port}")
 PASS = 0
 FAIL = 0
 TIMEOUT = 180
