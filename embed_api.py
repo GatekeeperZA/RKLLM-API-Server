@@ -301,6 +301,28 @@ _embed_callback_fn  = callback_type(_embed_callback)
 _rerank_callback_fn = callback_type(_rerank_callback)
 
 # ---------------------------------------------------------------------------
+# Library function signatures — required for correct argument marshaling on ARM
+# Without argtypes, ctypes may pass structs by reference incorrectly on AArch64.
+# ---------------------------------------------------------------------------
+_lib.rkllm_init.argtypes = [
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(RKLLMParam),
+    callback_type,
+]
+_lib.rkllm_init.restype = ctypes.c_int
+
+_lib.rkllm_run.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(RKLLMInput),
+    ctypes.POINTER(RKLLMInferParam),
+    ctypes.c_void_p,
+]
+_lib.rkllm_run.restype = ctypes.c_int
+
+_lib.rkllm_destroy.argtypes = [ctypes.c_void_p]
+_lib.rkllm_destroy.restype = ctypes.c_int
+
+# ---------------------------------------------------------------------------
 # Model wrapper
 # ---------------------------------------------------------------------------
 class _ModelWrapper:
