@@ -73,6 +73,13 @@ SETTINGS = {
     "chat.context_compaction.retention_percentage": 30,
     # Custom compaction prompt — adds technical detail preservation
     "chat.context_compaction.prompt_template":      json.dumps(COMPACTION_PROMPT),
+    # Embedding backend — use local NPU service on port 8001 (embed_api.py)
+    # Set engine to "openai" so OWUI posts to our OpenAI-compatible /v1/embeddings
+    "rag.embedding.engine":                         json.dumps("openai"),
+    "rag.embedding.openai.url":                     json.dumps("http://192.168.2.180:8001/v1"),
+    "rag.embedding.openai.key":                     json.dumps("na"),
+    "rag.embedding.model":                          json.dumps("Qwen3-Embedding-0.6B"),
+    "rag.embedding.batch_size":                     8,
 }
 
 

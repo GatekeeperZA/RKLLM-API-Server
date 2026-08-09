@@ -675,6 +675,60 @@ echo "  Status:        sudo systemctl status $SERVICE_NAME"
 echo "  Logs:          journalctl -u $SERVICE_NAME -f"
 echo "  Disable:       sudo systemctl disable $SERVICE_NAME"
 
+# --- Embedding & Reranker service (port 8001) ---
+EMBED_SERVICE_NAME="rkllm-embed"
+EMBED_SERVICE_FILE="/etc/systemd/system/${EMBED_SERVICE_NAME}.service"
+EMBED_MODEL_FILE="${MODELS_DIR}/Qwen3-Embedding-0.6B/Qwen3-Embedding-0.6B-rk3588-w8a8-opt-1-hybrid-ratio-0.5.rkllm"
+RERANK_MODEL_FILE="${MODELS_DIR}/Qwen3-Reranker-0.6B/Qwen3-Reranker-0.6B-rk3588-w8a8-opt-1-hybrid-ratio-0.5.rkllm"
+
+if [[ -f "$EMBED_SERVICE_FILE" ]]; then
+    success "Embed service already configured: $EMBED_SERVICE_FILE"
+else
+    info "Creating embedding/reranker service: $EMBED_SERVICE_NAME"
+    sudo tee "$EMBED_SERVICE_FILE" > /dev/null << EOF
+[Unit]
+Description=RKLLM Embedding & Reranker Service
+After=network.target fix-freq.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+Group=$(id -gn)
+WorkingDirectory=$INSTALL_DIR
+
+Environment="PATH=$VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="RKLLM_MODELS_ROOT=$MODELS_DIR"
+Environment="RKLLM_EMBED_PORT=8001"
+Environment="RKLLM_EMBED_LOG_LEVEL=INFO"
+Environment="EMBED_MODEL_PATH=$EMBED_MODEL_FILE"
+Environment="RERANK_MODEL_PATH=$RERANK_MODEL_FILE"
+
+ExecStart=$VENV_DIR/bin/gunicorn -w 1 -k gthread --threads 2 --timeout 120 -b 0.0.0.0:8001 embed_api:app
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=3
+LimitNOFILE=65536
+ProtectHome=no
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=$INSTALL_DIR $MODELS_DIR /tmp
+SupplementaryGroups=render
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$EMBED_SERVICE_NAME"
+    success "Embed service created and enabled: $EMBED_SERVICE_NAME"
+fi
+echo ""
+echo "  Embed service: sudo systemctl start $EMBED_SERVICE_NAME"
+echo "  Embed logs:    journalctl -u $EMBED_SERVICE_NAME -f"
+echo ""
+
 # =============================================================================
 # OPTIONAL: START THE SERVICE NOW?
 # =============================================================================
@@ -731,10 +785,13 @@ echo "  │  RKLLM API Server — Installation Summary               │"
 echo "  ├─────────────────────────────────────────────────────────┤"
 echo "  │                                                         │"
 echo "  │  API Server   : $INSTALL_DIR/api.py"
+echo "  │  Embed Server : $INSTALL_DIR/embed_api.py"
 echo "  │  Venv         : $VENV_DIR"
 echo "  │  Models       : $MODELS_DIR ($MODEL_COUNT model(s))"
-echo "  │  Service      : $SERVICE_NAME (systemd)"
+echo "  │  Service      : $SERVICE_NAME (port $BIND_PORT)"
+echo "  │  Embed Svc    : $EMBED_SERVICE_NAME (port 8001)"
 echo "  │  Endpoint     : http://0.0.0.0:$BIND_PORT/v1"
+echo "  │  Embed URL    : http://0.0.0.0:8001/v1"
 echo "  │  librkllmrt   : ${RKLLM_LIB_FINAL:-not found}"
 echo "  │  librknnrt    : ${RKNN_LIB_FINAL:-not installed (VL models unavailable)}"
 echo "  │                                                         │"

@@ -117,6 +117,11 @@ try:
         "Time to load RKLLM model",
         buckets=(1, 5, 10, 30, 60, 120, float("inf"))
     )
+    rkllm_kv_cache_result = Counter(
+        "rkllm_kv_cache_result_total",
+        "KV cache incremental hit vs full reset counts",
+        ["result"]
+    )
     _PROMETHEUS_AVAILABLE = True
     print("[RKLLM] Prometheus metrics enabled at /metrics")
 except ImportError:
@@ -3960,11 +3965,15 @@ def chat_completions():
                 logger.info(f"[{request_id}] KV INCREMENTAL — sending only latest "
                             f"user message ({len(incremental_msg)} chars "
                             f"vs {len(prompt)} full)")
+                if _PROMETHEUS_AVAILABLE:
+                    rkllm_kv_cache_result.labels(result="incremental").inc()
                 prompt = incremental_msg
                 keep_history = 1
             else:
                 logger.info(f"[{request_id}] KV RESET — clearing KV cache for "
                             f"new conversation")
+                if _PROMETHEUS_AVAILABLE:
+                    rkllm_kv_cache_result.labels(result="reset").inc()
                 # Clear stale KV cache from prior conversation, then use
                 # keep_history=1 so THIS turn's state IS retained for
                 # incremental follow-ups.  With keep_history=0 the runtime

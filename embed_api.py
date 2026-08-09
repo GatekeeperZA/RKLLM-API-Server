@@ -460,6 +460,51 @@ def _rerank_pair(query: str, document: str, instruction: str) -> float:
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 
+# ---------------------------------------------------------------------------
+# Prometheus metrics (optional — degrades gracefully if not installed)
+# ---------------------------------------------------------------------------
+try:
+    from prometheus_flask_exporter import PrometheusMetrics
+    from prometheus_client import Counter, Histogram
+
+    _prom = PrometheusMetrics(app, path="/metrics")
+
+    embed_requests_total = Counter(
+        "embed_requests_total",
+        "Total embedding requests",
+        ["status"]
+    )
+    embed_latency_seconds = Histogram(
+        "embed_latency_seconds",
+        "Embedding inference latency per item",
+        buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, float("inf"))
+    )
+    embed_batch_size = Histogram(
+        "embed_batch_size",
+        "Number of texts per embedding request",
+        buckets=(1, 2, 4, 8, 16, 32, float("inf"))
+    )
+    rerank_requests_total = Counter(
+        "rerank_requests_total",
+        "Total reranking requests",
+        ["status"]
+    )
+    rerank_latency_seconds = Histogram(
+        "rerank_latency_seconds",
+        "Reranking inference latency per document",
+        buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, float("inf"))
+    )
+    rerank_doc_count = Histogram(
+        "rerank_doc_count",
+        "Number of documents per rerank request",
+        buckets=(1, 2, 4, 8, 16, 32, float("inf"))
+    )
+    _EMBED_PROMETHEUS = True
+    logger.info("Prometheus metrics enabled at /metrics")
+except ImportError:
+    _EMBED_PROMETHEUS = False
+    logger.info("prometheus-flask-exporter not installed — /metrics disabled")
+
 
 def _error(msg: str, code: int) -> tuple:
     return jsonify({'error': {'message': msg, 'code': code}}), code
@@ -509,15 +554,23 @@ def embeddings():
     data = []
     total_tokens = 0
 
+    if _EMBED_PROMETHEUS:
+        embed_batch_size.observe(len(texts))
+
     with _LOCK:
         for i, text in enumerate(texts):
             if not isinstance(text, str):
+                if _EMBED_PROMETHEUS:
+                    embed_requests_total.labels(status="error").inc()
                 return _error(f'input[{i}] must be a string', 400)
 
             prompt = f'Instruct: {task}\nQuery: {text}' if use_prefix else text
             t0 = time.time()
             vec = _embed_text(prompt)
             elapsed = time.time() - t0
+
+            if _EMBED_PROMETHEUS:
+                embed_latency_seconds.observe(elapsed)
 
             # Rough token estimate (4 chars ≈ 1 token)
             est_tokens = max(1, len(text) // 4)
@@ -527,6 +580,9 @@ def embeddings():
                 f'embed[{i}] len={len(text)} dim={len(vec)} {elapsed*1000:.0f}ms'
             )
             data.append({'object': 'embedding', 'index': i, 'embedding': vec})
+
+    if _EMBED_PROMETHEUS:
+        embed_requests_total.labels(status="ok").inc()
 
     return jsonify({
         'object': 'list',
@@ -558,15 +614,23 @@ def rerank():
     return_documents = body.get('return_documents', False)
     top_n            = body.get('top_n', len(documents))
 
+    if _EMBED_PROMETHEUS:
+        rerank_doc_count.observe(len(documents))
+
     scored = []
     with _LOCK:
         for i, doc in enumerate(documents):
             if not isinstance(doc, str):
+                if _EMBED_PROMETHEUS:
+                    rerank_requests_total.labels(status="error").inc()
                 return _error(f'documents[{i}] must be a string', 400)
             t0    = time.time()
             score = _rerank_pair(query, doc, instruction)
+            elapsed = time.time() - t0
+            if _EMBED_PROMETHEUS:
+                rerank_latency_seconds.observe(elapsed)
             logger.debug(
-                f'rerank[{i}] score={score:.4f} {(time.time()-t0)*1000:.0f}ms'
+                f'rerank[{i}] score={score:.4f} {elapsed*1000:.0f}ms'
             )
             entry = {'index': i, 'relevance_score': score}
             if return_documents:
@@ -576,6 +640,9 @@ def rerank():
     # Sort by descending relevance, then truncate to top_n
     scored.sort(key=lambda x: x['relevance_score'], reverse=True)
     scored = scored[:top_n]
+
+    if _EMBED_PROMETHEUS:
+        rerank_requests_total.labels(status="ok").inc()
 
     return jsonify({
         'id':      f'rerank-{uuid.uuid4().hex[:12]}',
@@ -591,7 +658,10 @@ def rerank():
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+# Load models at module level so gunicorn workers initialize on startup.
+# __name__ check is intentionally skipped — this must run under gunicorn too.
+_load_models()
+
 if __name__ == '__main__':
-    _load_models()
     logger.info(f'Starting embed_api on port {PORT}')
     app.run(host='0.0.0.0', port=PORT, threaded=False)
