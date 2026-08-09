@@ -652,6 +652,24 @@ MODEL_SAMPLING_PROFILES = {
         'frequency_penalty': 0.0,
         'presence_penalty': 1.0,
     },
+    # Qwen2.5-Coder: lower temperature for deterministic code output.
+    'qwen2.5-coder': {
+        'top_k': 20,
+        'top_p': 0.95,
+        'temperature': 0.2,
+        'repeat_penalty': 1.05,
+        'frequency_penalty': 0.0,
+        'presence_penalty': 0.0,
+    },
+    # Qwen2.5 general (non-coder, non-math) — moderate settings.
+    'qwen2.5': {
+        'top_k': 40,
+        'top_p': 0.9,
+        'temperature': 0.7,
+        'repeat_penalty': 1.1,
+        'frequency_penalty': 0.0,
+        'presence_penalty': 0.0,
+    },
 }
 
 
