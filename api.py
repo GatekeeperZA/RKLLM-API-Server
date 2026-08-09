@@ -863,23 +863,25 @@ class RKLLMExtendParam(ctypes.Structure):
 
 class RKLLMParam(ctypes.Structure):
     _fields_ = [
-        ("model_path",          ctypes.c_char_p),
-        ("max_context_len",     ctypes.c_int32),
-        ("max_new_tokens",      ctypes.c_int32),
-        ("top_k",               ctypes.c_int32),
-        ("n_keep",              ctypes.c_int32),
-        ("top_p",               ctypes.c_float),
-        ("temperature",         ctypes.c_float),
-        ("repeat_penalty",      ctypes.c_float),
-        ("frequency_penalty",   ctypes.c_float),
-        ("presence_penalty",    ctypes.c_float),
-        ("mirostat",            ctypes.c_int32),
-        ("mirostat_tau",        ctypes.c_float),
-        ("mirostat_eta",        ctypes.c_float),
-        ("skip_special_token",  ctypes.c_bool),
-        ("ignore_eos_token",    ctypes.c_bool),
-        ("is_async",            ctypes.c_bool),
-        ("extend_param",        RKLLMExtendParam),
+        ("model_path", ctypes.c_char_p),
+        ("max_context_len", ctypes.c_int32),
+        ("max_new_tokens", ctypes.c_int32),
+        ("top_k", ctypes.c_int32),
+        ("n_keep", ctypes.c_int32),
+        ("top_p", ctypes.c_float),
+        ("temperature", ctypes.c_float),
+        ("repeat_penalty", ctypes.c_float),
+        ("frequency_penalty", ctypes.c_float),
+        ("presence_penalty", ctypes.c_float),
+        ("mirostat", ctypes.c_int32),
+        ("mirostat_tau", ctypes.c_float),
+        ("mirostat_eta", ctypes.c_float),
+        ("skip_special_token", ctypes.c_bool),
+        ("is_async", ctypes.c_bool),
+        ("img_start", ctypes.c_char_p),
+        ("img_end", ctypes.c_char_p),
+        ("img_content", ctypes.c_char_p),
+        ("extend_param", RKLLMExtendParam),
     ]
 
 
@@ -905,38 +907,14 @@ class RKLLMTokenInput(ctypes.Structure):
     ]
 
 
-class RKLLMImageData(ctypes.Structure):
-    _fields_ = [
-        ("image_embed",    ctypes.POINTER(ctypes.c_float)),
-        ("n_image_tokens", ctypes.c_size_t),
-        ("n_image",        ctypes.c_size_t),
-        ("image_start",    ctypes.c_char_p),
-        ("image_end",      ctypes.c_char_p),
-        ("image_content",  ctypes.c_char_p),
-        ("image_width",    ctypes.c_size_t),
-        ("image_height",   ctypes.c_size_t),
-    ]
-
-
-class RKLLMVideoData(ctypes.Structure):
-    _fields_ = [
-        ("video_embed",       ctypes.POINTER(ctypes.c_float)),
-        ("n_frame_tokens",    ctypes.c_size_t),
-        ("n_frame_per_video", ctypes.c_size_t),
-        ("n_video",           ctypes.c_size_t),
-        ("video_start",       ctypes.c_char_p),
-        ("video_end",         ctypes.c_char_p),
-        ("video_content",     ctypes.c_char_p),
-        ("frame_width",       ctypes.c_size_t),
-        ("frame_height",      ctypes.c_size_t),
-    ]
-
-
 class RKLLMMultiModalInput(ctypes.Structure):
     _fields_ = [
         ("prompt", ctypes.c_char_p),
-        ("image",  RKLLMImageData),
-        ("video",  RKLLMVideoData),
+        ("image_embed", ctypes.POINTER(ctypes.c_float)),
+        ("n_image_tokens", ctypes.c_size_t),
+        ("n_image", ctypes.c_size_t),
+        ("image_width", ctypes.c_size_t),
+        ("image_height", ctypes.c_size_t),
     ]
 
 
@@ -971,28 +949,12 @@ class RKLLMPromptCacheParam(ctypes.Structure):
     ]
 
 
-class RKLLMSamplingParam(ctypes.Structure):
-    _fields_ = [
-        ("top_k",             ctypes.c_int32),
-        ("top_p",             ctypes.c_float),
-        ("temperature",       ctypes.c_float),
-        ("repeat_penalty",    ctypes.c_float),
-        ("frequency_penalty", ctypes.c_float),
-        ("presence_penalty",  ctypes.c_float),
-        ("mirostat",          ctypes.c_int32),
-        ("mirostat_tau",      ctypes.c_float),
-        ("mirostat_eta",      ctypes.c_float),
-    ]
-
-
 class RKLLMInferParam(ctypes.Structure):
     _fields_ = [
-        ("mode",                RKLLMInferMode),
-        ("lora_params",         ctypes.POINTER(RKLLMLoraParam)),
+        ("mode", RKLLMInferMode),
+        ("lora_params", ctypes.POINTER(RKLLMLoraParam)),
         ("prompt_cache_params", ctypes.POINTER(RKLLMPromptCacheParam)),
-        ("sampling_params",     ctypes.POINTER(RKLLMSamplingParam)),
-        ("keep_history",        ctypes.c_int),
-        ("max_new_tokens",      ctypes.c_int32),
+        ("keep_history", ctypes.c_int),
     ]
 
 
@@ -1041,16 +1003,6 @@ callback_type = ctypes.CFUNCTYPE(
     ctypes.c_int,
 )
 
-class RKLLMCallback(ctypes.Structure):
-    _fields_ = [
-        ("result_callback",      callback_type),
-        ("result_userdata",      ctypes.c_void_p),
-        ("tokenizer_callback",   ctypes.c_void_p),
-        ("tokenizer_userdata",   ctypes.c_void_p),
-        ("embed_callback",       ctypes.c_void_p),
-        ("embed_userdata",       ctypes.c_void_p),
-    ]
-
 # =============================================================================
 # RKLLM CALLBACK AND WRAPPER
 # =============================================================================
@@ -1058,12 +1010,6 @@ class RKLLMCallback(ctypes.Structure):
 # loop reads from it.  Safe because NPU is single-task — only one
 # inference runs at a time.
 _token_queue = queue.Queue()
-# Two-phase thinking state. _phase1_active redirects callback output to
-# _phase1_buffer so run() can inspect phase 1 output before deciding
-# whether to proceed to phase 2.
-_phase1_active = False
-_phase1_buffer = []   # (type, data) tuples accumulated during phase 1
-_phase1_stats  = {}
 
 
 def _rkllm_callback_impl(result_ptr, userdata, state):
@@ -1079,10 +1025,7 @@ def _rkllm_callback_impl(result_ptr, userdata, state):
                 if text:
                     decoded = text.decode('utf-8', errors='replace')
                     if decoded:
-                        if _phase1_active:
-                            _phase1_buffer.append(decoded)
-                        else:
-                            _token_queue.put(("token", decoded))
+                        _token_queue.put(("token", decoded))
         elif state == RKLLM_RUN_FINISH:
             stats = {}
             if result_ptr:
@@ -1097,11 +1040,7 @@ def _rkllm_callback_impl(result_ptr, userdata, state):
                     }
                 except (ValueError, AttributeError):
                     pass  # Perf stats unavailable
-            if _phase1_active:
-                # Store stats; run() will decide what to do with buffered tokens.
-                _phase1_stats.update(stats)
-            else:
-                _token_queue.put(("finish", stats))
+            _token_queue.put(("finish", stats))
         elif state == RKLLM_RUN_ERROR:
             error_msg = "unknown error"
             if result_ptr:
@@ -1125,14 +1064,6 @@ def _rkllm_callback_impl(result_ptr, userdata, state):
 
 # Must keep a reference to prevent garbage collection of the callback
 _rkllm_callback = callback_type(_rkllm_callback_impl)
-
-_rkllm_callback_struct = RKLLMCallback()
-_rkllm_callback_struct.result_callback    = _rkllm_callback
-_rkllm_callback_struct.result_userdata    = None
-_rkllm_callback_struct.tokenizer_callback = None
-_rkllm_callback_struct.tokenizer_userdata = None
-_rkllm_callback_struct.embed_callback     = None
-_rkllm_callback_struct.embed_userdata     = None
 
 
 # =============================================================================
@@ -1494,11 +1425,11 @@ class RKLLMWrapper:
 
     def _setup_functions(self):
         """Define argtypes/restype for all rkllm C functions."""
-        # rkllm_init(handle*, param*, RKLLMCallback*) -> int
+        # rkllm_init(handle*, param*, callback) -> int
         self.lib.rkllm_init.argtypes = [
             ctypes.POINTER(ctypes.c_void_p),
             ctypes.POINTER(RKLLMParam),
-            ctypes.POINTER(RKLLMCallback),
+            callback_type,
         ]
         self.lib.rkllm_init.restype = ctypes.c_int
 
@@ -1577,11 +1508,16 @@ class RKLLMWrapper:
         param.mirostat_tau = 5.0
         param.mirostat_eta = 0.1
         param.skip_special_token = True
-        param.ignore_eos_token = False
         param.is_async = False
         if vl_config:
+            param.img_start = vl_config.get('img_start', '').encode('utf-8')
+            param.img_end = vl_config.get('img_end', '').encode('utf-8')
+            param.img_content = vl_config.get('img_content', '').encode('utf-8')
             param.extend_param.base_domain_id = vl_config.get('base_domain_id', 1)
         else:
+            param.img_start = b""
+            param.img_end = b""
+            param.img_content = b""
             param.extend_param.base_domain_id = 0
         param.extend_param.embed_flash = 1
         param.extend_param.n_batch = 1
@@ -1592,8 +1528,7 @@ class RKLLMWrapper:
 
         self.handle = ctypes.c_void_p()
         ret = self.lib.rkllm_init(
-            ctypes.byref(self.handle), ctypes.byref(param),
-            ctypes.byref(_rkllm_callback_struct),
+            ctypes.byref(self.handle), ctypes.byref(param), _rkllm_callback
         )
         if ret != 0:
             logger.error(f"rkllm_init failed (ret={ret}) for model '{param.model_path.decode()}'")
@@ -1637,15 +1572,13 @@ class RKLLMWrapper:
             pass
 
     def run(self, prompt, role="user", keep_history=1, enable_thinking=False,
-            save_prompt_cache_path=None, sampling=None):
+            save_prompt_cache_path=None):
         """Run inference (BLOCKING).  Must be called from a worker thread.
 
         Args:
             save_prompt_cache_path: if set, saves KV state to this path after
                                    inference.  Used once on first request to
                                    prime the prompt cache for subsequent loads.
-            sampling: dict of per-call sampling overrides (v1.3.0+). When set,
-                     overrides the init-time defaults for this call only.
 
         Returns the rkllm_run return code (0 = success).
         """
@@ -1663,21 +1596,6 @@ class RKLLMWrapper:
         infer_param.mode = RKLLM_INFER_GENERATE
         infer_param.keep_history = keep_history
 
-        # Per-call sampling overrides init-time defaults
-        _sampling_param = None
-        if sampling:
-            _sampling_param = RKLLMSamplingParam()
-            _sampling_param.top_k             = sampling.get('top_k', 40)
-            _sampling_param.top_p             = sampling.get('top_p', 0.9)
-            _sampling_param.temperature       = sampling.get('temperature', 0.7)
-            _sampling_param.repeat_penalty    = sampling.get('repeat_penalty', 1.1)
-            _sampling_param.frequency_penalty = sampling.get('frequency_penalty', 0.0)
-            _sampling_param.presence_penalty  = sampling.get('presence_penalty', 0.0)
-            _sampling_param.mirostat          = 0
-            _sampling_param.mirostat_tau      = 5.0
-            _sampling_param.mirostat_eta      = 0.1
-            infer_param.sampling_params = ctypes.pointer(_sampling_param)
-
         # Optionally save prompt cache after this inference
         _cache_param = None
         if save_prompt_cache_path:
@@ -1686,77 +1604,15 @@ class RKLLMWrapper:
             _cache_param.prompt_cache_path = save_prompt_cache_path.encode('utf-8')
             infer_param.prompt_cache_params = ctypes.pointer(_cache_param)
 
-        if not enable_thinking:
-            return self.lib.rkllm_run(
-                self.handle,
-                ctypes.byref(rkllm_input),
-                ctypes.byref(infer_param),
-                None,
-            )
-
-        # Two-phase inference for thinking models:
-        # Phase 1: model may generate <think>...</think> then FINISH.
-        # Phase 2: empty assistant continuation generates the actual answer.
-        # Buffer phase 1 output to detect whether the model actually entered
-        # thinking mode (emitted <think>). Some models/sizes skip it.
-        global _phase1_active, _phase1_buffer, _phase1_stats
-        _phase1_buffer.clear()
-        _phase1_stats.clear()
-        _phase1_active = True
-        ret = self.lib.rkllm_run(
+        return self.lib.rkllm_run(
             self.handle,
             ctypes.byref(rkllm_input),
             ctypes.byref(infer_param),
             None,
         )
-        _phase1_active = False
-
-        if ret != 0:
-            # Flush buffered tokens as normal output then signal error
-            for tok in _phase1_buffer:
-                _token_queue.put(("token", tok))
-            return ret
-
-        phase1_text = "".join(_phase1_buffer)
-
-        if "<think>" not in phase1_text:
-            # Model didn't enter thinking mode — treat phase 1 as the full
-            # answer (single-phase). Flush tokens and finish normally.
-            for tok in _phase1_buffer:
-                _token_queue.put(("token", tok))
-            _token_queue.put(("finish", _phase1_stats))
-            return 0
-
-        # Model DID think. Flush phase 1 tokens to consumer, then signal
-        # phase transition so the consumer can close the <think> block.
-        for tok in _phase1_buffer:
-            _token_queue.put(("token", tok))
-        _token_queue.put(("thinking_end", _phase1_stats))
-
-        # Phase 2: continue from KV cache with empty assistant turn
-        rkllm_input2 = RKLLMInput()
-        rkllm_input2.role = b"assistant"
-        rkllm_input2.enable_thinking = ctypes.c_bool(False)
-        rkllm_input2.input_type = RKLLM_INPUT_PROMPT
-        rkllm_input2.input_data.prompt_input = ctypes.c_char_p(b"")
-
-        infer_param2 = RKLLMInferParam()
-        ctypes.memset(ctypes.byref(infer_param2), 0, ctypes.sizeof(RKLLMInferParam))
-        infer_param2.mode = RKLLM_INFER_GENERATE
-        infer_param2.keep_history = 1
-        if _sampling_param is not None:
-            infer_param2.sampling_params = ctypes.pointer(_sampling_param)
-
-        return self.lib.rkllm_run(
-            self.handle,
-            ctypes.byref(rkllm_input2),
-            ctypes.byref(infer_param2),
-            None,
-        )
 
     def run_multimodal(self, prompt, image_embed, n_image_tokens, n_image,
-                        image_width, image_height, role="user", keep_history=0,
-                        sampling=None, vl_config=None):
+                        image_width, image_height, role="user", keep_history=0):
         """Run multimodal inference (BLOCKING) with image embeddings.
 
         Returns the rkllm_run return code (0 = success).
@@ -1772,38 +1628,17 @@ class RKLLMWrapper:
         rkllm_input.role = role.encode('utf-8')
         rkllm_input.enable_thinking = ctypes.c_bool(False)
         rkllm_input.input_type = RKLLM_INPUT_MULTIMODAL
-        mm = rkllm_input.input_data.multimodal_input
-        mm.prompt = prompt.encode('utf-8')
-        mm.image.image_embed    = embed_ptr
-        mm.image.n_image_tokens = n_image_tokens
-        mm.image.n_image        = n_image
-        mm.image.image_width    = image_width
-        mm.image.image_height   = image_height
-        _img_start   = vl_config.get('img_start', '') if vl_config else ''
-        _img_end     = vl_config.get('img_end', '')   if vl_config else ''
-        _img_content = vl_config.get('img_content', '') if vl_config else ''
-        mm.image.image_start   = _img_start.encode('utf-8')   if _img_start   else None
-        mm.image.image_end     = _img_end.encode('utf-8')     if _img_end     else None
-        mm.image.image_content = _img_content.encode('utf-8') if _img_content else None
+        rkllm_input.input_data.multimodal_input.prompt = prompt.encode('utf-8')
+        rkllm_input.input_data.multimodal_input.image_embed = embed_ptr
+        rkllm_input.input_data.multimodal_input.n_image_tokens = n_image_tokens
+        rkllm_input.input_data.multimodal_input.n_image = n_image
+        rkllm_input.input_data.multimodal_input.image_width = image_width
+        rkllm_input.input_data.multimodal_input.image_height = image_height
 
         infer_param = RKLLMInferParam()
         ctypes.memset(ctypes.byref(infer_param), 0, ctypes.sizeof(RKLLMInferParam))
         infer_param.mode = RKLLM_INFER_GENERATE
         infer_param.keep_history = keep_history
-
-        _sampling_param = None
-        if sampling:
-            _sampling_param = RKLLMSamplingParam()
-            _sampling_param.top_k             = sampling.get('top_k', 40)
-            _sampling_param.top_p             = sampling.get('top_p', 0.9)
-            _sampling_param.temperature       = sampling.get('temperature', 0.7)
-            _sampling_param.repeat_penalty    = sampling.get('repeat_penalty', 1.1)
-            _sampling_param.frequency_penalty = sampling.get('frequency_penalty', 0.0)
-            _sampling_param.presence_penalty  = sampling.get('presence_penalty', 0.0)
-            _sampling_param.mirostat          = 0
-            _sampling_param.mirostat_tau      = 5.0
-            _sampling_param.mirostat_eta      = 0.1
-            infer_param.sampling_params = ctypes.pointer(_sampling_param)
 
         return self.lib.rkllm_run(
             self.handle,
@@ -2514,9 +2349,8 @@ def build_prompt(messages, model_name):
     rag_parts = _extract_rag_reference(system_text) if system_text else None
 
     prompt = ""
+    # Only enable thinking for models that natively support <think> blocks
     model_caps = model_cfg.get('capabilities', []) if model_cfg else []
-    # Two-phase thinking: enable only for models that support it.
-    # run() handles the two rkllm_run calls; ThinkTagParser splits reasoning/content.
     enable_thinking = 'thinking' in model_caps
 
     # =====================================================================
@@ -2717,7 +2551,7 @@ def build_prompt(messages, model_name):
     # Re-check after quality floor may have cleared rag_parts
     if rag_parts and user_question:
         # enable_thinking for RAG: only if model supports it AND context is large enough
-        enable_thinking = 'thinking' in model_caps and ctx >= DISABLE_THINK_FOR_RAG_BELOW_CTX
+        enable_thinking = ('thinking' in model_caps) and (ctx >= DISABLE_THINK_FOR_RAG_BELOW_CTX)
         abstention = ". If not answered above, say you don't know" if enable_thinking else ''
         logger.info(f"RAG thinking: ctx={ctx}, threshold={DISABLE_THINK_FOR_RAG_BELOW_CTX}, "
                     f"caps={model_caps}, thinking={'enabled' if enable_thinking else 'disabled'}")
@@ -2836,6 +2670,7 @@ def build_prompt(messages, model_name):
                 logger.info(f"History sliding window: trimmed {trimmed} oldest turns "
                             f"({original_parts} -> {len(parts)} parts, "
                             f"{len(prompt)} chars, ctx={ctx})")
+        # Only enable thinking for models with the "thinking" capability
         enable_thinking = 'thinking' in model_caps
 
         # --- Open WebUI meta-task detection ---
@@ -2844,7 +2679,7 @@ def build_prompt(messages, model_name):
         # thinking mode wastes 20+ seconds and can confuse result parsing.
         _user_lower = user_question.lower()
         _is_meta = any(sig in _user_lower for sig in _OPENWEBUI_META_TASK_SIGNATURES)
-        if _is_meta and enable_thinking:
+        if _is_meta:
             enable_thinking = False
             logger.info(f"Meta-task detected — thinking disabled for speed")
 
@@ -3589,6 +3424,15 @@ def chat_completions():
         messages = [{'role': 'system', 'content': _tool_sys_content}] + messages
         logger.info(f"[{request_id}] Tool calling: {len(_tools_defs)} tool(s) injected")
 
+    # Log ignored sampling parameters; surface as response header so callers know.
+    ignored_params = {k: body[k] for k, default in _SAMPLING_DEFAULTS.items()
+                      if body.get(k) is not None and body[k] != default}
+    _sampling_warning = None
+    if ignored_params:
+        summary = ', '.join(f'{k}={v}' for k, v in ignored_params.items())
+        logger.debug(f"[{request_id}] Ignored sampling params: {summary} (rkllm uses model-compiled sampling)")
+        _sampling_warning = f"Sampling params ignored (rkllm uses model-compiled values): {summary}"
+
     logger.info(f"Request {request_id} model: '{requested_model}' stream: {stream}")
 
     # === DIAGNOSTIC: Dump all messages from Open WebUI ===
@@ -3865,14 +3709,6 @@ def chat_completions():
     ABORT_EVENT.clear()
     created = int(time.time())
 
-    # Build per-call sampling: start from model's detected profile, apply any
-    # per-request overrides from the request body (temperature, top_p, etc.).
-    _model_sampling = dict(config.get('sampling', {}))
-    _request_overrides = {k: body[k] for k in _SAMPLING_DEFAULTS if body.get(k) is not None}
-    if _request_overrides:
-        _model_sampling.update(_request_overrides)
-        logger.debug(f"[{request_id}] Sampling overrides from request: {_request_overrides}")
-
     try:
         # =================================================================
         # VL PATH -- image detected, route to vision-language model
@@ -4021,6 +3857,8 @@ def chat_completions():
 
             _extra_hdrs = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
                            'Connection': 'keep-alive'}
+            if _sampling_warning:
+                _extra_hdrs['X-RKLLM-Warning'] = _sampling_warning
             if stream:
                 return Response(
                     stream_with_context(_generate_stream(
@@ -4040,6 +3878,8 @@ def chat_completions():
                     is_rag=False, messages=messages,
                     rag_cache_info=None, kv_is_reset=True, vl_data=vl_data, req_stop=req_stop,
                 )
+                if _sampling_warning:
+                    _r.headers['X-RKLLM-Warning'] = _sampling_warning
                 return _r
 
         # =================================================================
@@ -4199,6 +4039,8 @@ def chat_completions():
             'X-Accel-Buffering': 'no',
             'Connection': 'keep-alive',
         }
+        if _sampling_warning:
+            _stream_hdrs['X-RKLLM-Warning'] = _sampling_warning
         if stream:
             return Response(
                 stream_with_context(_generate_stream(
@@ -4212,7 +4054,6 @@ def chat_completions():
                     kv_is_reset=kv_is_reset,
                     req_stop=req_stop,
                     has_tools=_has_tools,
-                    sampling=_model_sampling,
                 )),
                 mimetype='text/event-stream',
                 headers=_stream_hdrs,
@@ -4228,8 +4069,9 @@ def chat_completions():
                 kv_is_reset=kv_is_reset,
                 req_stop=req_stop,
                 has_tools=_has_tools,
-                sampling=_model_sampling,
             )
+            if _sampling_warning:
+                _r.headers['X-RKLLM-Warning'] = _sampling_warning
             return _r
 
     except Exception as e:
@@ -4248,7 +4090,7 @@ def _generate_stream(prompt, request_id, model_name, created,
                      include_usage=False, messages=None,
                      is_rag=False, rag_cache_info=None,
                      kv_is_reset=False, vl_data=None, req_stop=None,
-                     has_tools=False, sampling=None):
+                     has_tools=False):
     """Generator that yields SSE chunks from rkllm token callback queue."""
     global _worker_thread
 
@@ -4434,23 +4276,6 @@ def _generate_stream(prompt, request_id, model_name, created,
                         _active_wrapper.abort()
                         break
 
-            elif msg_type == "thinking_end":
-                # Phase 1 of two-phase thinking complete — inject closing tag if
-                # ThinkTagParser is still inside a <think> block (model emitted the
-                # open tag but RKLLM consumed </think> as a stop signal without
-                # emitting it as a token).
-                if think_parser.in_thinking:
-                    for kind, chunk_text in think_parser.feed("</think>\n"):
-                        if kind == 'thinking':
-                            total_reasoning += chunk_text
-                        else:
-                            total_content += chunk_text
-                            if not has_tools:
-                                yield make_sse_chunk(request_id, model_name, created,
-                                                     delta={"content": chunk_text})
-                logger.debug(f"[{request_id}] Thinking phase complete, continuing to answer phase")
-                continue
-
             elif msg_type == "finish":
                 stats_data = msg_data or {}
                 generation_clean = True
@@ -4631,7 +4456,7 @@ def _generate_complete(prompt, request_id, model_name, created,
                        keep_history=1, enable_thinking=True,
                        is_rag=False, messages=None, rag_cache_info=None,
                        kv_is_reset=False, vl_data=None, req_stop=None,
-                       has_tools=False, sampling=None):
+                       has_tools=False):
     """Collect all output and return a non-streaming JSON response."""
     global _worker_thread
 
@@ -4663,14 +4488,12 @@ def _generate_complete(prompt, request_id, model_name, created,
                     vl_data['n_image_tokens'], vl_data['n_image'],
                     vl_data['image_width'], vl_data['image_height'],
                     role="user", keep_history=keep_history,
-                    sampling=sampling,
                 )
             else:
                 ret = _active_wrapper.run(prompt, role="user",
                                           keep_history=keep_history,
                                           enable_thinking=enable_thinking,
-                                          save_prompt_cache_path=_save_cache_path,
-                                          sampling=sampling)
+                                          save_prompt_cache_path=_save_cache_path)
             if ret != 0:
                 logger.error(f"[{request_id}] rkllm_run returned error code {ret}")
                 _token_queue.put(("error", f"rkllm_run returned {ret}"))
@@ -4769,15 +4592,6 @@ def _generate_complete(prompt, request_id, model_name, created,
                                        f"{len(_visible_output)} chars total) — aborting")
                         _active_wrapper.abort()
                         break
-
-            elif msg_type == "thinking_end":
-                # If model emitted <think> but RKLLM consumed </think> as a stop
-                # signal, inject the close tag so regex splitting works correctly.
-                if "<think>" in combined_output and "</think>" not in combined_output:
-                    combined_output += "</think>\n"
-                    content_parts = [combined_output]
-                logger.debug(f"[{request_id}] Thinking phase complete, continuing to answer phase")
-                continue
 
             elif msg_type == "finish":
                 stats_data = msg_data or {}
