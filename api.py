@@ -3626,12 +3626,23 @@ def chat_completions():
     if _is_title_gen:
         _first_user_msg = ''
         for msg in messages:
-            if msg.get('role') == 'user' and not any(
-                sig in msg.get('content', '').lower()
-                for sig in ('title for the chat', 'emoji as a title',
-                            'title for the prompt', '3-5 word')
-            ):
-                _first_user_msg = msg.get('content', '')[:60].strip()
+            if msg.get('role') == 'user':
+                _mc = msg.get('content', '')
+                _mc_lower = _mc.lower()
+                # Skip: OWUI title-gen request itself
+                if any(sig in _mc_lower for sig in ('title for the chat',
+                        'emoji as a title', 'title for the prompt', '3-5 word')):
+                    continue
+                # Skip: RAG-injected context blocks (start with RAG template markers)
+                if _mc_lower.lstrip().startswith(('### task:', '<context>', '[context]',
+                                                   'answer the user', 'use only')):
+                    continue
+                # Prefer the user_query block if present (RAG wraps real query in tags)
+                _uq = re.search(r'<user_query>\s*(.+?)\s*</user_query>', _mc, re.DOTALL)
+                if _uq:
+                    _first_user_msg = _uq.group(1).strip()[:60]
+                else:
+                    _first_user_msg = _mc[:60].strip()
                 break
         if not _first_user_msg:
             _m2 = re.search(
