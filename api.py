@@ -877,9 +877,8 @@ class RKLLMParam(ctypes.Structure):
         ("mirostat_tau",        ctypes.c_float),
         ("mirostat_eta",        ctypes.c_float),
         ("skip_special_token",  ctypes.c_bool),
-        ("ignore_eos_token",    ctypes.c_bool),   # v1.3.0: new field
+        ("ignore_eos_token",    ctypes.c_bool),
         ("is_async",            ctypes.c_bool),
-        # img_start / img_end / img_content removed in v1.3.0 (moved to chat template)
         ("extend_param",        RKLLMExtendParam),
     ]
 
@@ -906,14 +905,38 @@ class RKLLMTokenInput(ctypes.Structure):
     ]
 
 
+class RKLLMImageData(ctypes.Structure):
+    _fields_ = [
+        ("image_embed",    ctypes.POINTER(ctypes.c_float)),
+        ("n_image_tokens", ctypes.c_size_t),
+        ("n_image",        ctypes.c_size_t),
+        ("image_start",    ctypes.c_char_p),
+        ("image_end",      ctypes.c_char_p),
+        ("image_content",  ctypes.c_char_p),
+        ("image_width",    ctypes.c_size_t),
+        ("image_height",   ctypes.c_size_t),
+    ]
+
+
+class RKLLMVideoData(ctypes.Structure):
+    _fields_ = [
+        ("video_embed",       ctypes.POINTER(ctypes.c_float)),
+        ("n_frame_tokens",    ctypes.c_size_t),
+        ("n_frame_per_video", ctypes.c_size_t),
+        ("n_video",           ctypes.c_size_t),
+        ("video_start",       ctypes.c_char_p),
+        ("video_end",         ctypes.c_char_p),
+        ("video_content",     ctypes.c_char_p),
+        ("frame_width",       ctypes.c_size_t),
+        ("frame_height",      ctypes.c_size_t),
+    ]
+
+
 class RKLLMMultiModalInput(ctypes.Structure):
     _fields_ = [
         ("prompt", ctypes.c_char_p),
-        ("image_embed", ctypes.POINTER(ctypes.c_float)),
-        ("n_image_tokens", ctypes.c_size_t),
-        ("n_image", ctypes.c_size_t),
-        ("image_width", ctypes.c_size_t),
-        ("image_height", ctypes.c_size_t),
+        ("image",  RKLLMImageData),
+        ("video",  RKLLMVideoData),
     ]
 
 
@@ -949,7 +972,6 @@ class RKLLMPromptCacheParam(ctypes.Structure):
 
 
 class RKLLMSamplingParam(ctypes.Structure):
-    """Per-call sampling overrides — new in v1.3.0. Pass via RKLLMInferParam.sampling_params."""
     _fields_ = [
         ("top_k",             ctypes.c_int32),
         ("top_p",             ctypes.c_float),
@@ -968,9 +990,9 @@ class RKLLMInferParam(ctypes.Structure):
         ("mode",                RKLLMInferMode),
         ("lora_params",         ctypes.POINTER(RKLLMLoraParam)),
         ("prompt_cache_params", ctypes.POINTER(RKLLMPromptCacheParam)),
-        ("sampling_params",     ctypes.POINTER(RKLLMSamplingParam)),  # v1.3.0: per-call sampling
+        ("sampling_params",     ctypes.POINTER(RKLLMSamplingParam)),
         ("keep_history",        ctypes.c_int),
-        ("max_new_tokens",      ctypes.c_int32),                      # v1.3.0: per-call token limit
+        ("max_new_tokens",      ctypes.c_int32),
     ]
 
 
@@ -1018,6 +1040,16 @@ callback_type = ctypes.CFUNCTYPE(
     ctypes.c_void_p,
     ctypes.c_int,
 )
+
+class RKLLMCallback(ctypes.Structure):
+    _fields_ = [
+        ("result_callback",      callback_type),
+        ("result_userdata",      ctypes.c_void_p),
+        ("tokenizer_callback",   ctypes.c_void_p),
+        ("tokenizer_userdata",   ctypes.c_void_p),
+        ("embed_callback",       ctypes.c_void_p),
+        ("embed_userdata",       ctypes.c_void_p),
+    ]
 
 # =============================================================================
 # RKLLM CALLBACK AND WRAPPER
@@ -1080,6 +1112,14 @@ def _rkllm_callback_impl(result_ptr, userdata, state):
 
 # Must keep a reference to prevent garbage collection of the callback
 _rkllm_callback = callback_type(_rkllm_callback_impl)
+
+_rkllm_callback_struct = RKLLMCallback()
+_rkllm_callback_struct.result_callback    = _rkllm_callback
+_rkllm_callback_struct.result_userdata    = None
+_rkllm_callback_struct.tokenizer_callback = None
+_rkllm_callback_struct.tokenizer_userdata = None
+_rkllm_callback_struct.embed_callback     = None
+_rkllm_callback_struct.embed_userdata     = None
 
 
 # =============================================================================
@@ -1441,11 +1481,11 @@ class RKLLMWrapper:
 
     def _setup_functions(self):
         """Define argtypes/restype for all rkllm C functions."""
-        # rkllm_init(handle*, param*, callback) -> int
+        # rkllm_init(handle*, param*, RKLLMCallback*) -> int
         self.lib.rkllm_init.argtypes = [
             ctypes.POINTER(ctypes.c_void_p),
             ctypes.POINTER(RKLLMParam),
-            callback_type,
+            ctypes.POINTER(RKLLMCallback),
         ]
         self.lib.rkllm_init.restype = ctypes.c_int
 
@@ -1526,7 +1566,6 @@ class RKLLMWrapper:
         param.skip_special_token = True
         param.ignore_eos_token = False
         param.is_async = False
-        # img_start/img_end/img_content removed in v1.3.0 — now handled via chat template
         if vl_config:
             param.extend_param.base_domain_id = vl_config.get('base_domain_id', 1)
         else:
@@ -1540,7 +1579,8 @@ class RKLLMWrapper:
 
         self.handle = ctypes.c_void_p()
         ret = self.lib.rkllm_init(
-            ctypes.byref(self.handle), ctypes.byref(param), _rkllm_callback
+            ctypes.byref(self.handle), ctypes.byref(param),
+            ctypes.byref(_rkllm_callback_struct),
         )
         if ret != 0:
             logger.error(f"rkllm_init failed (ret={ret}) for model '{param.model_path.decode()}'")
@@ -1610,7 +1650,7 @@ class RKLLMWrapper:
         infer_param.mode = RKLLM_INFER_GENERATE
         infer_param.keep_history = keep_history
 
-        # Per-call sampling (v1.3.0+) — overrides init-time defaults
+        # Per-call sampling overrides init-time defaults
         _sampling_param = None
         if sampling:
             _sampling_param = RKLLMSamplingParam()
@@ -1642,7 +1682,7 @@ class RKLLMWrapper:
 
     def run_multimodal(self, prompt, image_embed, n_image_tokens, n_image,
                         image_width, image_height, role="user", keep_history=0,
-                        sampling=None):
+                        sampling=None, vl_config=None):
         """Run multimodal inference (BLOCKING) with image embeddings.
 
         Returns the rkllm_run return code (0 = success).
@@ -1658,12 +1698,19 @@ class RKLLMWrapper:
         rkllm_input.role = role.encode('utf-8')
         rkllm_input.enable_thinking = ctypes.c_bool(False)
         rkllm_input.input_type = RKLLM_INPUT_MULTIMODAL
-        rkllm_input.input_data.multimodal_input.prompt = prompt.encode('utf-8')
-        rkllm_input.input_data.multimodal_input.image_embed = embed_ptr
-        rkllm_input.input_data.multimodal_input.n_image_tokens = n_image_tokens
-        rkllm_input.input_data.multimodal_input.n_image = n_image
-        rkllm_input.input_data.multimodal_input.image_width = image_width
-        rkllm_input.input_data.multimodal_input.image_height = image_height
+        mm = rkllm_input.input_data.multimodal_input
+        mm.prompt = prompt.encode('utf-8')
+        mm.image.image_embed    = embed_ptr
+        mm.image.n_image_tokens = n_image_tokens
+        mm.image.n_image        = n_image
+        mm.image.image_width    = image_width
+        mm.image.image_height   = image_height
+        _img_start   = vl_config.get('img_start', '') if vl_config else ''
+        _img_end     = vl_config.get('img_end', '')   if vl_config else ''
+        _img_content = vl_config.get('img_content', '') if vl_config else ''
+        mm.image.image_start   = _img_start.encode('utf-8')   if _img_start   else None
+        mm.image.image_end     = _img_end.encode('utf-8')     if _img_end     else None
+        mm.image.image_content = _img_content.encode('utf-8') if _img_content else None
 
         infer_param = RKLLMInferParam()
         ctypes.memset(ctypes.byref(infer_param), 0, ctypes.sizeof(RKLLMInferParam))
@@ -2393,9 +2440,12 @@ def build_prompt(messages, model_name):
     rag_parts = _extract_rag_reference(system_text) if system_text else None
 
     prompt = ""
-    # Only enable thinking for models that natively support <think> blocks
+    # Always use enable_thinking=False — v1.3.0 thinking mode is two-phase (library
+    # fires FINISH after </think>), which we don't support. Models that can think
+    # (qwen3, etc.) produce <think>...</think> naturally in text output; our
+    # ThinkTagParser handles separating reasoning from content.
     model_caps = model_cfg.get('capabilities', []) if model_cfg else []
-    enable_thinking = 'thinking' in model_caps
+    enable_thinking = False
 
     # =====================================================================
     # FOLLOW-UP / IRRELEVANT-RAG DETECTION
@@ -2595,7 +2645,7 @@ def build_prompt(messages, model_name):
     # Re-check after quality floor may have cleared rag_parts
     if rag_parts and user_question:
         # enable_thinking for RAG: only if model supports it AND context is large enough
-        enable_thinking = ('thinking' in model_caps) and (ctx >= DISABLE_THINK_FOR_RAG_BELOW_CTX)
+        enable_thinking = False  # always disabled (v1.3.0 two-phase thinking)
         abstention = ". If not answered above, say you don't know" if enable_thinking else ''
         logger.info(f"RAG thinking: ctx={ctx}, threshold={DISABLE_THINK_FOR_RAG_BELOW_CTX}, "
                     f"caps={model_caps}, thinking={'enabled' if enable_thinking else 'disabled'}")
@@ -2714,8 +2764,8 @@ def build_prompt(messages, model_name):
                 logger.info(f"History sliding window: trimmed {trimmed} oldest turns "
                             f"({original_parts} -> {len(parts)} parts, "
                             f"{len(prompt)} chars, ctx={ctx})")
-        # Only enable thinking for models with the "thinking" capability
-        enable_thinking = 'thinking' in model_caps
+        # Thinking is always disabled via enable_thinking flag (see top of function)
+        enable_thinking = False
 
         # --- Open WebUI meta-task detection ---
         # Open WebUI sends internal tasks (search query gen, title gen, tag gen)
@@ -3468,15 +3518,6 @@ def chat_completions():
         messages = [{'role': 'system', 'content': _tool_sys_content}] + messages
         logger.info(f"[{request_id}] Tool calling: {len(_tools_defs)} tool(s) injected")
 
-    # Build per-call sampling: start from model's detected profile, apply any
-    # per-request overrides from the request body (temperature, top_p, etc.).
-    _model_sampling = dict(config.get('sampling', {}))
-    _request_overrides = {k: body[k] for k in _SAMPLING_DEFAULTS if body.get(k) is not None}
-    if _request_overrides:
-        _model_sampling.update(_request_overrides)
-        logger.debug(f"[{request_id}] Sampling overrides from request: {_request_overrides}")
-    _sampling_warning = None  # kept for compatibility; no longer needed with v1.3.0
-
     logger.info(f"Request {request_id} model: '{requested_model}' stream: {stream}")
 
     # === DIAGNOSTIC: Dump all messages from Open WebUI ===
@@ -3753,6 +3794,14 @@ def chat_completions():
     ABORT_EVENT.clear()
     created = int(time.time())
 
+    # Build per-call sampling: start from model's detected profile, apply any
+    # per-request overrides from the request body (temperature, top_p, etc.).
+    _model_sampling = dict(config.get('sampling', {}))
+    _request_overrides = {k: body[k] for k in _SAMPLING_DEFAULTS if body.get(k) is not None}
+    if _request_overrides:
+        _model_sampling.update(_request_overrides)
+        logger.debug(f"[{request_id}] Sampling overrides from request: {_request_overrides}")
+
     try:
         # =================================================================
         # VL PATH -- image detected, route to vision-language model
@@ -3901,8 +3950,6 @@ def chat_completions():
 
             _extra_hdrs = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
                            'Connection': 'keep-alive'}
-            if _sampling_warning:
-                _extra_hdrs['X-RKLLM-Warning'] = _sampling_warning
             if stream:
                 return Response(
                     stream_with_context(_generate_stream(
@@ -3922,8 +3969,6 @@ def chat_completions():
                     is_rag=False, messages=messages,
                     rag_cache_info=None, kv_is_reset=True, vl_data=vl_data, req_stop=req_stop,
                 )
-                if _sampling_warning:
-                    _r.headers['X-RKLLM-Warning'] = _sampling_warning
                 return _r
 
         # =================================================================
@@ -4083,8 +4128,6 @@ def chat_completions():
             'X-Accel-Buffering': 'no',
             'Connection': 'keep-alive',
         }
-        if _sampling_warning:
-            _stream_hdrs['X-RKLLM-Warning'] = _sampling_warning
         if stream:
             return Response(
                 stream_with_context(_generate_stream(
