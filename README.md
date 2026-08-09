@@ -639,31 +639,37 @@ Aliases are only created when unambiguous (one model claims the alias). If two m
 
 ## Running the Server
 
+There are two services. They run on separate ports and never share the NPU queue:
+
+| Service | File | Port | Purpose |
+|---|---|---|---|
+| Main API | `api.py` | 8000 | Chat completions, VL, RAG, tool calling |
+| Embed & Rerank | `embed_api.py` | 8001 | `/v1/embeddings` + `/v1/rerank` |
+
 ### Production (Recommended)
 
 ```bash
-# Using the included gunicorn.config.py (env-var driven):
-gunicorn --config gunicorn.config.py api:app
-
-# Or with explicit flags:
+# Main chat API
 gunicorn -w 1 -k gthread --threads 4 --timeout 300 -b 0.0.0.0:8000 api:app
+
+# Embedding & reranker service (separate terminal / service unit)
+gunicorn -w 1 -k gthread --threads 2 --timeout 120 -b 0.0.0.0:8001 embed_api:app
 ```
 
-> **Critical:** Always use `-w 1` (single worker). The NPU can only load one model at a time.
+> **Critical:** Always use `-w 1` (single worker). The NPU can only load one model at a time per service.
 >
 > **Critical:** Always use `-k gthread`, NOT `-k gevent`. `rkllm_run()` is a blocking C call that freezes gevent's event loop.
 
 ### Development
 
 ```bash
-python api.py
+python api.py        # port 8000
+python embed_api.py  # port 8001
 ```
-
-This starts Flask's built-in server on `0.0.0.0:8000` with threading enabled.
 
 ### Systemd Service
 
-The setup script creates this automatically. Manual setup:
+The setup script creates the main service automatically. For the embedding service, add a second unit:
 
 ```ini
 [Unit]
@@ -678,6 +684,26 @@ ExecStart=/path/to/.venv/bin/gunicorn -w 1 -k gthread --threads 4 --timeout 300 
 Restart=always
 RestartSec=5
 Environment=RKLLM_API_LOG_LEVEL=INFO
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/rkllm-embed.service
+[Unit]
+Description=RKLLM Embedding & Reranker Service
+After=network.target
+
+[Service]
+Type=simple
+User=your-user
+WorkingDirectory=/path/to/RKLLM-API-Server
+ExecStart=/path/to/.venv/bin/gunicorn -w 1 -k gthread --threads 2 --timeout 120 -b 0.0.0.0:8001 embed_api:app
+Restart=always
+RestartSec=5
+Environment=EMBED_MODEL_PATH=/home/your-user/models/qwen3-embedding-0.6b
+Environment=RERANK_MODEL_PATH=/home/your-user/models/qwen3-reranker-0.6b
 
 [Install]
 WantedBy=multi-user.target
@@ -1223,7 +1249,21 @@ All web search settings are hardcoded (see [Docker Setup](#docker-setup) env var
 
 ### Embedding Model Recommendation
 
-The embedding model determines how well Open WebUI finds the right document chunks when you ask a question. This runs on CPU (not NPU), so it needs to be small enough for ARM hardware.
+The embedding model determines how well Open WebUI finds the right document chunks when you ask a question.
+
+#### Option A — NPU Embedding via embed_api.py (Best Quality)
+
+If `embed_api.py` is running with `Qwen3-Embedding-0.6B`, point Open WebUI at it:
+
+**Admin > Settings > Documents > Embedding Model Backend:** set to `OpenAI`  
+**Embedding Model API Base URL:** `http://<your-device-ip>:8001`  
+**Embedding Model:** `Qwen3-Embedding-0.6B`
+
+This runs embeddings on the NPU — faster than CPU and semantically aligned with your Qwen3 chat models (both trained in the same embedding space), which improves retrieval quality.
+
+> After switching, go to **Admin > Settings > Documents > Danger Zone** and click **Reindex Knowledge Base Vectors** to rebuild all embeddings.
+
+#### Option B — CPU Embedding (Default, No Extra Service Needed)
 
 **Recommended: `BAAI/bge-small-en-v1.5`** — set via the Docker `RAG_EMBEDDING_MODEL` env var above.
 
@@ -2135,7 +2175,9 @@ A collection of standalone scripts for managing and diagnosing the OpenWebUI ins
 
 ```
 RKLLM-API-Server/
-├── api.py                          # Main API server (ctypes, v2.0)
+├── api.py                          # Main API server — chat, VL, RAG, tools (port 8000)
+├── embed_api.py                    # Embedding + reranker service (port 8001)
+├── FUTURE_FEATURES.md              # Planned improvements with effort/impact notes
 ├── Dockerfile                      # Container image (ARM64, python:3.12-slim)
 ├── gunicorn.config.py              # Gunicorn config (env-var driven)
 ├── healthcheck.py                  # Docker HEALTHCHECK script
