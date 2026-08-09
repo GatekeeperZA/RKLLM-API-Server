@@ -3685,7 +3685,12 @@ def chat_completions():
         # VL PATH -- image detected, route to vision-language model
         # =================================================================
         if _vl_has_images and _vl_images:
-            vl_name, vl_config = _find_vl_model()
+            # Prefer the explicitly requested model if it's a VL model;
+            # fall back to first available VL model otherwise.
+            if 'vl_config' in config and 'vision_encoder_path' in config:
+                vl_name, vl_config = name, config
+            else:
+                vl_name, vl_config = _find_vl_model()
             if vl_name is None:
                 end_request(request_id)
                 return make_error_response(
