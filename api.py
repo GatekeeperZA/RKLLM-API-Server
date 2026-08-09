@@ -135,7 +135,8 @@ SYSTEM_FINGERPRINT = "rkllm-v2.0.0-ctypes"
 # Path to rkllm shared library — auto-detected or set via environment
 RKLLM_LIB_PATH = os.environ.get('RKLLM_LIB_PATH', '')
 if not RKLLM_LIB_PATH:
-    for _candidate in ['/usr/lib/librkllmrt.so', 'lib/librkllmrt.so',
+    for _candidate in [os.path.expanduser('~/librkllmrt.so'),
+                        '/usr/lib/librkllmrt.so', 'lib/librkllmrt.so',
                         '/usr/local/lib/librkllmrt.so', 'librkllmrt.so']:
         if os.path.exists(_candidate):
             RKLLM_LIB_PATH = _candidate
