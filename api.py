@@ -643,6 +643,15 @@ MODEL_SAMPLING_PROFILES = {
         'frequency_penalty': 0.0,
         'presence_penalty': 1.0,
     },
+    # InternVL3 uses InternLM2/Qwen2 internals — similar sampling to Qwen.
+    'internvl': {
+        'top_k': 20,
+        'top_p': 0.8,
+        'temperature': 0.7,
+        'repeat_penalty': 1.1,
+        'frequency_penalty': 0.0,
+        'presence_penalty': 1.0,
+    },
 }
 
 
