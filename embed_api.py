@@ -349,9 +349,9 @@ class _ModelWrapper:
         param.mirostat_eta     = 0.1
         param.skip_special_token = True
         param.is_async           = False
-        param.img_start          = None
-        param.img_end            = None
-        param.img_content        = None
+        param.img_start          = b""
+        param.img_end            = b""
+        param.img_content        = b""
 
         ext = RKLLMExtendParam()
         ext.base_domain_id    = 0
