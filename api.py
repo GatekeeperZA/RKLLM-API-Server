@@ -863,25 +863,24 @@ class RKLLMExtendParam(ctypes.Structure):
 
 class RKLLMParam(ctypes.Structure):
     _fields_ = [
-        ("model_path", ctypes.c_char_p),
-        ("max_context_len", ctypes.c_int32),
-        ("max_new_tokens", ctypes.c_int32),
-        ("top_k", ctypes.c_int32),
-        ("n_keep", ctypes.c_int32),
-        ("top_p", ctypes.c_float),
-        ("temperature", ctypes.c_float),
-        ("repeat_penalty", ctypes.c_float),
-        ("frequency_penalty", ctypes.c_float),
-        ("presence_penalty", ctypes.c_float),
-        ("mirostat", ctypes.c_int32),
-        ("mirostat_tau", ctypes.c_float),
-        ("mirostat_eta", ctypes.c_float),
-        ("skip_special_token", ctypes.c_bool),
-        ("is_async", ctypes.c_bool),
-        ("img_start", ctypes.c_char_p),
-        ("img_end", ctypes.c_char_p),
-        ("img_content", ctypes.c_char_p),
-        ("extend_param", RKLLMExtendParam),
+        ("model_path",          ctypes.c_char_p),
+        ("max_context_len",     ctypes.c_int32),
+        ("max_new_tokens",      ctypes.c_int32),
+        ("top_k",               ctypes.c_int32),
+        ("n_keep",              ctypes.c_int32),
+        ("top_p",               ctypes.c_float),
+        ("temperature",         ctypes.c_float),
+        ("repeat_penalty",      ctypes.c_float),
+        ("frequency_penalty",   ctypes.c_float),
+        ("presence_penalty",    ctypes.c_float),
+        ("mirostat",            ctypes.c_int32),
+        ("mirostat_tau",        ctypes.c_float),
+        ("mirostat_eta",        ctypes.c_float),
+        ("skip_special_token",  ctypes.c_bool),
+        ("ignore_eos_token",    ctypes.c_bool),   # v1.3.0: new field
+        ("is_async",            ctypes.c_bool),
+        # img_start / img_end / img_content removed in v1.3.0 (moved to chat template)
+        ("extend_param",        RKLLMExtendParam),
     ]
 
 
@@ -949,12 +948,29 @@ class RKLLMPromptCacheParam(ctypes.Structure):
     ]
 
 
+class RKLLMSamplingParam(ctypes.Structure):
+    """Per-call sampling overrides — new in v1.3.0. Pass via RKLLMInferParam.sampling_params."""
+    _fields_ = [
+        ("top_k",             ctypes.c_int32),
+        ("top_p",             ctypes.c_float),
+        ("temperature",       ctypes.c_float),
+        ("repeat_penalty",    ctypes.c_float),
+        ("frequency_penalty", ctypes.c_float),
+        ("presence_penalty",  ctypes.c_float),
+        ("mirostat",          ctypes.c_int32),
+        ("mirostat_tau",      ctypes.c_float),
+        ("mirostat_eta",      ctypes.c_float),
+    ]
+
+
 class RKLLMInferParam(ctypes.Structure):
     _fields_ = [
-        ("mode", RKLLMInferMode),
-        ("lora_params", ctypes.POINTER(RKLLMLoraParam)),
+        ("mode",                RKLLMInferMode),
+        ("lora_params",         ctypes.POINTER(RKLLMLoraParam)),
         ("prompt_cache_params", ctypes.POINTER(RKLLMPromptCacheParam)),
-        ("keep_history", ctypes.c_int),
+        ("sampling_params",     ctypes.POINTER(RKLLMSamplingParam)),  # v1.3.0: per-call sampling
+        ("keep_history",        ctypes.c_int),
+        ("max_new_tokens",      ctypes.c_int32),                      # v1.3.0: per-call token limit
     ]
 
 
@@ -1508,16 +1524,12 @@ class RKLLMWrapper:
         param.mirostat_tau = 5.0
         param.mirostat_eta = 0.1
         param.skip_special_token = True
+        param.ignore_eos_token = False
         param.is_async = False
+        # img_start/img_end/img_content removed in v1.3.0 — now handled via chat template
         if vl_config:
-            param.img_start = vl_config.get('img_start', '').encode('utf-8')
-            param.img_end = vl_config.get('img_end', '').encode('utf-8')
-            param.img_content = vl_config.get('img_content', '').encode('utf-8')
             param.extend_param.base_domain_id = vl_config.get('base_domain_id', 1)
         else:
-            param.img_start = b""
-            param.img_end = b""
-            param.img_content = b""
             param.extend_param.base_domain_id = 0
         param.extend_param.embed_flash = 1
         param.extend_param.n_batch = 1
@@ -1572,13 +1584,15 @@ class RKLLMWrapper:
             pass
 
     def run(self, prompt, role="user", keep_history=1, enable_thinking=False,
-            save_prompt_cache_path=None):
+            save_prompt_cache_path=None, sampling=None):
         """Run inference (BLOCKING).  Must be called from a worker thread.
 
         Args:
             save_prompt_cache_path: if set, saves KV state to this path after
                                    inference.  Used once on first request to
                                    prime the prompt cache for subsequent loads.
+            sampling: dict of per-call sampling overrides (v1.3.0+). When set,
+                     overrides the init-time defaults for this call only.
 
         Returns the rkllm_run return code (0 = success).
         """
@@ -1596,6 +1610,21 @@ class RKLLMWrapper:
         infer_param.mode = RKLLM_INFER_GENERATE
         infer_param.keep_history = keep_history
 
+        # Per-call sampling (v1.3.0+) — overrides init-time defaults
+        _sampling_param = None
+        if sampling:
+            _sampling_param = RKLLMSamplingParam()
+            _sampling_param.top_k             = sampling.get('top_k', 40)
+            _sampling_param.top_p             = sampling.get('top_p', 0.9)
+            _sampling_param.temperature       = sampling.get('temperature', 0.7)
+            _sampling_param.repeat_penalty    = sampling.get('repeat_penalty', 1.1)
+            _sampling_param.frequency_penalty = sampling.get('frequency_penalty', 0.0)
+            _sampling_param.presence_penalty  = sampling.get('presence_penalty', 0.0)
+            _sampling_param.mirostat          = 0
+            _sampling_param.mirostat_tau      = 5.0
+            _sampling_param.mirostat_eta      = 0.1
+            infer_param.sampling_params = ctypes.pointer(_sampling_param)
+
         # Optionally save prompt cache after this inference
         _cache_param = None
         if save_prompt_cache_path:
@@ -1612,7 +1641,8 @@ class RKLLMWrapper:
         )
 
     def run_multimodal(self, prompt, image_embed, n_image_tokens, n_image,
-                        image_width, image_height, role="user", keep_history=0):
+                        image_width, image_height, role="user", keep_history=0,
+                        sampling=None):
         """Run multimodal inference (BLOCKING) with image embeddings.
 
         Returns the rkllm_run return code (0 = success).
@@ -1639,6 +1669,20 @@ class RKLLMWrapper:
         ctypes.memset(ctypes.byref(infer_param), 0, ctypes.sizeof(RKLLMInferParam))
         infer_param.mode = RKLLM_INFER_GENERATE
         infer_param.keep_history = keep_history
+
+        _sampling_param = None
+        if sampling:
+            _sampling_param = RKLLMSamplingParam()
+            _sampling_param.top_k             = sampling.get('top_k', 40)
+            _sampling_param.top_p             = sampling.get('top_p', 0.9)
+            _sampling_param.temperature       = sampling.get('temperature', 0.7)
+            _sampling_param.repeat_penalty    = sampling.get('repeat_penalty', 1.1)
+            _sampling_param.frequency_penalty = sampling.get('frequency_penalty', 0.0)
+            _sampling_param.presence_penalty  = sampling.get('presence_penalty', 0.0)
+            _sampling_param.mirostat          = 0
+            _sampling_param.mirostat_tau      = 5.0
+            _sampling_param.mirostat_eta      = 0.1
+            infer_param.sampling_params = ctypes.pointer(_sampling_param)
 
         return self.lib.rkllm_run(
             self.handle,
@@ -3424,14 +3468,14 @@ def chat_completions():
         messages = [{'role': 'system', 'content': _tool_sys_content}] + messages
         logger.info(f"[{request_id}] Tool calling: {len(_tools_defs)} tool(s) injected")
 
-    # Log ignored sampling parameters; surface as response header so callers know.
-    ignored_params = {k: body[k] for k, default in _SAMPLING_DEFAULTS.items()
-                      if body.get(k) is not None and body[k] != default}
-    _sampling_warning = None
-    if ignored_params:
-        summary = ', '.join(f'{k}={v}' for k, v in ignored_params.items())
-        logger.debug(f"[{request_id}] Ignored sampling params: {summary} (rkllm uses model-compiled sampling)")
-        _sampling_warning = f"Sampling params ignored (rkllm uses model-compiled values): {summary}"
+    # Build per-call sampling: start from model's detected profile, apply any
+    # per-request overrides from the request body (temperature, top_p, etc.).
+    _model_sampling = dict(config.get('sampling', {}))
+    _request_overrides = {k: body[k] for k in _SAMPLING_DEFAULTS if body.get(k) is not None}
+    if _request_overrides:
+        _model_sampling.update(_request_overrides)
+        logger.debug(f"[{request_id}] Sampling overrides from request: {_request_overrides}")
+    _sampling_warning = None  # kept for compatibility; no longer needed with v1.3.0
 
     logger.info(f"Request {request_id} model: '{requested_model}' stream: {stream}")
 
@@ -4054,6 +4098,7 @@ def chat_completions():
                     kv_is_reset=kv_is_reset,
                     req_stop=req_stop,
                     has_tools=_has_tools,
+                    sampling=_model_sampling,
                 )),
                 mimetype='text/event-stream',
                 headers=_stream_hdrs,
@@ -4069,9 +4114,8 @@ def chat_completions():
                 kv_is_reset=kv_is_reset,
                 req_stop=req_stop,
                 has_tools=_has_tools,
+                sampling=_model_sampling,
             )
-            if _sampling_warning:
-                _r.headers['X-RKLLM-Warning'] = _sampling_warning
             return _r
 
     except Exception as e:
@@ -4090,7 +4134,7 @@ def _generate_stream(prompt, request_id, model_name, created,
                      include_usage=False, messages=None,
                      is_rag=False, rag_cache_info=None,
                      kv_is_reset=False, vl_data=None, req_stop=None,
-                     has_tools=False):
+                     has_tools=False, sampling=None):
     """Generator that yields SSE chunks from rkllm token callback queue."""
     global _worker_thread
 
@@ -4456,7 +4500,7 @@ def _generate_complete(prompt, request_id, model_name, created,
                        keep_history=1, enable_thinking=True,
                        is_rag=False, messages=None, rag_cache_info=None,
                        kv_is_reset=False, vl_data=None, req_stop=None,
-                       has_tools=False):
+                       has_tools=False, sampling=None):
     """Collect all output and return a non-streaming JSON response."""
     global _worker_thread
 
@@ -4488,12 +4532,14 @@ def _generate_complete(prompt, request_id, model_name, created,
                     vl_data['n_image_tokens'], vl_data['n_image'],
                     vl_data['image_width'], vl_data['image_height'],
                     role="user", keep_history=keep_history,
+                    sampling=sampling,
                 )
             else:
                 ret = _active_wrapper.run(prompt, role="user",
                                           keep_history=keep_history,
                                           enable_thinking=enable_thinking,
-                                          save_prompt_cache_path=_save_cache_path)
+                                          save_prompt_cache_path=_save_cache_path,
+                                          sampling=sampling)
             if ret != 0:
                 logger.error(f"[{request_id}] rkllm_run returned error code {ret}")
                 _token_queue.put(("error", f"rkllm_run returned {ret}"))
