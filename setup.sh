@@ -704,7 +704,7 @@ Environment="RKLLM_EMBED_LOG_LEVEL=INFO"
 Environment="EMBED_MODEL_PATH=$EMBED_MODEL_FILE"
 Environment="RERANK_MODEL_PATH=$RERANK_MODEL_FILE"
 
-ExecStart=$VENV_DIR/bin/gunicorn -w 1 -k gthread --threads 2 --timeout 120 -b 0.0.0.0:8001 embed_api:app
+ExecStart=$VENV_DIR/bin/gunicorn -w 1 -k gthread --threads 2 --timeout 600 -b 0.0.0.0:8001 embed_api:app
 
 Restart=on-failure
 RestartSec=10
