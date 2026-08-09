@@ -221,7 +221,7 @@ This project was developed and tested on:
 
 > **SDK Version Coupling:** The ctypes struct definitions in `api.py` target the RKLLM SDK v1.2.x C header (`rkllm.h`). Older SDK versions used a flat 112-byte reserved blob in `RKLLMExtendParam` and lacked fields like `n_keep`, `n_batch`, `use_cross_attn`, and `enable_thinking`. Running this server against an older `librkllmrt.so` (pre-1.2) will cause **silent struct-offset misalignment** — the parameter block passed to `rkllm_init()` would be corrupted, producing wrong sampling behaviour rather than a crash. Always use the runtime from the [v1.2.x release](https://github.com/airockchip/rknn-llm) or later.
 >
-> **Do not upgrade to v1.3.0 without updating `api.py` first.** RKLLM v1.3.0 adds new fields to `RKLLMInferParam` (`max_new_tokens`, `sampling_params`) and `RKLLMParam` (`ignore_eos_token`), and changes the multimodal input interface. Swapping the `.so` without updating the ctypes struct definitions will cause silent struct-offset corruption or crashes. The v1.3.0 upgrade requires a deliberate api.py update pass against the new SDK headers before the library is replaced.
+> **Do not upgrade to v1.3.0 without updating `api.py` first.** RKLLM v1.3.0 adds new fields to `RKLLMInferParam` (`max_new_tokens`, `sampling_params`) and `RKLLMParam` (`ignore_eos_token`), and changes the multimodal input interface. Swapping the `.so` without updating the ctypes struct definitions will cause silent struct-offset corruption or crashes. A complete v1.3.0 upgrade attempt is available on the [`rkllm-v1.3.0-wip`](https://github.com/GatekeeperZA/RKLLM-API-Server/tree/rkllm-v1.3.0-wip) branch — it is rolled back and not production-ready due to a phase-2 early EOS bug. See [Git Tags & Branches](#git-tags--branches) for details.
 
 ### Python Dependencies
 ```bash
@@ -2475,7 +2475,14 @@ Qwen3-VL uses `patch_size=16` and `merge_size=2`, so resolution must be divisibl
 | `v1.0-subprocess-stable` | Last working subprocess version (V1) |
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
-| `main` | Current: ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + model-aware sampling + prompt cache + sliding window + NPU benchmarks + full test suites (321 checks, 0 failures) |
+| `main` | Current stable: RKLLM v1.2.3 runtime — ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + model-aware sampling + prompt cache + sliding window + NPU benchmarks |
+| `rkllm-v1.3.0-wip` | Work-in-progress v1.3.0 upgrade — **archived, not stable**. Contains updated ctypes structs for v1.3.0 ABI and a two-phase thinking implementation. Rolled back due to phase-2 early EOS bug (13–27 tokens then mid-sentence EOS). See [ISSUES_v1.3.0.md](ISSUES_v1.3.0.md) on that branch for full bug tracker. Revisit when a newer v1.3.x runtime is released. |
+
+### RKLLM v1.3.0 Status
+
+> **v1.3.0 is currently not recommended for production.** The `rkllm-v1.3.0-wip` branch contains a complete upgrade attempt including updated struct layouts for the new ABI and a two-phase thinking implementation. It was rolled back to v1.2.3 on 2026-08-09 due to an unresolved bug where phase-2 inference (after `</think>`) generates only 13–27 tokens then terminates mid-sentence, even with `role=None`. No `ignore_eos_token` field exists in v1.3.0's `RKLLMSamplingParam`, making a per-call workaround impossible.
+>
+> **To try v1.3.0:** Check out the `rkllm-v1.3.0-wip` branch and replace `~/librkllmrt.so` with the v1.3.0 binary. Read `ISSUES_v1.3.0.md` for the full list of known issues and what was attempted.
 
 ---
 
