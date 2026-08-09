@@ -1058,6 +1058,12 @@ class RKLLMCallback(ctypes.Structure):
 # loop reads from it.  Safe because NPU is single-task — only one
 # inference runs at a time.
 _token_queue = queue.Queue()
+# Two-phase thinking state. _phase1_active redirects callback output to
+# _phase1_buffer so run() can inspect phase 1 output before deciding
+# whether to proceed to phase 2.
+_phase1_active = False
+_phase1_buffer = []   # (type, data) tuples accumulated during phase 1
+_phase1_stats  = {}
 
 
 def _rkllm_callback_impl(result_ptr, userdata, state):
@@ -1073,7 +1079,10 @@ def _rkllm_callback_impl(result_ptr, userdata, state):
                 if text:
                     decoded = text.decode('utf-8', errors='replace')
                     if decoded:
-                        _token_queue.put(("token", decoded))
+                        if _phase1_active:
+                            _phase1_buffer.append(decoded)
+                        else:
+                            _token_queue.put(("token", decoded))
         elif state == RKLLM_RUN_FINISH:
             stats = {}
             if result_ptr:
@@ -1088,7 +1097,11 @@ def _rkllm_callback_impl(result_ptr, userdata, state):
                     }
                 except (ValueError, AttributeError):
                     pass  # Perf stats unavailable
-            _token_queue.put(("finish", stats))
+            if _phase1_active:
+                # Store stats; run() will decide what to do with buffered tokens.
+                _phase1_stats.update(stats)
+            else:
+                _token_queue.put(("finish", stats))
         elif state == RKLLM_RUN_ERROR:
             error_msg = "unknown error"
             if result_ptr:
@@ -1673,10 +1686,71 @@ class RKLLMWrapper:
             _cache_param.prompt_cache_path = save_prompt_cache_path.encode('utf-8')
             infer_param.prompt_cache_params = ctypes.pointer(_cache_param)
 
-        return self.lib.rkllm_run(
+        if not enable_thinking:
+            return self.lib.rkllm_run(
+                self.handle,
+                ctypes.byref(rkllm_input),
+                ctypes.byref(infer_param),
+                None,
+            )
+
+        # Two-phase inference for thinking models:
+        # Phase 1: model may generate <think>...</think> then FINISH.
+        # Phase 2: empty assistant continuation generates the actual answer.
+        # Buffer phase 1 output to detect whether the model actually entered
+        # thinking mode (emitted <think>). Some models/sizes skip it.
+        global _phase1_active, _phase1_buffer, _phase1_stats
+        _phase1_buffer.clear()
+        _phase1_stats.clear()
+        _phase1_active = True
+        ret = self.lib.rkllm_run(
             self.handle,
             ctypes.byref(rkllm_input),
             ctypes.byref(infer_param),
+            None,
+        )
+        _phase1_active = False
+
+        if ret != 0:
+            # Flush buffered tokens as normal output then signal error
+            for tok in _phase1_buffer:
+                _token_queue.put(("token", tok))
+            return ret
+
+        phase1_text = "".join(_phase1_buffer)
+
+        if "<think>" not in phase1_text:
+            # Model didn't enter thinking mode — treat phase 1 as the full
+            # answer (single-phase). Flush tokens and finish normally.
+            for tok in _phase1_buffer:
+                _token_queue.put(("token", tok))
+            _token_queue.put(("finish", _phase1_stats))
+            return 0
+
+        # Model DID think. Flush phase 1 tokens to consumer, then signal
+        # phase transition so the consumer can close the <think> block.
+        for tok in _phase1_buffer:
+            _token_queue.put(("token", tok))
+        _token_queue.put(("thinking_end", _phase1_stats))
+
+        # Phase 2: continue from KV cache with empty assistant turn
+        rkllm_input2 = RKLLMInput()
+        rkllm_input2.role = b"assistant"
+        rkllm_input2.enable_thinking = ctypes.c_bool(False)
+        rkllm_input2.input_type = RKLLM_INPUT_PROMPT
+        rkllm_input2.input_data.prompt_input = ctypes.c_char_p(b"")
+
+        infer_param2 = RKLLMInferParam()
+        ctypes.memset(ctypes.byref(infer_param2), 0, ctypes.sizeof(RKLLMInferParam))
+        infer_param2.mode = RKLLM_INFER_GENERATE
+        infer_param2.keep_history = 1
+        if _sampling_param is not None:
+            infer_param2.sampling_params = ctypes.pointer(_sampling_param)
+
+        return self.lib.rkllm_run(
+            self.handle,
+            ctypes.byref(rkllm_input2),
+            ctypes.byref(infer_param2),
             None,
         )
 
@@ -2440,12 +2514,10 @@ def build_prompt(messages, model_name):
     rag_parts = _extract_rag_reference(system_text) if system_text else None
 
     prompt = ""
-    # Always use enable_thinking=False — v1.3.0 thinking mode is two-phase (library
-    # fires FINISH after </think>), which we don't support. Models that can think
-    # (qwen3, etc.) produce <think>...</think> naturally in text output; our
-    # ThinkTagParser handles separating reasoning from content.
     model_caps = model_cfg.get('capabilities', []) if model_cfg else []
-    enable_thinking = False
+    # Two-phase thinking: enable only for models that support it.
+    # run() handles the two rkllm_run calls; ThinkTagParser splits reasoning/content.
+    enable_thinking = 'thinking' in model_caps
 
     # =====================================================================
     # FOLLOW-UP / IRRELEVANT-RAG DETECTION
@@ -2645,7 +2717,7 @@ def build_prompt(messages, model_name):
     # Re-check after quality floor may have cleared rag_parts
     if rag_parts and user_question:
         # enable_thinking for RAG: only if model supports it AND context is large enough
-        enable_thinking = False  # always disabled (v1.3.0 two-phase thinking)
+        enable_thinking = 'thinking' in model_caps and ctx >= DISABLE_THINK_FOR_RAG_BELOW_CTX
         abstention = ". If not answered above, say you don't know" if enable_thinking else ''
         logger.info(f"RAG thinking: ctx={ctx}, threshold={DISABLE_THINK_FOR_RAG_BELOW_CTX}, "
                     f"caps={model_caps}, thinking={'enabled' if enable_thinking else 'disabled'}")
@@ -2764,8 +2836,7 @@ def build_prompt(messages, model_name):
                 logger.info(f"History sliding window: trimmed {trimmed} oldest turns "
                             f"({original_parts} -> {len(parts)} parts, "
                             f"{len(prompt)} chars, ctx={ctx})")
-        # Thinking is always disabled via enable_thinking flag (see top of function)
-        enable_thinking = False
+        enable_thinking = 'thinking' in model_caps
 
         # --- Open WebUI meta-task detection ---
         # Open WebUI sends internal tasks (search query gen, title gen, tag gen)
@@ -2773,7 +2844,7 @@ def build_prompt(messages, model_name):
         # thinking mode wastes 20+ seconds and can confuse result parsing.
         _user_lower = user_question.lower()
         _is_meta = any(sig in _user_lower for sig in _OPENWEBUI_META_TASK_SIGNATURES)
-        if _is_meta:
+        if _is_meta and enable_thinking:
             enable_thinking = False
             logger.info(f"Meta-task detected — thinking disabled for speed")
 
@@ -4363,6 +4434,23 @@ def _generate_stream(prompt, request_id, model_name, created,
                         _active_wrapper.abort()
                         break
 
+            elif msg_type == "thinking_end":
+                # Phase 1 of two-phase thinking complete — inject closing tag if
+                # ThinkTagParser is still inside a <think> block (model emitted the
+                # open tag but RKLLM consumed </think> as a stop signal without
+                # emitting it as a token).
+                if think_parser.in_thinking:
+                    for kind, chunk_text in think_parser.feed("</think>\n"):
+                        if kind == 'thinking':
+                            total_reasoning += chunk_text
+                        else:
+                            total_content += chunk_text
+                            if not has_tools:
+                                yield make_sse_chunk(request_id, model_name, created,
+                                                     delta={"content": chunk_text})
+                logger.debug(f"[{request_id}] Thinking phase complete, continuing to answer phase")
+                continue
+
             elif msg_type == "finish":
                 stats_data = msg_data or {}
                 generation_clean = True
@@ -4681,6 +4769,15 @@ def _generate_complete(prompt, request_id, model_name, created,
                                        f"{len(_visible_output)} chars total) — aborting")
                         _active_wrapper.abort()
                         break
+
+            elif msg_type == "thinking_end":
+                # If model emitted <think> but RKLLM consumed </think> as a stop
+                # signal, inject the close tag so regex splitting works correctly.
+                if "<think>" in combined_output and "</think>" not in combined_output:
+                    combined_output += "</think>\n"
+                    content_parts = [combined_output]
+                logger.debug(f"[{request_id}] Thinking phase complete, continuing to answer phase")
+                continue
 
             elif msg_type == "finish":
                 stats_data = msg_data or {}
