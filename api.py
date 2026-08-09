@@ -277,6 +277,7 @@ _OPENWEBUI_META_TASK_SIGNATURES = (
     'create a concise, 3-5 word',
     'title for the chat',
     'title for the prompt',
+    'generate 1-3 broad tags',
     'generate 1-3 tags',
     'categorize the chat',
     'autocomplete generation',
@@ -3683,6 +3684,7 @@ def chat_completions():
     # like "can you generate 1-3 tags for my blog post?".
     _is_tag_gen = (
         ('generate 1-3 tags' in _luc_lower
+         or 'generate 1-3 broad tags' in _luc_lower
          or 'categorize the chat' in _luc_lower)
         and 'tag' in _luc_lower
         and ('chat history' in _luc_lower or 'conversation' in _luc_lower
