@@ -1687,6 +1687,13 @@ _vl_rkllm_wrapper = None     # RKLLMWrapper for VL LLM decoder
 VL_CURRENT_MODEL = None      # Name of loaded VL model (None = not loaded)
 VL_LAST_REQUEST_TIME = 0     # Timestamp of last VL request (for idle auto-unload)
 
+# VL image embedding cache — avoids re-running the RKNN vision encoder on the
+# same image in multi-turn conversations (OWUI resends full base64 each turn).
+# Key: md5(image_bytes). Value: numpy embed array. Capped at 4 entries (LRU).
+_vl_embed_cache: "OrderedDict[str, Any]" = OrderedDict()
+_VL_EMBED_CACHE_MAX = 4
+_VL_EMBED_CACHE_LOCK = Lock()
+
 SHUTDOWN_EVENT = Event()
 GENERATION_COMPLETE = Event()
 GENERATION_COMPLETE.set()  # Initially set — no generation is running
@@ -2975,6 +2982,8 @@ def _unload_vl_model(reason="requested"):
             _vision_encoder = None
 
         VL_CURRENT_MODEL = None
+        with _VL_EMBED_CACHE_LOCK:
+            _vl_embed_cache.clear()
         logger.info("VL model unloaded")
 
 
@@ -3692,6 +3701,16 @@ def chat_completions():
 
             all_embeds = []
             for img_idx, img_bytes in enumerate(images_to_process):
+                img_key = hashlib.md5(img_bytes).hexdigest()
+                with _VL_EMBED_CACHE_LOCK:
+                    if img_key in _vl_embed_cache:
+                        _vl_embed_cache.move_to_end(img_key)
+                        all_embeds.append(_vl_embed_cache[img_key])
+                        logger.info(f"[{request_id}] Image {img_idx+1} embed cache HIT "
+                                    f"(md5={img_key[:8]}…) — skipping vision encoder")
+                        update_request_activity()
+                        continue
+
                 try:
                     image_np = _preprocess_image(
                         img_bytes,
@@ -3713,6 +3732,13 @@ def chat_completions():
                     end_request(request_id)
                     return make_error_response(
                         f"Vision encoder failed on image {img_idx+1}/{len(images_to_process)}", 500)
+
+                with _VL_EMBED_CACHE_LOCK:
+                    _vl_embed_cache[img_key] = embed
+                    _vl_embed_cache.move_to_end(img_key)
+                    if len(_vl_embed_cache) > _VL_EMBED_CACHE_MAX:
+                        _vl_embed_cache.popitem(last=False)
+
                 all_embeds.append(embed)
                 update_request_activity()
 
