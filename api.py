@@ -141,8 +141,10 @@ SYSTEM_FINGERPRINT = "rkllm-v2.0.0-ctypes"
 RKLLM_LIB_PATH = os.environ.get('RKLLM_LIB_PATH', '')
 if not RKLLM_LIB_PATH:
     for _candidate in [os.path.expanduser('~/librkllmrt.so'),
-                        '/usr/lib/librkllmrt.so', 'lib/librkllmrt.so',
-                        '/usr/local/lib/librkllmrt.so', 'librkllmrt.so']:
+                        '/usr/lib/librkllmrt.so',
+                        os.path.join(SCRIPT_DIR, 'lib', 'librkllmrt.so'),
+                        '/usr/local/lib/librkllmrt.so',
+                        os.path.join(SCRIPT_DIR, 'librkllmrt.so')]:
         if os.path.exists(_candidate):
             RKLLM_LIB_PATH = _candidate
             break
@@ -412,12 +414,19 @@ def _parse_tool_calls(text):
     for m in _RE_TOOL_CALL.finditer(text):
         try:
             data = json.loads(m.group(1))
+            name = data.get('name', '')
+            if not name:
+                logger.warning("Tool call block missing 'name' field — skipping")
+                continue
+            args = data.get('arguments', {})
+            if not isinstance(args, dict):
+                args = {}
             calls.append({
                 'id': f"call_{uuid.uuid4().hex[:8]}",
                 'type': 'function',
                 'function': {
-                    'name': data.get('name', ''),
-                    'arguments': json.dumps(data.get('arguments', {}), ensure_ascii=False),
+                    'name': name,
+                    'arguments': json.dumps(args, ensure_ascii=False),
                 }
             })
         except (json.JSONDecodeError, AttributeError):
@@ -533,7 +542,7 @@ def detect_context_length(path_or_name, default=4096):
             except Exception:
                 pass
 
-    s = path_or_name.lower()
+    s = os.path.basename(path_or_name).lower()
 
     for k in (32768, 16384, 8192, 4096, 2048):
         suffix = f"{k // 1024}k"
@@ -690,9 +699,9 @@ def detect_sampling_profile(model_id, model_dir):
     # Match model family from MODEL_SAMPLING_PROFILES
     model_lower = model_id.lower()
     matched_family = None
-    for family, family_profile in MODEL_SAMPLING_PROFILES.items():
+    for family in sorted(MODEL_SAMPLING_PROFILES, key=len, reverse=True):
         if family in model_lower:
-            profile.update(family_profile)
+            profile.update(MODEL_SAMPLING_PROFILES[family])
             matched_family = family
             break
 
@@ -1064,8 +1073,8 @@ def _rkllm_callback_impl(result_ptr, userdata, state):
         # so the consumer doesn't hang for GENERATION_TIMEOUT seconds.
         try:
             _token_queue.put(("error", f"callback exception: {_cb_exc}"))
-        except Exception:
-            pass  # Last resort: swallow to protect C caller
+        except BaseException:
+            pass  # Last resort: swallow to protect C caller (catches MemoryError too)
     return 0
 
 
@@ -1302,17 +1311,21 @@ class RKNNVisionEncoder:
 
         try:
             if self.n_output == 1:
-                ctypes.memmove(result.ctypes.data, outputs[0].buf, outputs[0].size)
+                expected_bytes = embed_len * 4
+                copy_bytes = min(outputs[0].size, expected_bytes)
+                if outputs[0].size != expected_bytes:
+                    logger.warning(f"RKNN output size {outputs[0].size} != expected {expected_bytes}; truncating copy")
+                ctypes.memmove(result.ctypes.data, outputs[0].buf, copy_bytes)
             else:
                 # Interleave outputs from multiple encoder heads into the result buffer.
-                # outputs[j].buf is a raw void* pointing into RKNN-owned memory; use
-                # ctypes.cast to an integer (c_void_p) for pointer arithmetic instead of
-                # dereferencing via .contents (which copies the value, not the address).
+                # outputs[j].buf is a plain integer address (c_void_p field read returns int).
                 for i in range(self.model_image_token):
                     for j in range(self.n_output):
+                        if not outputs[j].buf:
+                            raise RuntimeError(f"RKNN output[{j}].buf is NULL after rknn_outputs_get")
                         dst_offset = (i * self.n_output * self.model_embed_size +
                                       j * self.model_embed_size)
-                        src_base = ctypes.cast(outputs[j].buf, ctypes.c_void_p).value
+                        src_base = outputs[j].buf  # already an int from c_void_p field read
                         src_ptr = src_base + i * self.model_embed_size * 4
                         ctypes.memmove(
                             result.ctypes.data + dst_offset * 4,
@@ -1541,6 +1554,10 @@ class RKLLMWrapper:
             logger.error(f"rkllm_init failed (ret={ret}) for model '{param.model_path.decode()}'")
             self._model_loaded = False
             return False
+        if not self.handle.value:
+            logger.error("rkllm_init returned 0 but handle is null — NPU driver may be OOM")
+            self._model_loaded = False
+            return False
         self._model_loaded = True
         return True
 
@@ -1760,9 +1777,16 @@ def _check_kv_incremental(model_name, messages):
         # set means the cached KV state is wrong for the new request.
         _sys_parts = tuple(m.get('content', '') for m in messages
                            if m.get('role') == 'system' and m.get('content'))
-        if hash(_sys_parts) != _kv_cache_state["system_prompt_hash"]:
+        _sys_hash = hashlib.sha256("\n".join(_sys_parts).encode()).hexdigest()[:16]
+        if _sys_hash != _kv_cache_state["system_prompt_hash"]:
             return None
 
+        # If any user turn has multimodal (list) content, disable incremental mode —
+        # image embeddings are not tracked in the KV state, so appending a text-only
+        # message after an image turn would reference the wrong KV context.
+        if any(m.get('role') == 'user' and isinstance(m.get('content'), list)
+               for m in messages):
+            return None
         user_msgs = [m['content'] for m in messages
                      if m.get('role') == 'user' and isinstance(m.get('content'), str)
                      and m.get('content')]
@@ -1786,7 +1810,7 @@ def _update_kv_tracking(model_name, messages, is_reset):
                        if m.get('role') == 'system' and m.get('content'))
     with _KV_LOCK:
         _kv_cache_state["model"] = model_name
-        _kv_cache_state["system_prompt_hash"] = hash(_sys_parts)
+        _kv_cache_state["system_prompt_hash"] = hashlib.sha256("\n".join(_sys_parts).encode()).hexdigest()[:16]
         if is_reset:
             # Full reset — track all user messages from this conversation
             _kv_cache_state["user_messages"] = list(user_msgs)
@@ -1916,7 +1940,7 @@ def get_active_request_info():
 
 def resolve_model(requested_name):
     """Resolve a model name (including aliases) to (model_name, config)."""
-    if not requested_name:
+    if not requested_name or not requested_name.strip():
         return None, None
     name = requested_name.lower().strip()
     if name in ALIASES:
@@ -2318,7 +2342,7 @@ def build_prompt(messages, model_name):
         if role == 'system':
             if content:
                 system_parts.append(content)
-        elif role == 'tool':
+        elif role in ('tool', 'function'):
             # Tool result from function execution — format as tool response
             conversation.append(('user', f'<tool_response>\n{content}\n</tool_response>'))
         elif role == 'assistant' and tool_calls_data:
@@ -2339,13 +2363,17 @@ def build_prompt(messages, model_name):
             if content:
                 combined = f"{content}\n{combined}"
             conversation.append(('assistant', combined))
-        else:
+        elif role in ('user', 'assistant'):
             if not content:
                 continue
             conversation.append((role, content))
+        else:
+            if content:
+                logger.warning(f"Unknown message role '{role}' — treating as user message")
+                conversation.append(('user', content))
     if len(system_parts) > 1:
         logger.warning(f"Multiple system messages ({len(system_parts)}) — concatenating")
-    system_text = "\n".join(system_parts)
+    system_text = "\n\n".join(system_parts)
 
     user_question = ""
     for role, content in reversed(conversation):
@@ -2860,23 +2888,31 @@ def _prompt_cache_is_valid(cache_file, model_path):
         return False
     except Exception as e:
         logger.warning(f"Prompt cache meta check failed ({e}); invalidating: {cache_file}")
-        try:
-            os.remove(cache_file)
-        except OSError:
-            pass
+        for _p in (cache_file, _prompt_cache_meta_path(cache_file)):
+            try:
+                os.remove(_p)
+            except OSError:
+                pass
         return False
 
 
 def _prompt_cache_write_meta(cache_file, model_path):
-    """Write meta file for the prompt cache after it has been saved."""
+    """Write meta file for the prompt cache after it has been saved (atomic)."""
     fp = _prompt_cache_model_fingerprint(model_path)
     if fp is None:
         return
+    meta_path = _prompt_cache_meta_path(cache_file)
+    tmp_path = meta_path + '.tmp'
     try:
-        with open(_prompt_cache_meta_path(cache_file), 'w') as f:
+        with open(tmp_path, 'w') as f:
             json.dump(fp, f)
+        os.replace(tmp_path, meta_path)
     except Exception as e:
         logger.warning(f"Failed to write prompt cache meta: {e}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def _get_prompt_cache_path(model_name):
@@ -3000,6 +3036,9 @@ def _load_vl_model(vl_name, vl_config):
             if not _vl_rkllm_wrapper.init_model(model_path, ctx_len, max_tokens,
                                                  vl_config=vl_cfg, sampling=sampling):
                 logger.error(f"VL model {vl_name} failed to initialize")
+                if _vision_encoder is not None:
+                    _vision_encoder.destroy()
+                    _vision_encoder = None
                 return False
 
         elapsed = time.time() - load_start
@@ -3066,6 +3105,10 @@ def model_monitor():
 
         SHUTDOWN_EVENT.wait(MONITOR_INTERVAL)
     logger.info("Model monitor stopped")
+    # SHUTDOWN_EVENT set by signal handler — trigger clean shutdown from this
+    # background thread so the signal handler itself stays reentrant-safe.
+    shutdown()
+    sys.exit(0)
 
 
 _monitor_thread = Thread(target=model_monitor, daemon=True)
@@ -3099,10 +3142,11 @@ atexit.register(shutdown)
 
 
 def signal_handler(signum, frame):
-    sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
-    logger.info(f"Signal {sig_name} received - shutting down")
-    shutdown()
-    sys.exit(0)
+    # Signal handlers must not call non-reentrant functions (logging, locks).
+    # Set events only — the model_monitor thread picks up SHUTDOWN_EVENT and
+    # calls shutdown() from normal Python context.
+    SHUTDOWN_EVENT.set()
+    ABORT_EVENT.set()
 
 
 # =============================================================================
@@ -3900,14 +3944,8 @@ def chat_completions():
         # =================================================================
         # TEXT PATH -- normal text-only request (existing logic unchanged)
         # =================================================================
-        # Load model
-        logger.info(f"Loading model {name} for request {request_id}")
-        if not load_model(name, config):
-            end_request(request_id)
-            return make_error_response(f"Failed to load model '{name}'", 500)
-        update_request_activity()
-
-        # Build prompt
+        # Pre-check context length BEFORE loading model (saves NPU load time on oversized prompts).
+        # Build prompt first (needs model name for template), but skip model load until after check.
         prompt, is_rag, enable_thinking = build_prompt(messages, name)
         if not prompt:
             # System-only or empty requests (e.g. OpenWebUI title-gen meta tasks)
@@ -3928,9 +3966,8 @@ def chat_completions():
             }
             return jsonify(_empty_resp)
 
-        # Hard-reject prompts that exceed context length.
-        # The RKLLM runtime returns -1 for oversized prompts, but we can
-        # fail fast with a clear error instead of tying up the NPU.
+        # Hard-reject prompts that exceed context length — before model load
+        # so we don't spend 30s initialising the NPU for a prompt we'll reject.
         # Use 1.1x multiplier to account for token estimation inaccuracy
         # (we estimate ~4 chars/token but actual varies by language/content).
         _ctx = config.get('context_length', CONTEXT_LENGTH_DEFAULT)
@@ -3946,6 +3983,13 @@ def chat_completions():
                 f"Shorten your message or reduce conversation history.",
                 400, "context_length_exceeded"
             )
+
+        # Load model (after context check so oversized prompts skip the load entirely)
+        logger.info(f"Loading model {name} for request {request_id}")
+        if not load_model(name, config):
+            end_request(request_id)
+            return make_error_response(f"Failed to load model '{name}'", 500)
+        update_request_activity()
 
         # KV cache strategy:
         # - RAG: always keep_history=0 (fresh context each time)
@@ -4262,7 +4306,12 @@ def _generate_stream(prompt, request_id, model_name, created,
                             _window = total_content[-max(_stop_buf_len + 32, 64):]
                             for _seq in _req_stop:
                                 if _seq in _window:
-                                    _cut = total_content.rfind(_seq)
+                                    # Search only from recent boundary to avoid matching
+                                    # the same sequence in already-sent earlier content.
+                                    _search_from = max(0, _prev_len - _stop_buf_len)
+                                    _cut = total_content.find(_seq, _search_from)
+                                    if _cut == -1:
+                                        _cut = total_content.rfind(_seq)
                                     if not has_tools and _cut > _prev_len:
                                         _tail = total_content[_prev_len:_cut]
                                         if _tail:
@@ -4451,13 +4500,18 @@ def _generate_stream(prompt, request_id, model_name, created,
             logger.debug(f"[{request_id}] Drained {_drained} orphaned token(s) from queue")
         if not request_ended:
             end_request(request_id)
-        # Ensure worker thread is cleaned up
+        # Ensure worker thread is cleaned up — join OUTSIDE PROCESS_LOCK so other
+        # operations (model monitor, health) are not blocked for up to 5 seconds.
         with PROCESS_LOCK:
-            if _worker_thread and _worker_thread.is_alive():
-                if _active_wrapper:
-                    _active_wrapper.abort()
-                _worker_thread.join(timeout=5)
-                _worker_thread = None
+            _cleanup_thread = _worker_thread
+            _worker_thread = None
+        if _cleanup_thread and _cleanup_thread.is_alive():
+            if _active_wrapper:
+                _active_wrapper.abort()
+            _cleanup_thread.join(timeout=5)
+            if _cleanup_thread.is_alive():
+                logger.critical(f"[{request_id}] Worker thread did not exit after 5s abort — "
+                                "NPU may be in an undefined state")
         GENERATION_COMPLETE.set()
         if total_reasoning:
             logger.info(f"[{request_id}] Stream ended ({len(total_content)} content + "
@@ -4628,15 +4682,21 @@ def _generate_complete(prompt, request_id, model_name, created,
                 logger.error(f"[{request_id}] rkllm_run error: {msg_data}")
                 break
 
-        # End request tracking immediately (frees slot for next request)
+        # Wait for worker thread BEFORE freeing request slot — prevents a new
+        # request from launching a second worker while this one is still alive.
+        # Join outside PROCESS_LOCK to avoid blocking health/monitor for 5s.
+        with PROCESS_LOCK:
+            _cleanup_thread = _worker_thread
+            _worker_thread = None
+        if _cleanup_thread and _cleanup_thread.is_alive():
+            _cleanup_thread.join(timeout=5)
+            if _cleanup_thread.is_alive():
+                logger.critical(f"[{request_id}] Worker thread did not exit after 5s "
+                                "— NPU may be in an undefined state")
+
+        # Free slot after worker thread is confirmed done
         end_request(request_id)
         request_ended = True
-
-        # Wait for worker thread
-        with PROCESS_LOCK:
-            if _worker_thread and _worker_thread.is_alive():
-                _worker_thread.join(timeout=5)
-            _worker_thread = None
 
         full_content = "".join(content_parts).rstrip()
 
@@ -4751,15 +4811,18 @@ def _generate_complete(prompt, request_id, model_name, created,
         _reset_kv_tracking()
         return make_error_response(f"Generation failed: {e}", 500)
     finally:
+        # Ensure worker cleanup — join outside PROCESS_LOCK (avoids 5s blockage)
+        with PROCESS_LOCK:
+            _cleanup_thread = _worker_thread
+            _worker_thread = None
+        if _cleanup_thread and _cleanup_thread.is_alive():
+            if _active_wrapper:
+                _active_wrapper.abort()
+            _cleanup_thread.join(timeout=5)
+            if _cleanup_thread.is_alive():
+                logger.critical(f"[{request_id}] Worker thread stuck after abort in finally block")
         if not request_ended:
             end_request(request_id)
-        # Ensure worker cleanup
-        with PROCESS_LOCK:
-            if _worker_thread and _worker_thread.is_alive():
-                if _active_wrapper:
-                    _active_wrapper.abort()
-                _worker_thread.join(timeout=5)
-                _worker_thread = None
         # Drain any orphaned tokens left by an aborted or failed generation
         # so the next request doesn't inherit stale output (C-4).
         _drained = 0
@@ -4802,7 +4865,26 @@ def legacy_completions():
     environ['CONTENT_LENGTH'] = str(len(body_bytes))
     environ['CONTENT_TYPE'] = 'application/json'
     with app.request_context(environ):
-        return chat_completions()
+        chat_resp = chat_completions()
+    # Adapt chat.completion → text_completion format for spec compliance
+    try:
+        data = chat_resp.get_json()
+        if data and data.get("object") == "chat.completion":
+            choices = data.get("choices", [])
+            text_choices = []
+            for ch in choices:
+                text_choices.append({
+                    "text": (ch.get("message") or {}).get("content") or "",
+                    "index": ch.get("index", 0),
+                    "logprobs": ch.get("logprobs"),
+                    "finish_reason": ch.get("finish_reason"),
+                })
+            data["object"] = "text_completion"
+            data["choices"] = text_choices
+            return jsonify(data), chat_resp.status_code
+    except Exception:
+        pass
+    return chat_resp
 
 
 # Register signal handlers at module level so gunicorn workers also clean up the NPU
