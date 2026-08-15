@@ -2527,11 +2527,11 @@ Qwen3-VL uses `patch_size=16` and `merge_size=2`, so resolution must be divisibl
 ### How It Works
 
 ```
-Open WebUI ──► Hermes Gateway (port 8642) ──► Cloud LLM (OpenRouter / Nous Portal)
-                                         └──► Local NPU (qwen3-4b via port 8000)
+Open WebUI ──► Hermes Gateway (port 8642) ──► Nemotron 550B (OpenRouter free)
+                                         └──► llama-3.3-70b (Groq free, fallback)
 ```
 
-When a user selects **Hermes Agent** in Open WebUI, requests go to the Hermes gateway instead of the RKLLM API server. Hermes runs its autonomous agent loop — searching the web, using tools, maintaining memory — powered by a cloud LLM by default with automatic fallback to the local NPU if cloud providers are unavailable.
+When a user selects **Hermes Agent** in Open WebUI, requests go to the Hermes gateway instead of the RKLLM API server. Hermes runs its autonomous agent loop — searching the web, using tools, maintaining memory — powered by cloud LLMs. Local NPU models are available directly in OWUI for fast single-turn chat; Hermes requires ≥64K context which exceeds what the NPU models support.
 
 ### Provider Fallback Chain
 
@@ -2539,9 +2539,8 @@ Hermes tries each provider in order until one succeeds:
 
 | Priority | Provider | Model | Notes |
 |----------|----------|-------|-------|
-| 1st | OpenRouter | `nvidia/nemotron-3-ultra-550b-a55b:free` | Free tier, 550B parameter model |
-| 2nd | Nous Portal | `deepseek/deepseek-v4-flash-0731` | Fast DeepSeek inference |
-| 3rd | Local NPU | `qwen3-4b` (port 8000) | Always available, no cloud dependency |
+| 1st | OpenRouter | `nvidia/nemotron-3-ultra-550b-a55b:free` | Free tier, 550B parameter model, 1M context |
+| 2nd | Groq | `llama-3.3-70b-versatile` | ~14,400 req/day free, fast inference |
 
 ### Setup
 
@@ -2549,7 +2548,7 @@ The `setup.sh` script handles Hermes installation automatically when cloud API k
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-v1-..."   # Free at openrouter.ai
-export NOUS_API_KEY="sk-nous-..."           # Nous Research API key (optional)
+export GROQ_API_KEY="gsk_..."              # Free at console.groq.com
 
 git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
 cd RKLLM-API-Server
@@ -2567,36 +2566,32 @@ cd RKLLM-API-Server
 ```yaml
 providers:
   openrouter:
-    api_key: ${OPENROUTER_API_KEY}
-    base_url: https://openrouter.ai/api/v1
-  portal:
-    api_key: ${NOUS_API_KEY}
-    base_url: https://inference-api.nousresearch.com/v1
-  local:
-    api_key: na
-    base_url: http://127.0.0.1:8000/v1
+    api_key: "${OPENROUTER_API_KEY}"
+    base_url: "https://openrouter.ai/api/v1"
+    request_timeout_seconds: 120
+  groq:
+    api_key: "${GROQ_API_KEY}"
+    base_url: "https://api.groq.com/openai/v1"
+    request_timeout_seconds: 60
 
 model:
   provider: openrouter
   model: nvidia/nemotron-3-ultra-550b-a55b:free
+  context_length: 131072    # override reported window — Hermes requires ≥64K
 
 fallback_providers:
   - provider: openrouter
     model: nvidia/nemotron-3-ultra-550b-a55b:free
     key_env: OPENROUTER_API_KEY
-  - provider: portal
-    model: deepseek/deepseek-v4-flash-0731
-    key_env: NOUS_API_KEY
-  - provider: local
-    model: qwen3-4b
-    base_url: http://127.0.0.1:8000/v1
-    api_key: na
+  - provider: groq
+    model: llama-3.3-70b-versatile
+    key_env: GROQ_API_KEY
 
 api_server:
   enabled: true
   host: 0.0.0.0
   port: 8642
-  key: <your-api-key>
+  key: "${HERMES_API_KEY}"
 ```
 
 ### Open WebUI Integration
@@ -2620,7 +2615,7 @@ Users see **hermes-agent** in the model dropdown alongside `qwen3-1.7b`, `qwen3-
 | Model size | 4B NPU | 550B cloud (free) |
 | Response time | ~2-5s | ~10-30s (cloud roundtrip) |
 | Privacy | Fully local | Cloud LLM sees queries |
-| Offline | ✅ Yes | ✅ Falls back to local NPU |
+| Offline | ✅ Yes | ❌ Requires cloud connection |
 
 ### Service Management
 
@@ -2659,7 +2654,7 @@ Both models are on HuggingFace ([xLAM](https://huggingface.co/GatekeeperZA/xLAM-
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
 | `main` | Current stable: RKLLM v1.2.3 runtime — ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + model-aware sampling + prompt cache + sliding window + NPU benchmarks |
-| `hermes-agent-integration` | Hermes Agent v0.19.0 integration — autonomous agent as an OpenWebUI model, multi-provider fallback chain (OpenRouter → Nous Portal → local NPU), setup.sh automation |
+| `hermes-agent-integration` | Hermes Agent v0.19.0 integration — autonomous agent as an OpenWebUI model, cloud provider fallback chain (OpenRouter Nemotron 550B → Groq llama-3.3-70b), setup.sh automation |
 | `rkllm-v1.3.0-wip` | Work-in-progress v1.3.0 upgrade — **archived, not stable**. Contains updated ctypes structs for v1.3.0 ABI and a two-phase thinking implementation. Rolled back due to phase-2 early EOS bug (13–27 tokens then mid-sentence EOS). See [ISSUES_v1.3.0.md](ISSUES_v1.3.0.md) on that branch for full bug tracker. Revisit when a newer v1.3.x runtime is released. |
 
 ### RKLLM v1.3.0 Status

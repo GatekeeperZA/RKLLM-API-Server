@@ -1,70 +1,55 @@
 # =============================================================================
-# Hermes Agent — configuration for RKLLM local API
+# Hermes Agent — configuration template
+# Copy to /home/armbian/.hermes/config.yaml on the device
 # =============================================================================
-# Docs: https://hermes-agent.nousresearch.com/docs
 #
-# This config points Hermes Agent at the local Qwen3 inference server
-# (api.py on port 8000) and exposes an OpenAI-compatible gateway on
-# port 8642 so OpenWebUI can use it as a selectable model.
+# Provider chain: Nemotron 550B (OpenRouter free) → Groq llama-3.3-70b
+# Both are free-tier cloud models — no local NPU in the agent loop.
+# Local NPU models are available directly in OWUI for fast single-turn chat.
+#
+# API keys are injected via systemd Environment= lines (never commit real keys).
 # =============================================================================
 
-# ---------------------------------------------------------------------------
-# LLM providers — primary is OpenRouter (free 550B cloud model).
-# Fallback chain: OpenRouter → Nous Portal → local qwen3-4b.
-# API keys are read from env vars — never commit actual keys here.
-# ---------------------------------------------------------------------------
 providers:
   openrouter:
-    base_url: "https://openrouter.ai/api/v1"
     api_key: "${OPENROUTER_API_KEY}"
+    base_url: "https://openrouter.ai/api/v1"
     request_timeout_seconds: 120
-  portal:
-    base_url: "https://inference-api.nousresearch.com/v1"
-    api_key: "${NOUS_API_KEY}"
-    request_timeout_seconds: 120
-  local:
-    base_url: "http://127.0.0.1:8000/v1"
-    api_key: "na"
-    request_timeout_seconds: 300
+  groq:
+    api_key: "${GROQ_API_KEY}"
+    base_url: "https://api.groq.com/openai/v1"
+    request_timeout_seconds: 60
 
+# Primary model — Nemotron 550B (free, 1M context, best quality)
 model:
   provider: "openrouter"
   model: "nvidia/nemotron-3-ultra-550b-a55b:free"
-  context_length: 131072     # override reported window — Hermes requires ≥64K
+  context_length: 131072    # override reported window — Hermes requires ≥64K
 
-# Automatic fallback chain: if primary provider fails (rate limit, outage),
-# Hermes tries each entry in order until one succeeds.
+# Fallback chain — tries in order when primary hits rate limit/daily quota
 fallback_providers:
   - provider: "openrouter"
     model: "nvidia/nemotron-3-ultra-550b-a55b:free"
     key_env: "OPENROUTER_API_KEY"
-  - provider: "portal"
-    model: "deepseek/deepseek-v4-flash-0731"
-    key_env: "NOUS_API_KEY"
-  - provider: "local"
-    model: "qwen3-4b"
-    base_url: "http://127.0.0.1:8000/v1"
-    api_key: "na"
+  - provider: "groq"
+    model: "llama-3.3-70b-versatile"
+    key_env: "GROQ_API_KEY"
 
-# ---------------------------------------------------------------------------
-# Gateway / API server — exposes Hermes Agent to OpenWebUI on port 8642
-# ---------------------------------------------------------------------------
+# Gateway — exposes hermes-agent to OpenWebUI on port 8642
 api_server:
   enabled: true
-  host: "0.0.0.0"            # bind all interfaces so OWUI (Docker) can reach it
+  host: "0.0.0.0"
   port: 8642
-  key: "${HERMES_API_KEY}"   # set via hermes/.env or HERMES_API_KEY env var
+  key: "${HERMES_API_KEY}"
 
-# ---------------------------------------------------------------------------
-# Toolsets — disable heavy tools so system prompt fits qwen3-4b's 16K context.
-# With all toolsets enabled Hermes injects ~14,600 tokens (58K chars) which
-# causes SIGSEGV crashes in RKLLM. Disabling these keeps the system prompt
-# at ~2,500 tokens, leaving ~13K tokens for conversation.
-# Use `agent.disabled_toolsets` (not the ignored `tools:` key).
-# ---------------------------------------------------------------------------
+# Memory — SQLite FTS5, zero extra deps
+memory:
+  provider: "fts5"
+
+# Disabled toolsets — keeps system prompt under ~4K tokens (Groq payload limit)
+# Enabled: web, memory, skills, session_search, clarify, delegation
 agent:
   disabled_toolsets:
-    - web
     - browser
     - terminal
     - file
@@ -75,12 +60,7 @@ agent:
     - video_gen
     - x_search
     - tts
-    - skills
     - todo
-    - session_search
-    - clarify
-    - delegation
-    - cronjob
     - homeassistant
     - spotify
     - discord
@@ -88,14 +68,6 @@ agent:
     - yuanbao
     - computer_use
     - context_engine
+    - cronjob
 
-# ---------------------------------------------------------------------------
-# Memory — use built-in FTS5 full-text search (no embedding service needed)
-# ---------------------------------------------------------------------------
-memory:
-  provider: "fts5"
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 log_level: "INFO"
