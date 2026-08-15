@@ -856,6 +856,24 @@ config = {
             'context_engine',
         ]
     },
+    'fallback_providers': [
+        {
+            'provider': 'openrouter',
+            'model': 'nvidia/nemotron-3-ultra-550b-a55b:free',
+            'key_env': 'OPENROUTER_API_KEY',
+        },
+        {
+            'provider': 'portal',
+            'model': 'deepseek/deepseek-v4-flash-0731',
+            'key_env': 'NOUS_API_KEY',
+        },
+        {
+            'provider': 'local',
+            'model': 'qwen3-4b',
+            'base_url': 'http://127.0.0.1:8000/v1',
+            'api_key': 'na',
+        },
+    ],
     'memory': {'provider': 'fts5'},
     'log_level': 'INFO',
 }
