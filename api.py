@@ -324,7 +324,7 @@ RAG_CACHE_TTL = 300
 RAG_CACHE_MAX_ENTRIES = 50
 
 # Request tracking
-REQUEST_STALE_TIMEOUT = 180
+REQUEST_STALE_TIMEOUT = 30   # clear abandoned SSE streams quickly (e.g. Hermes client disconnect)
 
 # Monitoring
 MONITOR_INTERVAL = 10
@@ -2698,6 +2698,13 @@ def build_prompt(messages, model_name):
             if any(sig in _sys_lower for sig in _HOME_ASSISTANT_SIGNATURES):
                 enable_thinking = False
                 logger.info("Home Assistant request detected — thinking disabled for speed")
+
+        # --- Agent framework detection (Hermes Agent, AutoGen, etc.) ---
+        # Agent frameworks send very long system prompts with tool definitions.
+        # Thinking mode wastes context tokens and causes timeouts for these callers.
+        if enable_thinking and system_text and len(system_text) > 3000:
+            enable_thinking = False
+            logger.info(f"Agent framework detected (system prompt {len(system_text)} chars) — thinking disabled")
 
     logger.debug(f"Prompt built ({len(prompt)} chars, ctx={ctx}, "
                  f"rag={'yes' if rag_parts else 'no'})")
