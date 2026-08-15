@@ -44,6 +44,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Vision Encoder Resolution Comparison](#vision-encoder-resolution-comparison)
 - [Re-Exporting VL Models at Higher Resolution](#re-exporting-vl-models-at-higher-resolution)
 - [Benchmarks](#benchmarks)
+- [Hermes Agent Integration](#hermes-agent-integration)
 - [Git Tags & Branches](#git-tags--branches)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
@@ -473,6 +474,8 @@ Ready-to-run `.rkllm` models converted by the author for RK3588 NPU are availabl
 |-------|-----------|-------|---------|-------|-----|----------|------|
 | **Qwen3-1.7B** | 1.7B | w8a8 | 4,096 | ~13.6 tok/s | ~2 GB | ✅ Yes | [Download](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) |
 | **Phi-3-mini-4k-instruct** | 3.82B | w8a8 | 4,096 | ~6.8 tok/s | ~3.7 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8) |
+| **Qwen2.5-1.5B-Instruct** | 1.5B | w8a8 | 8,192 | ~14 tok/s | ~2.1 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3) |
+| **xLAM-1b-fc-r** | 1.1B | w8a8 | 8,192 | ~16 tok/s | ~1.6 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/xLAM-1b-fc-r-RKLLM-v1.2.3) |
 
 > Browse all models: **[huggingface.co/GatekeeperZA](https://huggingface.co/GatekeeperZA)**
 
@@ -2182,8 +2185,11 @@ RKLLM-API-Server/
 ├── gunicorn.config.py              # Gunicorn config (env-var driven)
 ├── healthcheck.py                  # Docker HEALTHCHECK script
 ├── docker-compose.yml              # Open WebUI Docker config (all settings hardcoded)
-├── setup.sh                        # Zero-config installer (762 lines)
+├── setup.sh                        # Zero-config installer (includes Hermes Agent setup)
 ├── settings.yml                    # SearXNG configuration for Open WebUI
+├── hermes/
+│   ├── config.yaml                 # Hermes Agent config template (providers, fallback chain, API server)
+│   └── .env.example                # Environment variable template (API keys for cloud providers)
 ├── README.md                       # This file
 ├── .github/workflows/docker.yml    # CI: builds and pushes ARM64 image to GHCR on main push
 ├── tests/
@@ -2305,8 +2311,10 @@ The V1 code may be useful as a reference if:
 | Phi-3-Mini-4K-Instruct | W8A8 | 4K | ~3.8 GB | **6.8 tok/s** avg | Fully benchmarked |
 | Qwen3-4B-Instruct | W8A8 | 16K | ~4 GB | ~6 tok/s | Tested |
 | Gemma-3-4B-IT | W8A8 | 4K | ~4 GB | ~6 tok/s | Tested |
+| **Qwen2.5-1.5B-Instruct** | W8A8 | 8K | ~2.1 GB | **~14 tok/s** | Tested — fast general chat, Hermes local fallback |
+| **xLAM-1b-fc-r** | W8A8 | 8K | ~1.6 GB | **~16 tok/s** | Tested — best sub-2B tool-calling model (78.94% BFCL v3) |
 
-> Pre-built RKLLM models available on HuggingFace: [Qwen3-1.7B-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) · [Phi-3-mini-4k-instruct-w8a8](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8) · [Qwen3-VL-2B-Instruct-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3)
+> Pre-built RKLLM models available on HuggingFace: [Qwen3-1.7B-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) · [Phi-3-mini-4k-instruct-w8a8](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8) · [Qwen3-VL-2B-Instruct-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3) · [Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3) · [xLAM-1b-fc-r-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/xLAM-1b-fc-r-RKLLM-v1.2.3)
 
 ### VL (Vision-Language) Models
 
@@ -2510,6 +2518,139 @@ Qwen3-VL uses `patch_size=16` and `merge_size=2`, so resolution must be divisibl
 
 ---
 
+## Hermes Agent Integration
+
+> **Branch:** `hermes-agent-integration`
+
+[Hermes Agent](https://github.com/nousresearch/hermes) is an autonomous AI agent that runs a full tool-calling loop — web search, code execution, memory, and more. This branch integrates Hermes as a selectable model inside Open WebUI, appearing alongside the local NPU models in the model dropdown.
+
+### How It Works
+
+```
+Open WebUI ──► Hermes Gateway (port 8642) ──► Cloud LLM (OpenRouter / Nous Portal)
+                                         └──► Local NPU (qwen3-4b via port 8000)
+```
+
+When a user selects **Hermes Agent** in Open WebUI, requests go to the Hermes gateway instead of the RKLLM API server. Hermes runs its autonomous agent loop — searching the web, using tools, maintaining memory — powered by a cloud LLM by default with automatic fallback to the local NPU if cloud providers are unavailable.
+
+### Provider Fallback Chain
+
+Hermes tries each provider in order until one succeeds:
+
+| Priority | Provider | Model | Notes |
+|----------|----------|-------|-------|
+| 1st | OpenRouter | `nvidia/nemotron-3-ultra-550b-a55b:free` | Free tier, 550B parameter model |
+| 2nd | Nous Portal | `deepseek/deepseek-v4-flash-0731` | Fast DeepSeek inference |
+| 3rd | Local NPU | `qwen3-4b` (port 8000) | Always available, no cloud dependency |
+
+### Setup
+
+The `setup.sh` script handles Hermes installation automatically when cloud API keys are provided:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."   # Free at openrouter.ai
+export NOUS_API_KEY="sk-nous-..."           # Nous Research API key (optional)
+
+git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
+cd RKLLM-API-Server
+./setup.sh
+```
+
+**What setup.sh installs:**
+- Hermes Agent v0.19.0 in a dedicated Python 3.11 venv (`/home/armbian/rkllm_api/.venv-hermes`)
+- `rkllm-hermes.service` — systemd service exposing the Hermes gateway on **port 8642**
+- Hermes config at `/home/armbian/.hermes/config.yaml` with provider + fallback chain
+- API key env vars in the systemd service unit (not stored in config.yaml)
+- `tests/db_fix.py` automatically adds the Hermes gateway as a connection in Open WebUI
+
+**Manual configuration** (`hermes/config.yaml` template):
+```yaml
+providers:
+  openrouter:
+    api_key: ${OPENROUTER_API_KEY}
+    base_url: https://openrouter.ai/api/v1
+  portal:
+    api_key: ${NOUS_API_KEY}
+    base_url: https://inference-api.nousresearch.com/v1
+  local:
+    api_key: na
+    base_url: http://127.0.0.1:8000/v1
+
+model:
+  provider: openrouter
+  model: nvidia/nemotron-3-ultra-550b-a55b:free
+
+fallback_providers:
+  - provider: openrouter
+    model: nvidia/nemotron-3-ultra-550b-a55b:free
+    key_env: OPENROUTER_API_KEY
+  - provider: portal
+    model: deepseek/deepseek-v4-flash-0731
+    key_env: NOUS_API_KEY
+  - provider: local
+    model: qwen3-4b
+    base_url: http://127.0.0.1:8000/v1
+    api_key: na
+
+api_server:
+  enabled: true
+  host: 0.0.0.0
+  port: 8642
+  key: <your-api-key>
+```
+
+### Open WebUI Integration
+
+The Hermes gateway appears in Open WebUI as a separate OpenAI-compatible connection. `tests/db_fix.py` adds it automatically:
+
+| Setting | Value |
+|---------|-------|
+| API Base URL | `http://host.docker.internal:8642/v1` |
+| API Key | *(generated during setup)* |
+| Model | `hermes-agent` |
+
+Users see **hermes-agent** in the model dropdown alongside `qwen3-1.7b`, `qwen3-4b`, etc. Selecting it routes the request through the Hermes autonomous agent loop instead of direct NPU inference.
+
+### Key Differences vs Direct NPU Models
+
+| Feature | Direct NPU (qwen3-4b) | Hermes Agent |
+|---------|----------------------|--------------|
+| Web search | Via Open WebUI + SearXNG | Native agent tool (autonomous) |
+| Tool calling | Limited (via legacy function_calling) | Full agentic loop with retries |
+| Model size | 4B NPU | 550B cloud (free) |
+| Response time | ~2-5s | ~10-30s (cloud roundtrip) |
+| Privacy | Fully local | Cloud LLM sees queries |
+| Offline | ✅ Yes | ✅ Falls back to local NPU |
+
+### Service Management
+
+```bash
+# Start / stop / restart
+sudo systemctl start rkllm-hermes
+sudo systemctl stop rkllm-hermes
+sudo systemctl restart rkllm-hermes
+
+# View logs
+sudo journalctl -u rkllm-hermes -f
+
+# Test the gateway
+curl http://localhost:8642/v1/models \
+  -H "Authorization: Bearer <your-api-key>"
+```
+
+### Small Model Tool Calling (Experimental)
+
+Two sub-2B NPU models have been converted for fast local tool calling:
+
+| Model | BFCL v3 | Speed | Best For |
+|-------|---------|-------|----------|
+| **xLAM-1b-fc-r** | **78.94%** | ~16 tok/s | Structured function calls (highest sub-2B accuracy) |
+| **Qwen2.5-1.5B-Instruct** | ~40-50% | ~14 tok/s | General instruct + light tool use |
+
+Both models are on HuggingFace ([xLAM](https://huggingface.co/GatekeeperZA/xLAM-1b-fc-r-RKLLM-v1.2.3) · [Qwen2.5-1.5B](https://huggingface.co/GatekeeperZA/Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3)) and auto-discovered by the RKLLM API server. For production tool calling, use the cloud-backed Hermes Agent — the sub-2B local models are best suited to simple, well-structured function calls.
+
+---
+
 ## Git Tags & Branches
 
 | Tag / Branch | Description |
@@ -2518,6 +2659,7 @@ Qwen3-VL uses `patch_size=16` and `merge_size=2`, so resolution must be divisibl
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
 | `main` | Current stable: RKLLM v1.2.3 runtime — ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + model-aware sampling + prompt cache + sliding window + NPU benchmarks |
+| `hermes-agent-integration` | Hermes Agent v0.19.0 integration — autonomous agent as an OpenWebUI model, multi-provider fallback chain (OpenRouter → Nous Portal → local NPU), setup.sh automation |
 | `rkllm-v1.3.0-wip` | Work-in-progress v1.3.0 upgrade — **archived, not stable**. Contains updated ctypes structs for v1.3.0 ABI and a two-phase thinking implementation. Rolled back due to phase-2 early EOS bug (13–27 tokens then mid-sentence EOS). See [ISSUES_v1.3.0.md](ISSUES_v1.3.0.md) on that branch for full bug tracker. Revisit when a newer v1.3.x runtime is released. |
 
 ### RKLLM v1.3.0 Status
