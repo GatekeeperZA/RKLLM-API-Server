@@ -473,7 +473,6 @@ Ready-to-run `.rkllm` models converted by the author for RK3588 NPU are availabl
 | Model | Parameters | Quant | Context | Speed | RAM | Thinking | Link |
 |-------|-----------|-------|---------|-------|-----|----------|------|
 | **Qwen3-1.7B** | 1.7B | w8a8 | 4,096 | ~13.6 tok/s | ~2 GB | ✅ Yes | [Download](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) |
-| **Phi-3-mini-4k-instruct** | 3.82B | w8a8 | 4,096 | ~6.8 tok/s | ~3.7 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8) |
 | **Qwen2.5-1.5B-Instruct** | 1.5B | w8a8 | 8,192 | ~14 tok/s | ~2.1 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3) |
 | **xLAM-1b-fc-r** | 1.1B | w8a8 | 8,192 | ~16 tok/s | ~1.6 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/xLAM-1b-fc-r-RKLLM-v1.2.3) |
 
@@ -623,7 +622,7 @@ Any model with a `.rknn` vision encoder file automatically gains the `vl` capabi
 | `capabilities` | Override capability list (`instruct`, `thinking`, `vl`, etc.) |
 | `sampling` | Override model-family sampling defaults for this specific model |
 
-**Effect on thinking:** Only models with the `thinking` capability get `enable_thinking=True` on the RKLLM runtime. Non-thinking models (Phi-3, Gemma, etc.) always run with `enable_thinking=False`, preventing wasted tokens on models that don't support `<think>` blocks.
+**Effect on thinking:** Only models with the `thinking` capability get `enable_thinking=True` on the RKLLM runtime. Non-thinking models always run with `enable_thinking=False`, preventing wasted tokens on models that don't support `<think>` blocks.
 
 ### Auto-Generated Aliases
 
@@ -633,8 +632,9 @@ Model folder names are converted to IDs (lowercase, hyphens). Aliases are auto-g
 |----------|-------------|
 | `qwen3-1.7b` | `qwen`, `qwen3` |
 | `qwen3-4b-instruct-2507` | `qwen3-4b`, `qwen3-4b-instruct` |
-| `gemma-3-4b-it` | `gemma`, `gemma-3`, `gemma-3-4b` |
-| `phi-3-mini-4k-instruct` | `phi`, `phi-3`, `phi-3-mini` |
+| `qwen2.5-1.5b-instruct` | `qwen2`, `qwen2.5`, `qwen2.5-1.5b` |
+| `xlam-1b-fc-r` | `xlam`, `xlam-1b`, `xlam-1b-fc` |
+| `internvl3.5-4b` | `internvl`, `internvl3`, `internvl3.5` |
 
 Aliases are only created when unambiguous (one model claims the alias). If two models share a prefix, that alias is skipped.
 
@@ -2547,8 +2547,8 @@ Hermes tries each provider in order until one succeeds:
 The `setup.sh` script handles Hermes installation automatically when cloud API keys are provided:
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."   # Free at openrouter.ai
-export GROQ_API_KEY="gsk_..."              # Free at console.groq.com
+export OPENROUTER_API_KEY="sk-or-v1-..."   # Free at openrouter.ai (primary)
+export GROQ_API_KEY="gsk_..."              # Free at console.groq.com (fallback)
 
 git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
 cd RKLLM-API-Server

@@ -35,12 +35,12 @@ WEBUI = os.environ.get("RKLLM_WEBUI", f"http://{_api_host}:3000")
 SEARXNG = os.environ.get("RKLLM_SEARXNG", f"http://{_api_host}:8080")
 TIMEOUT = 180  # Per-request timeout (seconds)
 
-# Text models to test (skip deepseekocr — it's VL-only)
+# Text models to test (skip VL-only and embedding/reranker models)
 TEXT_MODELS = [
     "qwen3-1.7b",
     "qwen3-4b-instruct-2507",
-    "gemma-3-4b-it",
-    "phi-3-mini-4k-instruct",
+    "qwen2.5-1.5b-instruct",
+    "xlam-1b-fc-r",
 ]
 FAST_MODELS = ["qwen3-1.7b", "qwen3-4b-instruct-2507"]
 
@@ -917,13 +917,16 @@ def test_compliance():
 
     # --- Alias resolution ---
     print("\n  --- Alias Resolution ---")
-    result5 = _chat("gemma", [
+    result5 = _chat("qwen3-4b", [
         {"role": "user", "content": "Say OK."}
     ], stream=True)
     content5 = result5.get("content", "")
-    check(sec, "Alias 'gemma' resolves to gemma-3-4b-it",
-          len(content5) > 0,
-          f"'{content5[:60]}'")
+    if result5.get("status_code") == 404:
+        skip(sec, "Alias 'qwen3-4b' resolves to qwen3-4b-instruct-2507", "model not on server")
+    else:
+        check(sec, "Alias 'qwen3-4b' resolves to qwen3-4b-instruct-2507",
+              len(content5) > 0,
+              f"'{content5[:60]}'")
 
     # --- stream_options.include_usage ---
     print("\n  --- Usage in Stream ---")

@@ -17,7 +17,7 @@ Preserved unchanged from subprocess version:
 - Request tracking, RAG response cache, ThinkTagParser
 - SSE helpers, all API routes, OpenAI-compatible response format
 
-Rollback: git checkout v1.0-subprocess -- api.py
+Rollback: git checkout v1.0-subprocess-stable -- api.py
 Archive:  archive/api_v1_subprocess.py (2682 lines, fully functional)
 
 MINIMUM SDK: librkllmrt.so ≥ v1.2.0 (RKLLM Runtime from airockchip/rknn-llm)

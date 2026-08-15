@@ -78,7 +78,7 @@ SETTINGS = {
     "task.query.retrieval.enable":                  "true",
     # Simplified query prompt (default is too long for small models → broken JSON)
     "task.query.prompt_template":                   json.dumps(QUERY_PROMPT),
-    # Context compaction — enabled and tuned for phi-3-mini's 4K context window
+    # Context compaction — 3000-token threshold suits small models (1.7B/4B have 4-16K context)
     "chat.context_compaction.enable":               "true",
     "chat.context_compaction.model":                json.dumps("qwen3-1.7b"),
     "chat.context_compaction.token_threshold":      3000,
@@ -89,7 +89,7 @@ SETTINGS = {
     # Embedding backend — use local NPU service on port 8001 (embed_api.py)
     # Set engine to "openai" so OWUI posts to our OpenAI-compatible /v1/embeddings
     "rag.embedding.engine":                         json.dumps("openai"),
-    "rag.embedding.openai.url":                     json.dumps("http://192.168.2.180:8001/v1"),
+    "rag.embedding.openai.url":                     json.dumps(os.environ.get("EMBED_API_URL", "http://192.168.2.180:8001/v1")),
     "rag.embedding.openai.key":                     json.dumps("na"),
     "rag.embedding.model":                          json.dumps("Qwen3-Embedding-0.6B"),
     "rag.embedding.batch_size":                     8,

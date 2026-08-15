@@ -741,9 +741,9 @@ HERMES_ENV_FILE="$HERMES_CONFIG_DIR/.env"
 HERMES_PORT="8642"
 
 # Cloud provider API keys (optional — set these env vars before running setup.sh
-# to have Hermes use cloud models via OpenRouter or Nous Portal)
+# to have Hermes use cloud models: OpenRouter Nemotron 550B → Groq llama-3.3-70b fallback)
 OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
-NOUS_API_KEY="${NOUS_API_KEY:-}"
+GROQ_API_KEY="${GROQ_API_KEY:-}"
 
 separator "Hermes Agent Setup"
 
@@ -800,35 +800,46 @@ info "Writing Hermes config to $HERMES_DOT_DIR/config.yaml"
 "$HERMES_VENV_DIR/bin/python3" << PYEOF
 import yaml, os
 
-providers = {
-    'local': {
-        'base_url': 'http://127.0.0.1:8000/v1',
-        'api_key': 'na',
-        'request_timeout_seconds': 300,
-    }
-}
+providers = {}
 openrouter_key = '${OPENROUTER_API_KEY}'
-nous_key = '${NOUS_API_KEY}'
+groq_key = '${GROQ_API_KEY}'
 if openrouter_key:
     providers['openrouter'] = {
         'base_url': 'https://openrouter.ai/api/v1',
         'api_key': openrouter_key,
         'request_timeout_seconds': 120,
     }
-if nous_key:
-    providers['portal'] = {
-        'base_url': 'https://inference-api.nousresearch.com/v1',
-        'api_key': nous_key,
-        'request_timeout_seconds': 120,
+if groq_key:
+    providers['groq'] = {
+        'base_url': 'https://api.groq.com/openai/v1',
+        'api_key': groq_key,
+        'request_timeout_seconds': 60,
     }
 
-# Pick the best available provider
+# Pick the best available provider — cloud-only, no local NPU fallback.
+# Local NPU models are compiled at 4-16K context; Hermes requires >=64K minimum.
 if openrouter_key:
     default_provider = 'openrouter'
     default_model = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+elif groq_key:
+    default_provider = 'groq'
+    default_model = 'llama-3.3-70b-versatile'
 else:
-    default_provider = 'local'
-    default_model = 'qwen3-4b'
+    raise RuntimeError('No cloud API keys provided. Set OPENROUTER_API_KEY or GROQ_API_KEY.')
+
+fallback_providers = []
+if openrouter_key:
+    fallback_providers.append({
+        'provider': 'openrouter',
+        'model': 'nvidia/nemotron-3-ultra-550b-a55b:free',
+        'key_env': 'OPENROUTER_API_KEY',
+    })
+if groq_key:
+    fallback_providers.append({
+        'provider': 'groq',
+        'model': 'llama-3.3-70b-versatile',
+        'key_env': 'GROQ_API_KEY',
+    })
 
 config = {
     'providers': providers,
@@ -843,37 +854,18 @@ config = {
         'port': int('${HERMES_PORT}'),
         'key': '${HERMES_API_KEY}',
     },
-    # Disable heavy toolsets so the system prompt fits qwen3-4b's 16K context.
-    # The full toolset injects ~14,600 tokens (58K chars) causing SIGSEGV in RKLLM.
-    # With all disabled except memory, the system prompt is ~2,500 tokens.
+    # Disable heavy toolsets — keeps system prompt under ~4K tokens (Groq payload limit).
+    # Enabled: web, memory, skills, session_search, clarify, delegation
     'agent': {
         'disabled_toolsets': [
-            'web', 'browser', 'terminal', 'file', 'code_execution',
+            'browser', 'terminal', 'file', 'code_execution',
             'vision', 'video', 'image_gen', 'video_gen', 'x_search',
-            'tts', 'skills', 'todo', 'session_search', 'clarify',
-            'delegation', 'cronjob', 'homeassistant', 'spotify',
+            'tts', 'todo', 'cronjob', 'homeassistant', 'spotify',
             'discord', 'discord_admin', 'yuanbao', 'computer_use',
             'context_engine',
         ]
     },
-    'fallback_providers': [
-        {
-            'provider': 'openrouter',
-            'model': 'nvidia/nemotron-3-ultra-550b-a55b:free',
-            'key_env': 'OPENROUTER_API_KEY',
-        },
-        {
-            'provider': 'portal',
-            'model': 'deepseek/deepseek-v4-flash-0731',
-            'key_env': 'NOUS_API_KEY',
-        },
-        {
-            'provider': 'local',
-            'model': 'qwen3-4b',
-            'base_url': 'http://127.0.0.1:8000/v1',
-            'api_key': 'na',
-        },
-    ],
+    'fallback_providers': fallback_providers,
     'memory': {'provider': 'fts5'},
     'log_level': 'INFO',
 }
@@ -889,9 +881,9 @@ success "Hermes config written to $HERMES_DOT_DIR/config.yaml"
 if [[ -n "$OPENROUTER_API_KEY" ]]; then
     "$HERMES_BIN" config set model.provider openrouter 2>/dev/null || true
     "$HERMES_BIN" config set model.default "nvidia/nemotron-3-ultra-550b-a55b:free" 2>/dev/null || true
-    success "Hermes provider set to openrouter (nemotron-550b)"
+    success "Hermes provider set to openrouter (nemotron-550b) → groq (llama-3.3-70b) fallback"
 else
-    "$HERMES_BIN" config set model.provider local 2>/dev/null || true
+    "$HERMES_BIN" config set model.provider groq 2>/dev/null || true
     "$HERMES_BIN" config set model.default qwen3-4b 2>/dev/null || true
     success "Hermes provider set to local (qwen3-4b)"
 fi
@@ -926,7 +918,7 @@ Environment="API_SERVER_KEY=${HERMES_API_KEY}"
 Environment="API_SERVER_HOST=0.0.0.0"
 Environment="API_SERVER_PORT=${HERMES_PORT}"
 $([ -n "${OPENROUTER_API_KEY}" ] && echo "Environment=\"OPENROUTER_API_KEY=${OPENROUTER_API_KEY}\"")
-$([ -n "${NOUS_API_KEY}" ] && echo "Environment=\"NOUS_API_KEY=${NOUS_API_KEY}\"")
+$([ -n "${GROQ_API_KEY}" ] && echo "Environment=\"GROQ_API_KEY=${GROQ_API_KEY}\"")
 
 ExecStart=$HERMES_BIN gateway
 

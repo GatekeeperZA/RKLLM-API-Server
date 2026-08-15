@@ -26,11 +26,15 @@ SYSTEM_PROMPT = (
 )
 
 RKLLM_MODELS = {
-    "qwen3-1.7b":            {"vision": False},
-    "gemma-3-4b-it":         {"vision": False},
-    "phi-3-mini-4k-instruct": {"vision": False},
+    "qwen3-1.7b":             {"vision": False},
     "qwen3-4b-instruct-2507": {"vision": False},
-    "qwen3-vl-2b":           {"vision": True},
+    "qwen2.5-1.5b-instruct":  {"vision": False},
+    "xlam-1b-fc-r":           {"vision": False},
+    "qwen3-vl-2b":            {"vision": True},
+    "qwen3-vl-4b":            {"vision": True},
+    "internvl3.5-4b":         {"vision": True},
+    "qwen3-embedding-0.6b":   {"vision": False},
+    "qwen3-reranker-0.6b":    {"vision": False},
 }
 
 
