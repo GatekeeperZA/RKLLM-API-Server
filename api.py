@@ -1675,7 +1675,7 @@ class RKLLMWrapper:
             return
         try:
             ret = self.lib.rkllm_clear_kv_cache(
-                self.handle, ctypes.c_int(0), None, None
+                self.handle, ctypes.c_int(1), None, None  # keep_system_prompt=1: skip re-prefill on new conversation
             )
             if ret != 0:
                 logger.warning(f"rkllm_clear_kv_cache returned error code {ret}")
