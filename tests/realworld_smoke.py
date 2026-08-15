@@ -160,10 +160,14 @@ for m in models:
     print(f"    {m['id']:35s} caps={m.get('capabilities',[])}  ctx={m.get('context_length')}")
 check("Model list has OpenAI structure",
       mdata and mdata.get("object") == "list" and len(models) > 0)
+# Verify no instruct model has context < 4096 — catches wrong default detection
+under_ctx = [m["id"] for m in models if "instruct" in m.get("capabilities", []) and m.get("context_length", 0) < 4096]
+check("All instruct models have >=4096 context", len(under_ctx) == 0,
+      f"undersized: {under_ctx}" if under_ctx else "")
 
 # Pick a fast thinking model
 THINK_MODEL = "qwen3-1.7b" if "qwen3-1.7b" in model_ids else model_ids[0]
-ALT_MODEL = "gemma-3-4b-it" if "gemma-3-4b-it" in model_ids else (
+ALT_MODEL = "qwen2.5-1.5b-instruct" if "qwen2.5-1.5b-instruct" in model_ids else (
     [m for m in model_ids if m != THINK_MODEL] or [THINK_MODEL])[0]
 print(f"  Primary model: {THINK_MODEL}  |  Alt model: {ALT_MODEL}")
 
