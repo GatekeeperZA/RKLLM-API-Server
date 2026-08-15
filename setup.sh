@@ -740,6 +740,11 @@ HERMES_CONFIG_DIR="$INSTALL_DIR/hermes"
 HERMES_ENV_FILE="$HERMES_CONFIG_DIR/.env"
 HERMES_PORT="8642"
 
+# Cloud provider API keys (optional — set these env vars before running setup.sh
+# to have Hermes use cloud models via OpenRouter or Nous Portal)
+OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
+NOUS_API_KEY="${NOUS_API_KEY:-}"
+
 separator "Hermes Agent Setup"
 
 # --- Python 3.11 (hermes-agent requires >=3.11, system has 3.10) ---
@@ -795,17 +800,41 @@ info "Writing Hermes config to $HERMES_DOT_DIR/config.yaml"
 "$HERMES_VENV_DIR/bin/python3" << PYEOF
 import yaml, os
 
+providers = {
+    'local': {
+        'base_url': 'http://127.0.0.1:8000/v1',
+        'api_key': 'na',
+        'request_timeout_seconds': 300,
+    }
+}
+openrouter_key = '${OPENROUTER_API_KEY}'
+nous_key = '${NOUS_API_KEY}'
+if openrouter_key:
+    providers['openrouter'] = {
+        'base_url': 'https://openrouter.ai/api/v1',
+        'api_key': openrouter_key,
+        'request_timeout_seconds': 120,
+    }
+if nous_key:
+    providers['portal'] = {
+        'base_url': 'https://inference-api.nousresearch.com/v1',
+        'api_key': nous_key,
+        'request_timeout_seconds': 120,
+    }
+
+# Pick the best available provider
+if openrouter_key:
+    default_provider = 'openrouter'
+    default_model = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+else:
+    default_provider = 'local'
+    default_model = 'qwen3-4b'
+
 config = {
-    'providers': {
-        'custom': {
-            'base_url': 'http://127.0.0.1:8000/v1',
-            'api_key': 'na',
-            'request_timeout_seconds': 300,
-        }
-    },
+    'providers': providers,
     'model': {
-        'provider': 'custom',
-        'model': 'qwen3-4b',
+        'provider': default_provider,
+        'model': default_model,
         'context_length': 131072,
     },
     'api_server': {
@@ -838,6 +867,17 @@ print(f'Wrote {out}')
 PYEOF
 success "Hermes config written to $HERMES_DOT_DIR/config.yaml"
 
+# Register the selected provider via hermes config set (config.yaml alone is insufficient)
+if [[ -n "$OPENROUTER_API_KEY" ]]; then
+    "$HERMES_BIN" config set model.provider openrouter 2>/dev/null || true
+    "$HERMES_BIN" config set model.default "nvidia/nemotron-3-ultra-550b-a55b:free" 2>/dev/null || true
+    success "Hermes provider set to openrouter (nemotron-550b)"
+else
+    "$HERMES_BIN" config set model.provider local 2>/dev/null || true
+    "$HERMES_BIN" config set model.default qwen3-4b 2>/dev/null || true
+    success "Hermes provider set to local (qwen3-4b)"
+fi
+
 # --- Patch placeholder key in config ---
 # The repo ships HERMES_API_KEY_PLACEHOLDER in db_fix.py; replace with real key
 if [[ -f "$INSTALL_DIR/tests/db_fix.py" ]]; then
@@ -867,6 +907,8 @@ Environment="API_SERVER_ENABLED=true"
 Environment="API_SERVER_KEY=${HERMES_API_KEY}"
 Environment="API_SERVER_HOST=0.0.0.0"
 Environment="API_SERVER_PORT=${HERMES_PORT}"
+$([ -n "${OPENROUTER_API_KEY}" ] && echo "Environment=\"OPENROUTER_API_KEY=${OPENROUTER_API_KEY}\"")
+$([ -n "${NOUS_API_KEY}" ] && echo "Environment=\"NOUS_API_KEY=${NOUS_API_KEY}\"")
 
 ExecStart=$HERMES_BIN gateway
 
