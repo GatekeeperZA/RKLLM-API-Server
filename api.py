@@ -4188,7 +4188,7 @@ def _generate_stream(prompt, request_id, model_name, created,
         # First chunk: role
         yield make_sse_chunk(request_id, model_name, created, delta={"role": "assistant"})
 
-        _heartbeat_interval = 15   # Send SSE comment every N seconds during prefill
+        _heartbeat_interval = 3    # Send SSE comment every N seconds during prefill (shorter = faster stop detection)
         _last_heartbeat = time.time()
 
         while True:
