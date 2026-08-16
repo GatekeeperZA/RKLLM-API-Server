@@ -1214,7 +1214,9 @@ class RKNNVisionEncoder:
             return False
 
         mask = RKNN_NPU_CORE_0_1_2 if core_num >= 3 else RKNN_NPU_CORE_AUTO
-        self.lib.rknn_set_core_mask(self.ctx, mask)
+        ret = self.lib.rknn_set_core_mask(self.ctx, mask)
+        if ret != RKNN_SUCC:
+            logger.warning(f"rknn_set_core_mask failed (ret={ret}) — model may run on fewer NPU cores")
 
         io_num = RKNNInputOutputNum()
         ret = self.lib.rknn_query(self.ctx, RKNN_QUERY_IN_OUT_NUM,
@@ -1992,7 +1994,8 @@ def _strip_stale_date_claims(text):
         # "As of today, the date is..." / "As of today, October 26, 2025"
         r'as\s+of\s+today\s*[,:]\s*[^.\n]{5,60}[.\n]?',
         # "Updated: October 26, 2025" / "Last updated: 2025-10-26"
-        r'(?:last\s+)?updated\s*:\s*[^.\n]{5,60}[.\n]?',
+        # Require a 4-digit year to avoid stripping factual changelog lines like "Updated: version 2.0"
+        r'(?:last\s+)?updated\s*:\s*[^.\n]{0,40}\b\d{4}\b[^.\n]{0,20}[.\n]?',
     ]
     result = text
     for pat in _STALE_PATTERNS:
@@ -2210,19 +2213,20 @@ def _score_paragraph(para, query_words=None):
 def _strip_system_fluff(text):
     """Remove generic assistant instructions from system messages."""
     generic_phrases = [
-        r'you are a helpful assistant\s*(?:[.!?]\s*|$)',
-        r'you are an? ai assistant\s*(?:[.!?]\s*|$)',
-        r'you are an? assistant\s*(?:[.!?]\s*|$)',
-        r'you are an? helpful ai\s*(?:[.!?]\s*|$)',
-        r'as an ai assistant\s*(?:[.!?]\s*|$)',
-        r'as a helpful assistant\s*(?:[.!?]\s*|$)',
-        r'user context\s*:\s*',
-        r'system context\s*:\s*',
+        # Anchored to start-of-string or sentence boundary to avoid mid-sentence corruption.
+        r'(?:^|(?<=[.!?])\s+)you are a helpful assistant\s*(?:[.!?]\s*|$)',
+        r'(?:^|(?<=[.!?])\s+)you are an? ai assistant\s*(?:[.!?]\s*|$)',
+        r'(?:^|(?<=[.!?])\s+)you are an? assistant\s*(?:[.!?]\s*|$)',
+        r'(?:^|(?<=[.!?])\s+)you are an? helpful ai\s*(?:[.!?]\s*|$)',
+        r'(?:^|(?<=[.!?])\s+)as an ai assistant\s*(?:[.!?]\s*|$)',
+        r'(?:^|(?<=[.!?])\s+)as a helpful assistant\s*(?:[.!?]\s*|$)',
+        r'(?:^|\n)user context\s*:\s*',
+        r'(?:^|\n)system context\s*:\s*',
     ]
 
     result = text
     for pat in generic_phrases:
-        result = re.sub(pat, '', result, flags=re.IGNORECASE)
+        result = re.sub(pat, '', result, flags=re.IGNORECASE | re.MULTILINE)
 
     result = result.strip()
     if result != text.strip():
@@ -3401,7 +3405,7 @@ def chat_completions():
     if not isinstance(body, dict):
         return make_error_response("Request body must be a JSON object", 400, "invalid_request")
 
-    request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    request_id = f"chatcmpl-{uuid.uuid4().hex}"
     logger.info(f">>> NEW REQUEST {request_id}")
 
     # Parse request
@@ -3412,6 +3416,9 @@ def chat_completions():
 
     # Validate message elements are dicts (rejects e.g. messages: ["hello"])
     messages = [m for m in messages if isinstance(m, dict)]
+    if not messages:
+        return make_error_response("'messages' must contain at least one valid message object",
+                                   400, "invalid_request")
 
     # === VL AUTO-ROUTING: Check for images BEFORE normalizing content ===
     _vl_has_images = _has_images_in_messages(messages)
@@ -3765,7 +3772,8 @@ def chat_completions():
             503, "service_unavailable"
         )
 
-    ABORT_EVENT.clear()
+    ABORT_EVENT.clear()  # Clear immediately after claiming slot — minimises window where a
+    # stale abort from shutdown() could clear a new request's abort signal.
     created = int(time.time())
 
     try:
@@ -3905,6 +3913,16 @@ def chat_completions():
                            f"prompt_len={len(vl_prompt)}")
             else:
                 vl_prompt = f"{vl_image_tag * n_images}{_vl_text_prompt}"
+
+            # VL context length check (image tokens + text tokens vs model context)
+            _vl_ctx = vl_config.get('context_length', CONTEXT_LENGTH_DEFAULT)
+            _vl_img_tok = _vision_encoder.model_image_token * n_images
+            _vl_text_tok = len(vl_prompt) // CHARS_PER_TOKEN_ESTIMATE
+            if (_vl_img_tok + _vl_text_tok) > _vl_ctx * 1.1:
+                end_request(request_id)
+                return make_error_response(
+                    f"VL prompt too long (~{_vl_img_tok + _vl_text_tok} tokens, context is {_vl_ctx}). "
+                    "Shorten your message.", 400, "context_length_exceeded")
 
             vl_data = {
                 'image_embed': image_embed,
@@ -4431,6 +4449,8 @@ def _generate_stream(prompt, request_id, model_name, created,
             })
 
         yield "data: [DONE]\n\n"
+        end_request(request_id)
+        request_ended = True
 
         # Prometheus: record inference stats
         if _PROMETHEUS_AVAILABLE and stats_data:
