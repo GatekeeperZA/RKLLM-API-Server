@@ -707,9 +707,9 @@ Environment="RERANK_MODEL_PATH=$RERANK_MODEL_FILE"
 ExecStart=$VENV_DIR/bin/gunicorn -w 1 -k gthread --threads 2 --timeout 600 -b 0.0.0.0:8001 embed_api:app
 
 Restart=on-failure
-RestartSec=10
-StartLimitIntervalSec=60
-StartLimitBurst=3
+RestartSec=15
+StartLimitIntervalSec=600
+StartLimitBurst=40
 LimitNOFILE=65536
 ProtectHome=no
 NoNewPrivileges=yes
