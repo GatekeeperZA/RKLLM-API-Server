@@ -1540,7 +1540,7 @@ class RKLLMWrapper:
             param.img_start = b""
             param.img_end = b""
             param.img_content = b""
-            param.extend_param.base_domain_id = 0
+            param.extend_param.base_domain_id = 1
         param.extend_param.embed_flash = 1
         param.extend_param.n_batch = 1
         param.extend_param.use_cross_attn = 0
