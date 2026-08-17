@@ -51,6 +51,7 @@ import uuid
 import hashlib
 import base64
 import io
+from io import BytesIO
 from collections import OrderedDict
 from threading import Lock, RLock, Thread, Event
 import atexit
@@ -122,6 +123,55 @@ try:
         "KV cache incremental hit vs full reset counts",
         ["result"]
     )
+    rknpu_core_load = Gauge(
+        "rknpu_core_load_percent",
+        "RK3588 NPU core utilisation (%)",
+        ["core"]
+    )
+    rknpu_freq_mhz = Gauge(
+        "rknpu_freq_mhz",
+        "RK3588 NPU clock frequency (MHz)"
+    )
+    rknpu_power_on = Gauge(
+        "rknpu_power_on",
+        "RK3588 NPU power state (1=on, 0=off)"
+    )
+
+    def _npu_metrics_poller():
+        import re as _re
+        import subprocess as _sp
+        _RKNPU = "/sys/kernel/debug/rknpu"
+
+        def _read(fname):
+            try:
+                return _sp.check_output(
+                    ["sudo", "/usr/bin/cat", f"{_RKNPU}/{fname}"],
+                    stderr=_sp.DEVNULL, timeout=2
+                ).decode()
+            except Exception:
+                try:
+                    return open(f"{_RKNPU}/{fname}").read()
+                except Exception:
+                    return None
+
+        while True:
+            raw = _read("load")
+            if raw:
+                for m in _re.finditer(r'Core(\d+):\s*(\d+)%', raw):
+                    rknpu_core_load.labels(core=f"core{m.group(1)}").set(int(m.group(2)))
+            raw = _read("freq")
+            if raw:
+                try:
+                    rknpu_freq_mhz.set(int(raw.strip()) / 1_000_000)
+                except Exception:
+                    pass
+            raw = _read("power")
+            if raw:
+                rknpu_power_on.set(1 if raw.strip().lower() == "on" else 0)
+            time.sleep(5)
+
+    Thread(target=_npu_metrics_poller, daemon=True).start()
+
     _PROMETHEUS_AVAILABLE = True
     print("[RKLLM] Prometheus metrics enabled at /metrics")
 except ImportError:
@@ -4889,7 +4939,7 @@ def legacy_completions():
         content = str(prompt)
     body = {k: v for k, v in body.items() if k != 'prompt'}
     body['messages'] = [{"role": "user", "content": content}]
-    from io import BytesIO
+
     body_bytes = json.dumps(body).encode()
     environ = request.environ.copy()
     environ['PATH_INFO'] = '/v1/chat/completions'
@@ -4920,6 +4970,188 @@ def legacy_completions():
 
 
 # Register signal handlers at module level so gunicorn workers also clean up the NPU
+# =============================================================================
+# OLLAMA COMPATIBILITY LAYER
+# Minimal Ollama API shim so clients like VS Code Continue, AnythingLLM, and
+# Open Interpreter can point at this server without configuration changes.
+# Routes translate to OpenAI-format internally and delegate to chat_completions().
+# =============================================================================
+
+def _ollama_model_entry(name):
+    """Build an Ollama-format model entry from a MODELS config entry."""
+    cfg = MODELS.get(name, {})
+    ctx = cfg.get('context_length', CONTEXT_LENGTH_DEFAULT)
+    size_bytes = 0
+    try:
+        p = cfg.get('path', '')
+        if p and os.path.isfile(p):
+            size_bytes = os.path.getsize(p)
+    except OSError:
+        pass
+    return {
+        "name": name,
+        "model": name,
+        "modified_at": "2025-01-01T00:00:00Z",
+        "size": size_bytes,
+        "digest": f"rkllm-{name}",
+        "details": {
+            "parent_model": "",
+            "format": "rkllm",
+            "family": "rkllm",
+            "families": ["rkllm"],
+            "parameter_size": name,
+            "quantization_level": "W8A8",
+        },
+        "capabilities": cfg.get('capabilities', ['completion', 'chat']),
+    }
+
+
+@app.route('/api/version', methods=['GET'])
+def ollama_version():
+    """Ollama version endpoint — clients use this to detect Ollama compatibility."""
+    return jsonify({"version": "0.3.0-rkllm"})
+
+
+@app.route('/api/tags', methods=['GET'])
+def ollama_tags():
+    """List available models in Ollama format."""
+    models_list = [_ollama_model_entry(n) for n in MODELS]
+    return jsonify({"models": models_list})
+
+
+@app.route('/api/show', methods=['POST'])
+def ollama_show():
+    """Show model details in Ollama format."""
+    body = request.get_json(silent=True) or {}
+    name = body.get('name') or body.get('model', '')
+    resolved = ALIASES.get(name, name)
+    if resolved not in MODELS:
+        return jsonify({"error": f"model '{name}' not found"}), 404
+    entry = _ollama_model_entry(resolved)
+    cfg = MODELS[resolved]
+    return jsonify({
+        **entry,
+        "modelfile": f"# RKLLM model: {resolved}",
+        "parameters": f"num_ctx {cfg.get('context_length', CONTEXT_LENGTH_DEFAULT)}",
+        "template": "{{ .System }}\n{{ .Prompt }}",
+        "system": "",
+        "license": "",
+    })
+
+
+@app.route('/api/ps', methods=['GET'])
+def ollama_ps():
+    """Show running models in Ollama format."""
+    running = []
+    if CURRENT_MODEL:
+        running.append({**_ollama_model_entry(CURRENT_MODEL), "expires_at": "0001-01-01T00:00:00Z", "size_vram": 0})
+    return jsonify({"models": running})
+
+
+@app.route('/api/chat', methods=['POST'])
+def ollama_chat():
+    """Ollama /api/chat — translate to OpenAI chat completions and proxy."""
+    body = request.get_json(silent=True) or {}
+    model = body.get('model', '')
+    messages = body.get('messages', [])
+    stream = body.get('stream', True)
+    options = body.get('options') or {}
+
+    openai_body = {
+        'model': model,
+        'messages': messages,
+        'stream': stream,
+        'max_tokens': options.get('num_predict', options.get('max_tokens', MAX_TOKENS_DEFAULT)),
+        'temperature': options.get('temperature'),
+        'top_p': options.get('top_p'),
+    }
+    openai_body = {k: v for k, v in openai_body.items() if v is not None}
+
+    if not stream:
+        # Non-streaming: call chat_completions and translate response
+        body_bytes = json.dumps(openai_body).encode()
+        environ = request.environ.copy()
+        environ['PATH_INFO'] = '/v1/chat/completions'
+        environ['wsgi.input'] = BytesIO(body_bytes)
+        environ['CONTENT_LENGTH'] = str(len(body_bytes))
+        environ['CONTENT_TYPE'] = 'application/json'
+        with app.request_context(environ):
+            oai_resp = chat_completions()
+        try:
+            data = oai_resp.get_json()
+            choice = (data.get('choices') or [{}])[0]
+            msg = choice.get('message') or {}
+            return jsonify({
+                "model": model,
+                "created_at": datetime.utcfromtimestamp(data.get('created', 0)).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                "message": {"role": msg.get('role', 'assistant'), "content": msg.get('content', '')},
+                "done": True,
+                "done_reason": choice.get('finish_reason', 'stop'),
+                "total_duration": 0,
+                "eval_count": (data.get('usage') or {}).get('completion_tokens', 0),
+                "prompt_eval_count": (data.get('usage') or {}).get('prompt_tokens', 0),
+            })
+        except Exception:
+            return oai_resp
+
+    # Streaming: translate OpenAI SSE chunks to Ollama NDJSON
+    def _ollama_stream():
+        body_bytes = json.dumps(openai_body).encode()
+        environ = request.environ.copy()
+        environ['PATH_INFO'] = '/v1/chat/completions'
+        environ['wsgi.input'] = BytesIO(body_bytes)
+        environ['CONTENT_LENGTH'] = str(len(body_bytes))
+        environ['CONTENT_TYPE'] = 'application/json'
+        with app.request_context(environ):
+            oai_resp = chat_completions()
+        for line in oai_resp.response:
+            if isinstance(line, bytes):
+                line = line.decode()
+            line = line.strip()
+            if not line.startswith('data:'):
+                continue
+            payload = line[5:].strip()
+            if payload == '[DONE]':
+                yield json.dumps({"model": model, "created_at": "", "message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}) + '\n'
+                return
+            try:
+                chunk = json.loads(payload)
+                delta = (chunk.get('choices') or [{}])[0].get('delta') or {}
+                content = delta.get('content', '')
+                yield json.dumps({"model": model, "created_at": "", "message": {"role": "assistant", "content": content}, "done": False}) + '\n'
+            except Exception:
+                continue
+
+    return Response(stream_with_context(_ollama_stream()), mimetype='application/x-ndjson')
+
+
+@app.route('/api/generate', methods=['POST'])
+def ollama_generate():
+    """Ollama /api/generate (legacy completion format) — wrap as chat message."""
+    body = request.get_json(silent=True) or {}
+    prompt = body.get('prompt', '')
+    system = body.get('system', '')
+    messages = []
+    if system:
+        messages.append({'role': 'system', 'content': system})
+    messages.append({'role': 'user', 'content': prompt})
+    # Delegate to ollama_chat with translated body
+    chat_body = {
+        'model': body.get('model', ''),
+        'messages': messages,
+        'stream': body.get('stream', True),
+        'options': body.get('options') or {},
+    }
+    body_bytes = json.dumps(chat_body).encode()
+    environ = request.environ.copy()
+    environ['PATH_INFO'] = '/api/chat'
+    environ['wsgi.input'] = BytesIO(body_bytes)
+    environ['CONTENT_LENGTH'] = str(len(body_bytes))
+    environ['CONTENT_TYPE'] = 'application/json'
+    with app.request_context(environ):
+        return ollama_chat()
+
+
 # on SIGTERM (gunicorn graceful shutdown). Guards prevent errors in non-main threads.
 for _sig in (signal.SIGTERM, signal.SIGINT):
     try:
