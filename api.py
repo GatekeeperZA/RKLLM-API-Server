@@ -1553,6 +1553,13 @@ class RKLLMWrapper:
             self.lib.rkllm_release_prompt_cache.argtypes = [ctypes.c_void_p]
             self.lib.rkllm_release_prompt_cache.restype = ctypes.c_int
 
+        # rkllm_load_lora(handle, lora_adapter*) -> int
+        if hasattr(self.lib, 'rkllm_load_lora'):
+            self.lib.rkllm_load_lora.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(RKLLMLoraAdapter),
+            ]
+            self.lib.rkllm_load_lora.restype = ctypes.c_int
+
     def init_model(self, model_path, ctx_len, max_tokens, vl_config=None, sampling=None):
         """Initialize a model.  Returns True on success.
 
@@ -1762,6 +1769,29 @@ class RKLLMWrapper:
         self._model_loaded = False
         self.handle = ctypes.c_void_p()
 
+    def load_lora(self, adapter_path, adapter_name, scale=1.0):
+        """Load a LoRA adapter onto the currently loaded model.
+
+        Returns True on success.  The adapter is identified by adapter_name
+        and can be referenced in RKLLMLoraParam at inference time.
+        """
+        if not self._model_loaded:
+            logger.error("load_lora: no model loaded")
+            return False
+        if not hasattr(self.lib, 'rkllm_load_lora'):
+            logger.error("load_lora: rkllm_load_lora not available in this runtime")
+            return False
+        adapter = RKLLMLoraAdapter()
+        adapter.lora_adapter_path = adapter_path.encode('utf-8')
+        adapter.lora_adapter_name = adapter_name.encode('utf-8')
+        adapter.scale = scale
+        ret = self.lib.rkllm_load_lora(self.handle, ctypes.byref(adapter))
+        if ret != 0:
+            logger.error(f"rkllm_load_lora failed (ret={ret}) for {adapter_path}")
+            return False
+        logger.info(f"LoRA adapter loaded: {adapter_name} from {adapter_path} (scale={scale})")
+        return True
+
     @property
     def is_loaded(self):
         return self._model_loaded
@@ -1776,6 +1806,9 @@ ACTIVE_REQUEST = {
     "last_activity": 0,
     "model": None,
 }
+
+# LoRA adapters currently loaded: {name: {path, scale, loaded_at}}
+_LOADED_LORAS: dict = {}
 ACTIVE_LOCK = Lock()
 ABORT_EVENT = Event()
 
@@ -4970,6 +5003,58 @@ def legacy_completions():
 
 
 # Register signal handlers at module level so gunicorn workers also clean up the NPU
+# =============================================================================
+# LORA ADAPTER ENDPOINTS
+# POST /v1/lora/load  {"model": "qwen3-1.7b", "path": "/path/to/adapter.rkllm",
+#                      "name": "my-adapter", "scale": 1.0}
+# GET  /v1/lora       list loaded adapters
+# DELETE /v1/lora/<name>  unload (currently a no-op in rkllm 1.2.3 — marks unloaded)
+# =============================================================================
+
+@app.route('/v1/lora', methods=['GET'])
+def lora_list():
+    return jsonify({"adapters": [
+        {"name": n, **v} for n, v in _LOADED_LORAS.items()
+    ]})
+
+
+@app.route('/v1/lora/load', methods=['POST'])
+def lora_load():
+    global _LOADED_LORAS
+    body = request.get_json(silent=True) or {}
+    path = body.get('path', '').strip()
+    name = body.get('name', '').strip()
+    scale = float(body.get('scale', 1.0))
+
+    if not path or not name:
+        return make_error_response("'path' and 'name' are required", 400, "invalid_request")
+    if not os.path.isfile(path):
+        return make_error_response(f"Adapter file not found: {path}", 404, "not_found")
+
+    with PROCESS_LOCK:
+        if not _rkllm_wrapper or not _rkllm_wrapper.is_loaded:
+            return make_error_response("No model loaded — load a model first", 409, "model_not_loaded")
+        ok = _rkllm_wrapper.load_lora(path, name, scale)
+
+    if not ok:
+        return make_error_response(f"rkllm_load_lora failed for '{name}'", 500, "lora_load_failed")
+
+    _LOADED_LORAS[name] = {"path": path, "scale": scale, "loaded_at": int(time.time())}
+    return jsonify({"status": "loaded", "name": name, "path": path, "scale": scale})
+
+
+@app.route('/v1/lora/<name>', methods=['DELETE'])
+def lora_unload(name):
+    global _LOADED_LORAS
+    if name not in _LOADED_LORAS:
+        return make_error_response(f"Adapter '{name}' not loaded", 404, "not_found")
+    # rkllm 1.2.3 has no rkllm_unload_lora — removing from registry is sufficient
+    # (adapter will be absent from future infer_param.lora_params references)
+    del _LOADED_LORAS[name]
+    logger.info(f"LoRA adapter unregistered: {name}")
+    return jsonify({"status": "unloaded", "name": name})
+
+
 # =============================================================================
 # OLLAMA COMPATIBILITY LAYER
 # Minimal Ollama API shim so clients like VS Code Continue, AnythingLLM, and
