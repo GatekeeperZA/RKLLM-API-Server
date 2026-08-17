@@ -3811,7 +3811,7 @@ def chat_completions():
 
             all_embeds = []
             for img_idx, img_bytes in enumerate(images_to_process):
-                img_key = hashlib.md5(img_bytes).hexdigest()
+                img_key = f"{vl_name}:{hashlib.md5(img_bytes).hexdigest()}"
                 with _VL_EMBED_CACHE_LOCK:
                     if img_key in _vl_embed_cache:
                         _vl_embed_cache.move_to_end(img_key)
