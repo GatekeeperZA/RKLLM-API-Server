@@ -979,10 +979,10 @@ curl -X POST http://localhost:8000/v1/lora/load \
 
 # Unregister an adapter
 curl -X DELETE http://localhost:8000/v1/lora/my-adapter
-# {"status":"unregistered","name":"my-adapter"}
+# {"status":"unloaded","name":"my-adapter"}
 ```
 
-> **Runtime requirement:** `rkllm_load_lora` must be exported by your `librkllmrt.so`. The endpoint returns HTTP 501 if the symbol is absent. LoRA adapter support was introduced in RKLLM SDK ≥ v1.2.3.
+> **Runtime requirement:** `rkllm_load_lora` must be exported by your `librkllmrt.so`. The endpoint returns HTTP 500 (`lora_load_failed`) if the call fails, e.g. the symbol is absent. LoRA adapter support was introduced in RKLLM SDK ≥ v1.2.3.
 
 ---
 
@@ -2709,7 +2709,7 @@ curl http://localhost:8000/v1/lora
 
 # Unregister (does not unload from NPU — reload model to fully clear)
 curl -X DELETE http://localhost:8000/v1/lora/my-adapter
-# {"status":"unregistered","name":"my-adapter"}
+# {"status":"unloaded","name":"my-adapter"}
 ```
 
 ### Request Body for `/v1/lora/load`
@@ -2722,7 +2722,7 @@ curl -X DELETE http://localhost:8000/v1/lora/my-adapter
 
 ### Notes
 
-- **Runtime requirement:** `rkllm_load_lora` must be exported by your `librkllmrt.so`. The endpoint returns `HTTP 501 Not Implemented` if the symbol is absent.
+- **Runtime requirement:** `rkllm_load_lora` must be exported by your `librkllmrt.so`. `POST /v1/lora/load` returns `HTTP 500` (`lora_load_failed`) if the call fails, e.g. the symbol is absent.
 - LoRA is applied to the **currently loaded text model** — the adapter must be compatible with that model's architecture.
 - Unregistering an adapter via `DELETE` removes it from the server's tracking table. To fully clear the adapter from the NPU weights, unload and reload the model (`POST /v1/models/unload` then `/v1/models/select`).
 - Multiple adapters can be loaded simultaneously if supported by the runtime.

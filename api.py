@@ -2462,6 +2462,17 @@ def build_prompt(messages, model_name):
         logger.warning(f"Multiple system messages ({len(system_parts)}) — concatenating")
     system_text = "\n\n".join(system_parts)
 
+    # --- /no_think soft-switch: strip prefix from the latest user message ---
+    no_think_requested = False
+    for i in range(len(conversation) - 1, -1, -1):
+        role, content = conversation[i]
+        if role == 'user':
+            stripped = content.lstrip()
+            if stripped[:9].lower() == '/no_think':
+                no_think_requested = True
+                conversation[i] = (role, stripped[9:].lstrip())
+            break
+
     user_question = ""
     for role, content in reversed(conversation):
         if role == 'user':
@@ -2473,7 +2484,7 @@ def build_prompt(messages, model_name):
     prompt = ""
     # Only enable thinking for models that natively support <think> blocks
     model_caps = model_cfg.get('capabilities', []) if model_cfg else []
-    enable_thinking = 'thinking' in model_caps
+    enable_thinking = ('thinking' in model_caps) and not no_think_requested
 
     # =====================================================================
     # FOLLOW-UP / IRRELEVANT-RAG DETECTION
@@ -2673,7 +2684,7 @@ def build_prompt(messages, model_name):
     # Re-check after quality floor may have cleared rag_parts
     if rag_parts and user_question:
         # enable_thinking for RAG: only if model supports it AND context is large enough
-        enable_thinking = ('thinking' in model_caps) and (ctx >= DISABLE_THINK_FOR_RAG_BELOW_CTX)
+        enable_thinking = ('thinking' in model_caps) and (ctx >= DISABLE_THINK_FOR_RAG_BELOW_CTX) and not no_think_requested
         abstention = ". If not answered above, say you don't know" if enable_thinking else ''
         logger.info(f"RAG thinking: ctx={ctx}, threshold={DISABLE_THINK_FOR_RAG_BELOW_CTX}, "
                     f"caps={model_caps}, thinking={'enabled' if enable_thinking else 'disabled'}")
@@ -2793,7 +2804,7 @@ def build_prompt(messages, model_name):
                             f"({original_parts} -> {len(parts)} parts, "
                             f"{len(prompt)} chars, ctx={ctx})")
         # Only enable thinking for models with the "thinking" capability
-        enable_thinking = 'thinking' in model_caps
+        enable_thinking = ('thinking' in model_caps) and not no_think_requested
 
         # --- Open WebUI meta-task detection ---
         # Open WebUI sends internal tasks (search query gen, title gen, tag gen)
@@ -3206,8 +3217,9 @@ def model_monitor():
     logger.info("Model monitor stopped")
     # SHUTDOWN_EVENT set by signal handler — trigger clean shutdown from this
     # background thread so the signal handler itself stays reentrant-safe.
+    # Daemon thread: no sys.exit() here, it would only end this thread, not
+    # the process. The main thread/gunicorn worker owns actual process exit.
     shutdown()
-    sys.exit(0)
 
 
 _monitor_thread = Thread(target=model_monitor, daemon=True)
@@ -5024,7 +5036,10 @@ def lora_load():
     body = request.get_json(silent=True) or {}
     path = body.get('path', '').strip()
     name = body.get('name', '').strip()
-    scale = float(body.get('scale', 1.0))
+    try:
+        scale = float(body.get('scale', 1.0))
+    except (TypeError, ValueError):
+        return make_error_response("'scale' must be a number", 400, "invalid_request")
 
     if not path or not name:
         return make_error_response("'path' and 'name' are required", 400, "invalid_request")
