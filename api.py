@@ -4189,6 +4189,7 @@ def chat_completions():
                         yield make_sse_chunk(request_id, name, created, delta={"role": "assistant"})
                         if reasoning_content:
                             yield make_sse_chunk(request_id, name, created, delta={"reasoning_content": reasoning_content})
+                            yield make_sse_chunk(request_id, name, created, delta={"content": f"<think>{reasoning_content}</think>"})
                         # Progressive chunking for natural streaming feel
                         _chunk_size = 80
                         for _ci in range(0, len(cleaned_content), _chunk_size):
@@ -4205,7 +4206,10 @@ def chat_completions():
                                  'Connection': 'keep-alive'},
                     )
                 else:
-                    message_obj = {"role": "assistant", "content": cleaned_content}
+                    message_obj = {
+                        "role": "assistant",
+                        "content": f"<think>{reasoning_content}</think>{cleaned_content}" if reasoning_content else cleaned_content,
+                    }
                     if reasoning_content:
                         message_obj["reasoning_content"] = reasoning_content
                     return jsonify({
@@ -4350,6 +4354,7 @@ def _generate_stream(prompt, request_id, model_name, created,
     request_ended = False
     stats_data = {}
     think_parser = ThinkTagParser()
+    _think_tag_open = False
 
     try:
         update_request_activity()  # Refresh after model load delay
@@ -4422,7 +4427,23 @@ def _generate_stream(prompt, request_id, model_name, created,
                         if not has_tools and chunk_text.strip():
                             yield make_sse_chunk(request_id, model_name, created,
                                                  delta={"reasoning_content": chunk_text})
+                            # Also mirror into content as raw <think> tags —
+                            # clients like Open WebUI render thinking blocks by
+                            # scanning content for <think>...</think> rather than
+                            # reading the reasoning_content field, and some proxies
+                            # (e.g. Open WebUI's own OpenAI passthrough) drop
+                            # reasoning_content entirely when re-serializing.
+                            if not _think_tag_open:
+                                yield make_sse_chunk(request_id, model_name, created,
+                                                     delta={"content": "<think>"})
+                                _think_tag_open = True
+                            yield make_sse_chunk(request_id, model_name, created,
+                                                 delta={"content": chunk_text})
                     else:
+                        if _think_tag_open:
+                            yield make_sse_chunk(request_id, model_name, created,
+                                                 delta={"content": "</think>"})
+                            _think_tag_open = False
                         _prev_len = len(total_content)
                         total_content += chunk_text
                         # Stop sequence check — scan before yielding so stop markers
@@ -4502,10 +4523,26 @@ def _generate_stream(prompt, request_id, model_name, created,
                     if flush_text.strip():
                         yield make_sse_chunk(request_id, model_name, created,
                                              delta={"reasoning_content": flush_text})
+                        if not _think_tag_open:
+                            yield make_sse_chunk(request_id, model_name, created,
+                                                 delta={"content": "<think>"})
+                            _think_tag_open = True
+                        yield make_sse_chunk(request_id, model_name, created,
+                                             delta={"content": flush_text})
                 else:
+                    if _think_tag_open:
+                        yield make_sse_chunk(request_id, model_name, created,
+                                             delta={"content": "</think>"})
+                        _think_tag_open = False
                     total_content += flush_text
                     yield make_sse_chunk(request_id, model_name, created,
                                          delta={"content": flush_text})
+
+        # Close any still-open <think> tag (e.g. generation ended mid-thought)
+        if _think_tag_open:
+            yield make_sse_chunk(request_id, model_name, created,
+                                 delta={"content": "</think>"})
+            _think_tag_open = False
 
         # Tool call detection — if tools were active and model output a <tool_call>,
         # emit a structured tool_calls response instead of a normal content response.
@@ -4865,7 +4902,11 @@ def _generate_complete(prompt, request_id, model_name, created,
 
         message_obj = {
             "role": "assistant",
-            "content": cleaned_content,
+            # Mirror thinking into raw <think> tags — clients like Open WebUI
+            # render thinking blocks by scanning content for the tags rather
+            # than reading reasoning_content, and some proxies drop
+            # reasoning_content entirely when re-serializing the response.
+            "content": f"<think>{reasoning_content}</think>{cleaned_content}" if reasoning_content else cleaned_content,
         }
         if reasoning_content:
             message_obj["reasoning_content"] = reasoning_content
