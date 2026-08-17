@@ -2986,7 +2986,7 @@ def _find_vl_model():
 
 def _load_vl_model(vl_name, vl_config):
     """Load VL model (vision encoder + LLM decoder). Returns True on success."""
-    global _vision_encoder, _vl_rkllm_wrapper, VL_CURRENT_MODEL
+    global _vision_encoder, _vl_rkllm_wrapper, VL_CURRENT_MODEL, CURRENT_MODEL, _worker_thread
 
     if not _VL_DEPS_AVAILABLE:
         logger.error("VL dependencies not available -- install numpy and Pillow")
@@ -3032,6 +3032,18 @@ def _load_vl_model(vl_name, vl_config):
                 return False
 
         if not _vl_rkllm_wrapper.is_loaded:
+            # Free text-model IOVA before loading VL model — both use domain 1
+            # (4GB IOVA), so having text + VL loaded simultaneously causes OOM.
+            if _rkllm_wrapper and _rkllm_wrapper.is_loaded:
+                logger.info(f"VL load: unloading text model {CURRENT_MODEL} to free domain-1 IOVA")
+                _rkllm_wrapper.abort()
+                if _worker_thread and _worker_thread.is_alive():
+                    _worker_thread.join(timeout=5)
+                _rkllm_wrapper.release_prompt_cache()
+                _rkllm_wrapper.destroy()
+                CURRENT_MODEL = None
+                _reset_kv_tracking()
+
             model_path = vl_config['path']
             ctx_len = vl_config.get('context_length', CONTEXT_LENGTH_DEFAULT)
             max_tokens = vl_config.get('max_tokens', MAX_TOKENS_DEFAULT)
