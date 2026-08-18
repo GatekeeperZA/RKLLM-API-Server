@@ -828,7 +828,7 @@ if os.path.exists(MODELS_ROOT):
             "capabilities": capabilities,
             "sampling": sampling,
         }
-        # Read extra flags from model_config.json (disable_tools, etc.)
+        # Read extra flags from model_config.json (disable_tools, skip_chat, etc.)
         _mcfg_path = os.path.join(root, 'model_config.json')
         if os.path.isfile(_mcfg_path):
             try:
@@ -836,6 +836,8 @@ if os.path.exists(MODELS_ROOT):
                     _mcfg = json.load(_f)
                 if _mcfg.get('disable_tools'):
                     config['disable_tools'] = True
+                if _mcfg.get('skip_chat'):
+                    config['skip_chat'] = True
             except Exception:
                 pass
 
@@ -3418,6 +3420,8 @@ def list_models():
     logger.debug(f"/v1/models called - current_model: {CURRENT_MODEL}")
     data = []
     for model_id, cfg in MODELS.items():
+        if cfg.get('skip_chat'):
+            continue  # embedding/reranker models — served by embed_api.py, not chat
         entry = {
             "id": model_id,
             "object": "model",
@@ -3880,6 +3884,12 @@ def chat_completions():
 
     if config is None:
         return make_error_response(f"Model '{requested_model}' not found", 404, "not_found")
+
+    if config.get('skip_chat'):
+        return make_error_response(
+            f"Model '{name}' is an embedding/reranker model — use /v1/embeddings or /v1/rerank on port 8001",
+            400, "invalid_request"
+        )
 
     # Strip tool injection for models that opt out (e.g. small context models that
     # can't fit 39 tool definitions alongside conversation history).
