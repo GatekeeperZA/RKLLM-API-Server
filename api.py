@@ -375,7 +375,7 @@ REQUEST_STALE_TIMEOUT = 120  # must exceed worst-case model load time (~90s on N
 MONITOR_INTERVAL = 10
 IDLE_UNLOAD_TIMEOUT = 300
 VL_IDLE_UNLOAD_TIMEOUT = 300  # Auto-unload VL model after idle (frees NPU memory for large text models)
-QUEUE_WAIT_TIMEOUT = int(os.environ.get('RKLLM_QUEUE_TIMEOUT', '30'))  # seconds to wait for a busy slot
+QUEUE_WAIT_TIMEOUT = int(os.environ.get('RKLLM_QUEUE_TIMEOUT', '240'))  # seconds to wait for a busy slot
 
 # Stopword list for content-vs-boilerplate detection (jusText-inspired).
 ENGLISH_STOPWORDS = frozenset({
@@ -3933,7 +3933,7 @@ def chat_completions():
     # Clients get X-Queue-Position and X-Queue-Wait-Seconds headers so they
     # know they queued rather than getting an instant 503.
     _queue_start = time.time()
-    _queue_position = 0
+    _queue_log_next = 10.0  # log queue progress every 10s to avoid noise
     while not try_start_request(request_id, name):
         _waited = time.time() - _queue_start
         if _waited >= QUEUE_WAIT_TIMEOUT:
@@ -3942,8 +3942,9 @@ def chat_completions():
                 f"Server busy. Request queued for {_waited:.0f}s but no slot became available.",
                 503, "service_unavailable"
             )
-        _queue_position += 1
-        logger.info(f"[{request_id}] Queued (waited {_waited:.1f}s) — waiting for NPU slot")
+        if _waited >= _queue_log_next:
+            logger.info(f"[{request_id}] Still queued ({_waited:.0f}s) — waiting for NPU slot")
+            _queue_log_next += 10.0
         GENERATION_COMPLETE.wait(timeout=2)
     _queue_wait = time.time() - _queue_start
     if _queue_wait > 0.1:
