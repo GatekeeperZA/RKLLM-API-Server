@@ -372,6 +372,20 @@ curl http://localhost:8000/v1/models
 
 ---
 
+### Docker Installation
+
+A pre-built docker image is provided at ghcr.io, use following command to run rkllm-api-server:
+```bash
+docker run -d \
+   --privileged \
+   -p 8000:8000 \
+   -v /path/to/models:/root/models \
+   ghcr.io/gatekeeperza/rkllm-api-server:latest
+
+```
+
+---
+
 ### Manual Installation
 
 <details>
