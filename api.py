@@ -375,6 +375,7 @@ REQUEST_STALE_TIMEOUT = 120  # must exceed worst-case model load time (~90s on N
 MONITOR_INTERVAL = 10
 IDLE_UNLOAD_TIMEOUT = 300
 VL_IDLE_UNLOAD_TIMEOUT = 300  # Auto-unload VL model after idle (frees NPU memory for large text models)
+QUEUE_WAIT_TIMEOUT = int(os.environ.get('RKLLM_QUEUE_TIMEOUT', '30'))  # seconds to wait for a busy slot
 
 # Stopword list for content-vs-boilerplate detection (jusText-inspired).
 ENGLISH_STOPWORDS = frozenset({
@@ -3928,13 +3929,25 @@ def chat_completions():
         else:
             logger.warning(f"[{request_id}] disable_tools=true but messages[0] is not the injected tool prompt — skipping strip")
 
-    # Atomic check-and-set: reject if another generation is in progress
-    if not try_start_request(request_id, name):
-        logger.warning(f"[{request_id}] Rejected - request already in progress")
-        return make_error_response(
-            "Another request is currently being processed. Please retry shortly.",
-            503, "service_unavailable"
-        )
+    # Atomic check-and-set: wait for the NPU slot to free up, then claim it.
+    # Clients get X-Queue-Position and X-Queue-Wait-Seconds headers so they
+    # know they queued rather than getting an instant 503.
+    _queue_start = time.time()
+    _queue_position = 0
+    while not try_start_request(request_id, name):
+        _waited = time.time() - _queue_start
+        if _waited >= QUEUE_WAIT_TIMEOUT:
+            logger.warning(f"[{request_id}] Queue timeout after {_waited:.1f}s — rejecting")
+            return make_error_response(
+                f"Server busy. Request queued for {_waited:.0f}s but no slot became available.",
+                503, "service_unavailable"
+            )
+        _queue_position += 1
+        logger.info(f"[{request_id}] Queued (waited {_waited:.1f}s) — waiting for NPU slot")
+        GENERATION_COMPLETE.wait(timeout=2)
+    _queue_wait = time.time() - _queue_start
+    if _queue_wait > 0.1:
+        logger.info(f"[{request_id}] Queue wait: {_queue_wait:.1f}s")
 
     ABORT_EVENT.clear()  # Clear immediately after claiming slot — minimises window where a
     # stale abort from shutdown() could clear a new request's abort signal.
@@ -4290,6 +4303,8 @@ def chat_completions():
             'x-ratelimit-remaining-tokens': str(_ctx_len),
             'x-ratelimit-reset-requests': '1s',
         }
+        if _queue_wait > 0.1:
+            _rl_hdrs['x-queue-wait-seconds'] = f"{_queue_wait:.1f}"
         _stream_hdrs = {
             'Cache-Control': 'no-cache',
             'X-Accel-Buffering': 'no',
@@ -4410,6 +4425,13 @@ def _generate_stream(prompt, request_id, model_name, created,
         GENERATION_COMPLETE.clear()
         _worker_thread = Thread(target=_worker, daemon=True)
         _worker_thread.start()
+
+    # Tool call streaming: emit an initial role delta immediately so the client
+    # connection stays alive during the silent buffering phase. Without this,
+    # clients with short read timeouts drop the connection before tool JSON is ready.
+    if has_tools:
+        yield make_sse_chunk(request_id, model_name, created,
+                             delta={"role": "assistant", "content": None})
 
     generation_start = time.time()
     if _PROMETHEUS_AVAILABLE:
