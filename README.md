@@ -3110,6 +3110,47 @@ Both models are on HuggingFace ([xLAM](https://huggingface.co/GatekeeperZA/xLAM-
 
 ---
 
+## Roadmap & Known Gaps
+
+### Planned (research + docs only)
+
+| Item | Notes |
+|---|---|
+| **W4A16 quantization guide** | W4A16 models run ~1.5–2× faster than W8A8/W8A16 at the cost of 1–3% accuracy loss on benchmarks. Requires re-converting models with `rkllm-toolkit`. Guide + accuracy tradeoff table to be added. |
+| **Prompt caching research** | RKLLM exposes `save_prompt_cache` / `load_prompt_cache` for disk-based KV state persistence. Currently implemented for system prompts. Research whether per-user prefix caching is feasible given single-NPU constraints. |
+| **Vision auto-load on demand** | VL model currently stays resident in NPU memory once loaded (~2–3 GB). Auto-unload after idle + reload on next image request would free memory for text model but adds 3–5s latency on first image after idle. Evaluating whether the tradeoff is worth it. |
+
+### Not Implemented (decided against)
+
+| Item | Reason |
+|---|---|
+| **JSON schema / structured output enforcement** | Adds latency: schema injection increases prefill, validation adds CPU work, retries can 2–3× total request time. Not worth the cost for a single-user NPU server. |
+| **Batch inference** | RKLLM processes one request at a time — the NPU has a single execution context. Queuing (already implemented) is the correct approach. |
+| **NPU overclock beyond 1GHz** | Stock max is 1GHz. Going higher requires DTB modification and the PMIC voltage rail is already at its ceiling (850mV). Community reports show instability under sustained load. Not safe. |
+| **Prefix sharing across users** | Requires multiple simultaneous NPU contexts — not possible on RK3588. |
+
+### Missing API Surface
+
+| Endpoint | Status | Notes |
+|---|---|---|
+| `POST /v1/completions` | ❌ Not implemented | Legacy non-chat text completion — some older tools (Continue.dev, llama.cpp clients) use this |
+| `POST /v1/messages` streaming | ⚠️ Partial | Anthropic shim translates to OpenAI format but does not yet support `"stream": true` |
+| `xlam-1b-fc-r` tool routing | ⚠️ Partial | Model is detected and listed but has `base` capability — no automatic tool-call prompt injection for base models |
+
+### Undocumented Tools
+
+The `tools/` directory contains helper scripts that are not yet covered in the README:
+
+| Script | Purpose |
+|---|---|
+| `tools/convert_rkllm.py` | Convert HuggingFace models to `.rkllm` format using `rkllm-toolkit` |
+| `tools/hf_upload.py` | Upload converted models to HuggingFace Hub |
+| `tools/hf_upload_pi_models.py` | Upload Orange Pi compiled models directly from the device |
+
+Documentation for these scripts is planned.
+
+---
+
 ## Known Issues & Fixes
 
 Bugs found during code audits, with the commit where each was resolved. Listed so other users running this codebase can identify whether they are affected and apply the fix manually if they are on an older commit.
