@@ -126,6 +126,12 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 ### Standards Compliance
 - **`stream_options.include_usage`** — streaming token counts per OpenAI spec
 - **`system_fingerprint`** in all responses
+- **`x-ratelimit-*` headers** — `limit-requests`, `limit-tokens`, `remaining-requests`, `remaining-tokens`, `reset-requests` on all completions responses
+- **`/ready` / `/v1/ready`** — readiness probe (503 when no model loaded or busy)
+- **`/v1/tokenize`** — BPE token estimation without inference
+- **`/v1/count_tokens`** — Anthropic SDK alias for token counting
+- **`/v1/rerank`** — reranker proxy to NPU embed service
+- **`/v1/messages`** — Anthropic Messages API shim (Claude-format requests)
 - **`max_tokens` / `max_completion_tokens`** support
 - **Request body size limit** (50 MB)
 - **Proper error responses** matching OpenAI error format
@@ -998,6 +1004,102 @@ Reading `/sys/kernel/debug/rknpu/` requires root. A sudoers rule is deployed by 
 ```
 armbian ALL=(root) NOPASSWD: /usr/bin/cat /sys/kernel/debug/rknpu/load, ...
 ```
+
+### `GET /ready`, `GET /v1/ready`
+
+Readiness probe — returns 200 only when a model is loaded and no inference is in progress. Returns 503 otherwise. Useful for load balancers and health-gating.
+
+```bash
+curl -i http://localhost:8000/ready
+# HTTP/1.1 200 OK   — model loaded and idle
+# HTTP/1.1 503 Service Unavailable  — no model or busy
+```
+
+```json
+{"status": "ready", "model": "qwen3-1.7b"}
+```
+
+### `POST /v1/tokenize`, `POST /tokenize`
+
+Estimate token count for a prompt or messages array without running inference. Uses a BPE estimator tuned per model family with CJK-awareness.
+
+```bash
+# From a prompt string
+curl -X POST http://localhost:8000/v1/tokenize \
+  -H "Content-Type: application/json" \
+  -d '{"model": "qwen3-1.7b", "prompt": "Hello world"}'
+
+# From a messages array
+curl -X POST http://localhost:8000/v1/tokenize \
+  -H "Content-Type: application/json" \
+  -d '{"model": "qwen3-1.7b", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+```json
+{
+  "model": "qwen3-1.7b",
+  "tokens": 8,
+  "context_length": 4096,
+  "remaining": 4088,
+  "truncated": false
+}
+```
+
+`POST /v1/count_tokens` is an alias for Anthropic SDK compatibility.
+
+### `POST /v1/rerank`
+
+Proxy to the embed service reranker (`embed_api.py` on port 8001). Re-scores a list of documents against a query using the Qwen3-Reranker NPU model.
+
+```bash
+curl -X POST http://localhost:8000/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-reranker-0.6b",
+    "query": "What is the capital of France?",
+    "documents": ["Paris is the capital of France.", "Berlin is the capital of Germany."]
+  }'
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {"index": 0, "relevance_score": 0.97},
+    {"index": 1, "relevance_score": 0.03}
+  ],
+  "model": "qwen3-reranker-0.6b"
+}
+```
+
+### `POST /v1/messages` (Anthropic / Claude API)
+
+Anthropic Messages API shim. Translates Claude-format requests to OpenAI chat completions internally, so any SDK targeting `api.anthropic.com` can point at this server instead.
+
+```bash
+curl -X POST http://localhost:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "qwen3-1.7b",
+    "max_tokens": 256,
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+```json
+{
+  "id": "msg_...",
+  "type": "message",
+  "role": "assistant",
+  "content": [{"type": "text", "text": "Hello! How can I help you?"}],
+  "model": "qwen3-1.7b",
+  "stop_reason": "end_turn",
+  "usage": {"input_tokens": 5, "output_tokens": 9}
+}
+```
+
+System prompts, multi-turn history, and streaming (`"stream": true`) are all supported.
 
 ### Ollama-Compatible Endpoints
 
