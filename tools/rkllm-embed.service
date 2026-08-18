@@ -1,0 +1,21 @@
+[Unit]
+Description=RKLLM Embed API (embeddings + reranker on port 8001)
+After=network.target rkllm-api.service
+# Allow many restarts — embed may wait for rkllm-api to free NPU; 30s delay between retries
+StartLimitIntervalSec=600
+StartLimitBurst=40
+
+[Service]
+Type=simple
+User=armbian
+Group=armbian
+WorkingDirectory=/home/armbian/rkllm_api
+Environment=PATH=/home/armbian/rkllm_api/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=EMBED_MODEL_PATH=/home/armbian/models/Qwen3-Embedding-0.6B/Qwen3-Embedding-0.6B-rk3588-w8a8-opt-1-hybrid-ratio-0.5.rkllm
+Environment=RERANK_MODEL_PATH=/home/armbian/models/Qwen3-Reranker-0.6B/Qwen3-Reranker-0.6B-rk3588-w8a8-opt-1-hybrid-ratio-0.5.rkllm
+ExecStart=/home/armbian/rkllm_api/.venv/bin/gunicorn embed_api:app --bind 0.0.0.0:8001 --workers 1 --timeout 600 --worker-class gthread --threads 2
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

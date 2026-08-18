@@ -1,0 +1,77 @@
+# =============================================================================
+# Hermes Agent — configuration template
+# Copy to /home/armbian/.hermes/config.yaml on the device
+# =============================================================================
+#
+# Provider chain: Nemotron 550B (OpenRouter free) → Groq llama-3.3-70b
+# Both are free-tier cloud models — no local NPU in the agent loop.
+# Local NPU models are available directly in OWUI for fast single-turn chat.
+#
+# API keys are injected via systemd Environment= lines (never commit real keys).
+# =============================================================================
+
+providers:
+  openrouter:
+    api_key: "${OPENROUTER_API_KEY}"
+    base_url: "https://openrouter.ai/api/v1"
+    request_timeout_seconds: 120
+  groq:
+    api_key: "${GROQ_API_KEY}"
+    base_url: "https://api.groq.com/openai/v1"
+    request_timeout_seconds: 60
+
+# Primary model — Nemotron 550B (free, 1M context, best quality)
+model:
+  provider: "openrouter"
+  model: "nvidia/nemotron-3-ultra-550b-a55b:free"
+  context_length: 131072    # override reported window — Hermes requires ≥64K
+
+# Fallback chain — tries in order when primary hits rate limit/daily quota
+fallback_providers:
+  - provider: "openrouter"
+    model: "nvidia/nemotron-3-ultra-550b-a55b:free"
+    key_env: "OPENROUTER_API_KEY"
+  - provider: "groq"
+    model: "llama-3.3-70b-versatile"
+    key_env: "GROQ_API_KEY"
+
+# Gateway — exposes hermes-agent to OpenWebUI on port 8642
+api_server:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8642
+  key: "${HERMES_API_KEY}"
+
+# Memory — SQLite FTS5, zero extra deps
+memory:
+  provider: "fts5"
+
+# Disabled toolsets — keeps system prompt under ~4K tokens (Groq payload limit)
+# Enabled: web, memory, skills, session_search, clarify, delegation
+auxiliary:
+  vision:
+    provider: "local"
+    model: "qwen3-vl-4b"    # local VLM on port 8000; falls back to internvl3.5-4b
+
+agent:
+  disabled_toolsets:
+    - browser
+    - terminal
+    - file
+    - code_execution
+    - video
+    - image_gen
+    - video_gen
+    - x_search
+    - tts
+    - todo
+    - homeassistant
+    - spotify
+    - discord
+    - discord_admin
+    - yuanbao
+    - computer_use
+    - context_engine
+    - cronjob
+
+log_level: "INFO"

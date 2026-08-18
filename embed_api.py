@@ -437,8 +437,15 @@ def _load_models():
             '/v1/rerank will return 503'
         )
 
-    if not _embed_wrapper and not _rerank_wrapper:
-        logger.critical('No models loaded — check EMBED_MODEL_PATH and RERANK_MODEL_PATH')
+    # Exit if any configured model failed — systemd will retry after RestartSec.
+    # NPU may be temporarily occupied by rkllm-api; a retry after 10s usually succeeds.
+    _load_failed = (
+        (EMBED_MODEL_PATH and not _embed_wrapper) or
+        (RERANK_MODEL_PATH and not _rerank_wrapper)
+    )
+    if _load_failed:
+        logger.critical('One or more models failed to load — exiting for systemd restart')
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

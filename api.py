@@ -17,7 +17,7 @@ Preserved unchanged from subprocess version:
 - Request tracking, RAG response cache, ThinkTagParser
 - SSE helpers, all API routes, OpenAI-compatible response format
 
-Rollback: git checkout v1.0-subprocess -- api.py
+Rollback: git checkout v1.0-subprocess-stable -- api.py
 Archive:  archive/api_v1_subprocess.py (2682 lines, fully functional)
 
 MINIMUM SDK: librkllmrt.so ≥ v1.2.0 (RKLLM Runtime from airockchip/rknn-llm)
@@ -27,7 +27,7 @@ MINIMUM SDK: librkllmrt.so ≥ v1.2.0 (RKLLM Runtime from airockchip/rknn-llm)
     n_keep, n_batch, use_cross_attn, and enable_thinking.  Running against an
     older librkllmrt.so will cause silent struct-offset misalignment — the
     parameter block passed to rkllm_init() would be corrupted, producing wrong
-    sampling behaviour rather than a crash.  Tested against v1.2.3.
+    sampling behaviour rather than a crash.  Currently running v1.3.0 (built 2026-06-16).
 
 Usage:
     gunicorn -w 1 -k gthread --threads 4 --timeout 300 -b 0.0.0.0:8000 api:app
@@ -51,6 +51,7 @@ import uuid
 import hashlib
 import base64
 import io
+from io import BytesIO
 from collections import OrderedDict
 from threading import Lock, RLock, Thread, Event
 import atexit
@@ -122,6 +123,55 @@ try:
         "KV cache incremental hit vs full reset counts",
         ["result"]
     )
+    rknpu_core_load = Gauge(
+        "rknpu_core_load_percent",
+        "RK3588 NPU core utilisation (%)",
+        ["core"]
+    )
+    rknpu_freq_mhz = Gauge(
+        "rknpu_freq_mhz",
+        "RK3588 NPU clock frequency (MHz)"
+    )
+    rknpu_power_on = Gauge(
+        "rknpu_power_on",
+        "RK3588 NPU power state (1=on, 0=off)"
+    )
+
+    def _npu_metrics_poller():
+        import re as _re
+        import subprocess as _sp
+        _RKNPU = "/sys/kernel/debug/rknpu"
+
+        def _read(fname):
+            try:
+                return _sp.check_output(
+                    ["sudo", "/usr/bin/cat", f"{_RKNPU}/{fname}"],
+                    stderr=_sp.DEVNULL, timeout=2
+                ).decode()
+            except Exception:
+                try:
+                    return open(f"{_RKNPU}/{fname}").read()
+                except Exception:
+                    return None
+
+        while True:
+            raw = _read("load")
+            if raw:
+                for m in _re.finditer(r'Core(\d+):\s*(\d+)%', raw):
+                    rknpu_core_load.labels(core=f"core{m.group(1)}").set(int(m.group(2)))
+            raw = _read("freq")
+            if raw:
+                try:
+                    rknpu_freq_mhz.set(int(raw.strip()) / 1_000_000)
+                except Exception:
+                    pass
+            raw = _read("power")
+            if raw:
+                rknpu_power_on.set(1 if raw.strip().lower() == "on" else 0)
+            time.sleep(5)
+
+    Thread(target=_npu_metrics_poller, daemon=True).start()
+
     _PROMETHEUS_AVAILABLE = True
     print("[RKLLM] Prometheus metrics enabled at /metrics")
 except ImportError:
@@ -141,8 +191,10 @@ SYSTEM_FINGERPRINT = "rkllm-v2.0.0-ctypes"
 RKLLM_LIB_PATH = os.environ.get('RKLLM_LIB_PATH', '')
 if not RKLLM_LIB_PATH:
     for _candidate in [os.path.expanduser('~/librkllmrt.so'),
-                        '/usr/lib/librkllmrt.so', 'lib/librkllmrt.so',
-                        '/usr/local/lib/librkllmrt.so', 'librkllmrt.so']:
+                        '/usr/lib/librkllmrt.so',
+                        os.path.join(SCRIPT_DIR, 'lib', 'librkllmrt.so'),
+                        '/usr/local/lib/librkllmrt.so',
+                        os.path.join(SCRIPT_DIR, 'librkllmrt.so')]:
         if os.path.exists(_candidate):
             RKLLM_LIB_PATH = _candidate
             break
@@ -324,7 +376,7 @@ RAG_CACHE_TTL = 300
 RAG_CACHE_MAX_ENTRIES = 50
 
 # Request tracking
-REQUEST_STALE_TIMEOUT = 180
+REQUEST_STALE_TIMEOUT = 30   # clear abandoned SSE streams quickly (e.g. Hermes client disconnect)
 
 # Monitoring
 MONITOR_INTERVAL = 10
@@ -412,12 +464,19 @@ def _parse_tool_calls(text):
     for m in _RE_TOOL_CALL.finditer(text):
         try:
             data = json.loads(m.group(1))
+            name = data.get('name', '')
+            if not name:
+                logger.warning("Tool call block missing 'name' field — skipping")
+                continue
+            args = data.get('arguments', {})
+            if not isinstance(args, dict):
+                args = {}
             calls.append({
                 'id': f"call_{uuid.uuid4().hex[:8]}",
                 'type': 'function',
                 'function': {
-                    'name': data.get('name', ''),
-                    'arguments': json.dumps(data.get('arguments', {}), ensure_ascii=False),
+                    'name': name,
+                    'arguments': json.dumps(args, ensure_ascii=False),
                 }
             })
         except (json.JSONDecodeError, AttributeError):
@@ -533,7 +592,7 @@ def detect_context_length(path_or_name, default=4096):
             except Exception:
                 pass
 
-    s = path_or_name.lower()
+    s = os.path.basename(path_or_name).lower()
 
     for k in (32768, 16384, 8192, 4096, 2048):
         suffix = f"{k // 1024}k"
@@ -690,9 +749,9 @@ def detect_sampling_profile(model_id, model_dir):
     # Match model family from MODEL_SAMPLING_PROFILES
     model_lower = model_id.lower()
     matched_family = None
-    for family, family_profile in MODEL_SAMPLING_PROFILES.items():
+    for family in sorted(MODEL_SAMPLING_PROFILES, key=len, reverse=True):
         if family in model_lower:
-            profile.update(family_profile)
+            profile.update(MODEL_SAMPLING_PROFILES[family])
             matched_family = family
             break
 
@@ -769,6 +828,18 @@ if os.path.exists(MODELS_ROOT):
             "capabilities": capabilities,
             "sampling": sampling,
         }
+        # Read extra flags from model_config.json (disable_tools, skip_chat, etc.)
+        _mcfg_path = os.path.join(root, 'model_config.json')
+        if os.path.isfile(_mcfg_path):
+            try:
+                with open(_mcfg_path) as _f:
+                    _mcfg = json.load(_f)
+                if _mcfg.get('disable_tools'):
+                    config['disable_tools'] = True
+                if _mcfg.get('skip_chat'):
+                    config['skip_chat'] = True
+            except Exception:
+                pass
 
         if vision_encoder_path and vl_config:
             config["vision_encoder_path"] = vision_encoder_path
@@ -1064,8 +1135,8 @@ def _rkllm_callback_impl(result_ptr, userdata, state):
         # so the consumer doesn't hang for GENERATION_TIMEOUT seconds.
         try:
             _token_queue.put(("error", f"callback exception: {_cb_exc}"))
-        except Exception:
-            pass  # Last resort: swallow to protect C caller
+        except BaseException:
+            pass  # Last resort: swallow to protect C caller (catches MemoryError too)
     return 0
 
 
@@ -1205,7 +1276,9 @@ class RKNNVisionEncoder:
             return False
 
         mask = RKNN_NPU_CORE_0_1_2 if core_num >= 3 else RKNN_NPU_CORE_AUTO
-        self.lib.rknn_set_core_mask(self.ctx, mask)
+        ret = self.lib.rknn_set_core_mask(self.ctx, mask)
+        if ret != RKNN_SUCC:
+            logger.warning(f"rknn_set_core_mask failed (ret={ret}) — model may run on fewer NPU cores")
 
         io_num = RKNNInputOutputNum()
         ret = self.lib.rknn_query(self.ctx, RKNN_QUERY_IN_OUT_NUM,
@@ -1302,17 +1375,21 @@ class RKNNVisionEncoder:
 
         try:
             if self.n_output == 1:
-                ctypes.memmove(result.ctypes.data, outputs[0].buf, outputs[0].size)
+                expected_bytes = embed_len * 4
+                copy_bytes = min(outputs[0].size, expected_bytes)
+                if outputs[0].size != expected_bytes:
+                    logger.warning(f"RKNN output size {outputs[0].size} != expected {expected_bytes}; truncating copy")
+                ctypes.memmove(result.ctypes.data, outputs[0].buf, copy_bytes)
             else:
                 # Interleave outputs from multiple encoder heads into the result buffer.
-                # outputs[j].buf is a raw void* pointing into RKNN-owned memory; use
-                # ctypes.cast to an integer (c_void_p) for pointer arithmetic instead of
-                # dereferencing via .contents (which copies the value, not the address).
+                # outputs[j].buf is a plain integer address (c_void_p field read returns int).
                 for i in range(self.model_image_token):
                     for j in range(self.n_output):
+                        if not outputs[j].buf:
+                            raise RuntimeError(f"RKNN output[{j}].buf is NULL after rknn_outputs_get")
                         dst_offset = (i * self.n_output * self.model_embed_size +
                                       j * self.model_embed_size)
-                        src_base = ctypes.cast(outputs[j].buf, ctypes.c_void_p).value
+                        src_base = outputs[j].buf  # already an int from c_void_p field read
                         src_ptr = src_base + i * self.model_embed_size * 4
                         ctypes.memmove(
                             result.ctypes.data + dst_offset * 4,
@@ -1488,6 +1565,13 @@ class RKLLMWrapper:
             self.lib.rkllm_release_prompt_cache.argtypes = [ctypes.c_void_p]
             self.lib.rkllm_release_prompt_cache.restype = ctypes.c_int
 
+        # rkllm_load_lora(handle, lora_adapter*) -> int
+        if hasattr(self.lib, 'rkllm_load_lora'):
+            self.lib.rkllm_load_lora.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(RKLLMLoraAdapter),
+            ]
+            self.lib.rkllm_load_lora.restype = ctypes.c_int
+
     def init_model(self, model_path, ctx_len, max_tokens, vl_config=None, sampling=None):
         """Initialize a model.  Returns True on success.
 
@@ -1525,7 +1609,7 @@ class RKLLMWrapper:
             param.img_start = b""
             param.img_end = b""
             param.img_content = b""
-            param.extend_param.base_domain_id = 0
+            param.extend_param.base_domain_id = 1
         param.extend_param.embed_flash = 1
         param.extend_param.n_batch = 1
         param.extend_param.use_cross_attn = 0
@@ -1539,6 +1623,10 @@ class RKLLMWrapper:
         )
         if ret != 0:
             logger.error(f"rkllm_init failed (ret={ret}) for model '{param.model_path.decode()}'")
+            self._model_loaded = False
+            return False
+        if not self.handle.value:
+            logger.error("rkllm_init returned 0 but handle is null — NPU driver may be OOM")
             self._model_loaded = False
             return False
         self._model_loaded = True
@@ -1675,7 +1763,7 @@ class RKLLMWrapper:
             return
         try:
             ret = self.lib.rkllm_clear_kv_cache(
-                self.handle, ctypes.c_int(0), None, None
+                self.handle, ctypes.c_int(1), None, None  # keep_system_prompt=1: skip re-prefill on new conversation
             )
             if ret != 0:
                 logger.warning(f"rkllm_clear_kv_cache returned error code {ret}")
@@ -1693,6 +1781,29 @@ class RKLLMWrapper:
         self._model_loaded = False
         self.handle = ctypes.c_void_p()
 
+    def load_lora(self, adapter_path, adapter_name, scale=1.0):
+        """Load a LoRA adapter onto the currently loaded model.
+
+        Returns True on success.  The adapter is identified by adapter_name
+        and can be referenced in RKLLMLoraParam at inference time.
+        """
+        if not self._model_loaded:
+            logger.error("load_lora: no model loaded")
+            return False
+        if not hasattr(self.lib, 'rkllm_load_lora'):
+            logger.error("load_lora: rkllm_load_lora not available in this runtime")
+            return False
+        adapter = RKLLMLoraAdapter()
+        adapter.lora_adapter_path = adapter_path.encode('utf-8')
+        adapter.lora_adapter_name = adapter_name.encode('utf-8')
+        adapter.scale = scale
+        ret = self.lib.rkllm_load_lora(self.handle, ctypes.byref(adapter))
+        if ret != 0:
+            logger.error(f"rkllm_load_lora failed (ret={ret}) for {adapter_path}")
+            return False
+        logger.info(f"LoRA adapter loaded: {adapter_name} from {adapter_path} (scale={scale})")
+        return True
+
     @property
     def is_loaded(self):
         return self._model_loaded
@@ -1707,6 +1818,9 @@ ACTIVE_REQUEST = {
     "last_activity": 0,
     "model": None,
 }
+
+# LoRA adapters currently loaded: {name: {path, scale, loaded_at}}
+_LOADED_LORAS: dict = {}
 ACTIVE_LOCK = Lock()
 ABORT_EVENT = Event()
 
@@ -1760,9 +1874,16 @@ def _check_kv_incremental(model_name, messages):
         # set means the cached KV state is wrong for the new request.
         _sys_parts = tuple(m.get('content', '') for m in messages
                            if m.get('role') == 'system' and m.get('content'))
-        if hash(_sys_parts) != _kv_cache_state["system_prompt_hash"]:
+        _sys_hash = hashlib.sha256("\n".join(_sys_parts).encode()).hexdigest()[:16]
+        if _sys_hash != _kv_cache_state["system_prompt_hash"]:
             return None
 
+        # If any user turn has multimodal (list) content, disable incremental mode —
+        # image embeddings are not tracked in the KV state, so appending a text-only
+        # message after an image turn would reference the wrong KV context.
+        if any(m.get('role') == 'user' and isinstance(m.get('content'), list)
+               for m in messages):
+            return None
         user_msgs = [m['content'] for m in messages
                      if m.get('role') == 'user' and isinstance(m.get('content'), str)
                      and m.get('content')]
@@ -1786,7 +1907,7 @@ def _update_kv_tracking(model_name, messages, is_reset):
                        if m.get('role') == 'system' and m.get('content'))
     with _KV_LOCK:
         _kv_cache_state["model"] = model_name
-        _kv_cache_state["system_prompt_hash"] = hash(_sys_parts)
+        _kv_cache_state["system_prompt_hash"] = hashlib.sha256("\n".join(_sys_parts).encode()).hexdigest()[:16]
         if is_reset:
             # Full reset — track all user messages from this conversation
             _kv_cache_state["user_messages"] = list(user_msgs)
@@ -1916,7 +2037,7 @@ def get_active_request_info():
 
 def resolve_model(requested_name):
     """Resolve a model name (including aliases) to (model_name, config)."""
-    if not requested_name:
+    if not requested_name or not requested_name.strip():
         return None, None
     name = requested_name.lower().strip()
     if name in ALIASES:
@@ -1968,7 +2089,8 @@ def _strip_stale_date_claims(text):
         # "As of today, the date is..." / "As of today, October 26, 2025"
         r'as\s+of\s+today\s*[,:]\s*[^.\n]{5,60}[.\n]?',
         # "Updated: October 26, 2025" / "Last updated: 2025-10-26"
-        r'(?:last\s+)?updated\s*:\s*[^.\n]{5,60}[.\n]?',
+        # Require a 4-digit year to avoid stripping factual changelog lines like "Updated: version 2.0"
+        r'(?:last\s+)?updated\s*:\s*[^.\n]{0,40}\b\d{4}\b[^.\n]{0,20}[.\n]?',
     ]
     result = text
     for pat in _STALE_PATTERNS:
@@ -2186,19 +2308,20 @@ def _score_paragraph(para, query_words=None):
 def _strip_system_fluff(text):
     """Remove generic assistant instructions from system messages."""
     generic_phrases = [
-        r'you are a helpful assistant\s*(?:[.!?]\s*|$)',
-        r'you are an? ai assistant\s*(?:[.!?]\s*|$)',
-        r'you are an? assistant\s*(?:[.!?]\s*|$)',
-        r'you are an? helpful ai\s*(?:[.!?]\s*|$)',
-        r'as an ai assistant\s*(?:[.!?]\s*|$)',
-        r'as a helpful assistant\s*(?:[.!?]\s*|$)',
-        r'user context\s*:\s*',
-        r'system context\s*:\s*',
+        # Anchored to start-of-string or sentence boundary to avoid mid-sentence corruption.
+        r'(?:^|(?<=[.!?])\s+)you are a helpful assistant\s*(?:[.!?]\s*|$)',
+        r'(?:^|(?<=[.!?])\s+)you are an? ai assistant\s*(?:[.!?]\s*|$)',
+        r'(?:^|(?<=[.!?])\s+)you are an? assistant\s*(?:[.!?]\s*|$)',
+        r'(?:^|(?<=[.!?])\s+)you are an? helpful ai\s*(?:[.!?]\s*|$)',
+        r'(?:^|(?<=[.!?])\s+)as an ai assistant\s*(?:[.!?]\s*|$)',
+        r'(?:^|(?<=[.!?])\s+)as a helpful assistant\s*(?:[.!?]\s*|$)',
+        r'(?:^|\n)user context\s*:\s*',
+        r'(?:^|\n)system context\s*:\s*',
     ]
 
     result = text
     for pat in generic_phrases:
-        result = re.sub(pat, '', result, flags=re.IGNORECASE)
+        result = re.sub(pat, '', result, flags=re.IGNORECASE | re.MULTILINE)
 
     result = result.strip()
     if result != text.strip():
@@ -2318,7 +2441,7 @@ def build_prompt(messages, model_name):
         if role == 'system':
             if content:
                 system_parts.append(content)
-        elif role == 'tool':
+        elif role in ('tool', 'function'):
             # Tool result from function execution — format as tool response
             conversation.append(('user', f'<tool_response>\n{content}\n</tool_response>'))
         elif role == 'assistant' and tool_calls_data:
@@ -2339,13 +2462,28 @@ def build_prompt(messages, model_name):
             if content:
                 combined = f"{content}\n{combined}"
             conversation.append(('assistant', combined))
-        else:
+        elif role in ('user', 'assistant'):
             if not content:
                 continue
             conversation.append((role, content))
+        else:
+            if content:
+                logger.warning(f"Unknown message role '{role}' — treating as user message")
+                conversation.append(('user', content))
     if len(system_parts) > 1:
-        logger.warning(f"Multiple system messages ({len(system_parts)}) — concatenating")
-    system_text = "\n".join(system_parts)
+        logger.debug(f"Multiple system messages ({len(system_parts)}) — concatenating")
+    system_text = "\n\n".join(system_parts)
+
+    # --- /no_think soft-switch: strip prefix from the latest user message ---
+    no_think_requested = False
+    for i in range(len(conversation) - 1, -1, -1):
+        role, content = conversation[i]
+        if role == 'user':
+            stripped = content.lstrip()
+            if stripped[:9].lower() == '/no_think':
+                no_think_requested = True
+                conversation[i] = (role, stripped[9:].lstrip())
+            break
 
     user_question = ""
     for role, content in reversed(conversation):
@@ -2358,7 +2496,7 @@ def build_prompt(messages, model_name):
     prompt = ""
     # Only enable thinking for models that natively support <think> blocks
     model_caps = model_cfg.get('capabilities', []) if model_cfg else []
-    enable_thinking = 'thinking' in model_caps
+    enable_thinking = ('thinking' in model_caps) and not no_think_requested
 
     # =====================================================================
     # FOLLOW-UP / IRRELEVANT-RAG DETECTION
@@ -2558,7 +2696,7 @@ def build_prompt(messages, model_name):
     # Re-check after quality floor may have cleared rag_parts
     if rag_parts and user_question:
         # enable_thinking for RAG: only if model supports it AND context is large enough
-        enable_thinking = ('thinking' in model_caps) and (ctx >= DISABLE_THINK_FOR_RAG_BELOW_CTX)
+        enable_thinking = ('thinking' in model_caps) and (ctx >= DISABLE_THINK_FOR_RAG_BELOW_CTX) and not no_think_requested
         abstention = ". If not answered above, say you don't know" if enable_thinking else ''
         logger.info(f"RAG thinking: ctx={ctx}, threshold={DISABLE_THINK_FOR_RAG_BELOW_CTX}, "
                     f"caps={model_caps}, thinking={'enabled' if enable_thinking else 'disabled'}")
@@ -2678,7 +2816,7 @@ def build_prompt(messages, model_name):
                             f"({original_parts} -> {len(parts)} parts, "
                             f"{len(prompt)} chars, ctx={ctx})")
         # Only enable thinking for models with the "thinking" capability
-        enable_thinking = 'thinking' in model_caps
+        enable_thinking = ('thinking' in model_caps) and not no_think_requested
 
         # --- Open WebUI meta-task detection ---
         # Open WebUI sends internal tasks (search query gen, title gen, tag gen)
@@ -2698,6 +2836,13 @@ def build_prompt(messages, model_name):
             if any(sig in _sys_lower for sig in _HOME_ASSISTANT_SIGNATURES):
                 enable_thinking = False
                 logger.info("Home Assistant request detected — thinking disabled for speed")
+
+        # --- Agent framework detection (Hermes Agent, AutoGen, etc.) ---
+        # Agent frameworks send very long system prompts with tool definitions.
+        # Thinking mode wastes context tokens and causes timeouts for these callers.
+        if enable_thinking and system_text and len(system_text) > 3000:
+            enable_thinking = False
+            logger.info(f"Agent framework detected (system prompt {len(system_text)} chars) — thinking disabled")
 
     logger.debug(f"Prompt built ({len(prompt)} chars, ctx={ctx}, "
                  f"rag={'yes' if rag_parts else 'no'})")
@@ -2853,23 +2998,31 @@ def _prompt_cache_is_valid(cache_file, model_path):
         return False
     except Exception as e:
         logger.warning(f"Prompt cache meta check failed ({e}); invalidating: {cache_file}")
-        try:
-            os.remove(cache_file)
-        except OSError:
-            pass
+        for _p in (cache_file, _prompt_cache_meta_path(cache_file)):
+            try:
+                os.remove(_p)
+            except OSError:
+                pass
         return False
 
 
 def _prompt_cache_write_meta(cache_file, model_path):
-    """Write meta file for the prompt cache after it has been saved."""
+    """Write meta file for the prompt cache after it has been saved (atomic)."""
     fp = _prompt_cache_model_fingerprint(model_path)
     if fp is None:
         return
+    meta_path = _prompt_cache_meta_path(cache_file)
+    tmp_path = meta_path + '.tmp'
     try:
-        with open(_prompt_cache_meta_path(cache_file), 'w') as f:
+        with open(tmp_path, 'w') as f:
             json.dump(fp, f)
+        os.replace(tmp_path, meta_path)
     except Exception as e:
         logger.warning(f"Failed to write prompt cache meta: {e}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def _get_prompt_cache_path(model_name):
@@ -2939,7 +3092,7 @@ def _find_vl_model():
 
 def _load_vl_model(vl_name, vl_config):
     """Load VL model (vision encoder + LLM decoder). Returns True on success."""
-    global _vision_encoder, _vl_rkllm_wrapper, VL_CURRENT_MODEL
+    global _vision_encoder, _vl_rkllm_wrapper, VL_CURRENT_MODEL, CURRENT_MODEL, _worker_thread
 
     if not _VL_DEPS_AVAILABLE:
         logger.error("VL dependencies not available -- install numpy and Pillow")
@@ -2985,6 +3138,18 @@ def _load_vl_model(vl_name, vl_config):
                 return False
 
         if not _vl_rkllm_wrapper.is_loaded:
+            # Free text-model IOVA before loading VL model — both use domain 1
+            # (4GB IOVA), so having text + VL loaded simultaneously causes OOM.
+            if _rkllm_wrapper and _rkllm_wrapper.is_loaded:
+                logger.info(f"VL load: unloading text model {CURRENT_MODEL} to free domain-1 IOVA")
+                _rkllm_wrapper.abort()
+                if _worker_thread and _worker_thread.is_alive():
+                    _worker_thread.join(timeout=5)
+                _rkllm_wrapper.release_prompt_cache()
+                _rkllm_wrapper.destroy()
+                CURRENT_MODEL = None
+                _reset_kv_tracking()
+
             model_path = vl_config['path']
             ctx_len = vl_config.get('context_length', CONTEXT_LENGTH_DEFAULT)
             max_tokens = vl_config.get('max_tokens', MAX_TOKENS_DEFAULT)
@@ -2993,6 +3158,9 @@ def _load_vl_model(vl_name, vl_config):
             if not _vl_rkllm_wrapper.init_model(model_path, ctx_len, max_tokens,
                                                  vl_config=vl_cfg, sampling=sampling):
                 logger.error(f"VL model {vl_name} failed to initialize")
+                if _vision_encoder is not None:
+                    _vision_encoder.destroy()
+                    _vision_encoder = None
                 return False
 
         elapsed = time.time() - load_start
@@ -3059,6 +3227,11 @@ def model_monitor():
 
         SHUTDOWN_EVENT.wait(MONITOR_INTERVAL)
     logger.info("Model monitor stopped")
+    # SHUTDOWN_EVENT set by signal handler — trigger clean shutdown from this
+    # background thread so the signal handler itself stays reentrant-safe.
+    # Daemon thread: no sys.exit() here, it would only end this thread, not
+    # the process. The main thread/gunicorn worker owns actual process exit.
+    shutdown()
 
 
 _monitor_thread = Thread(target=model_monitor, daemon=True)
@@ -3092,10 +3265,11 @@ atexit.register(shutdown)
 
 
 def signal_handler(signum, frame):
-    sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
-    logger.info(f"Signal {sig_name} received - shutting down")
-    shutdown()
-    sys.exit(0)
+    # Signal handlers must not call non-reentrant functions (logging, locks).
+    # Set events only — the model_monitor thread picks up SHUTDOWN_EVENT and
+    # calls shutdown() from normal Python context.
+    SHUTDOWN_EVENT.set()
+    ABORT_EVENT.set()
 
 
 # =============================================================================
@@ -3246,6 +3420,8 @@ def list_models():
     logger.debug(f"/v1/models called - current_model: {CURRENT_MODEL}")
     data = []
     for model_id, cfg in MODELS.items():
+        if cfg.get('skip_chat'):
+            continue  # embedding/reranker models — served by embed_api.py, not chat
         entry = {
             "id": model_id,
             "object": "model",
@@ -3350,7 +3526,7 @@ def chat_completions():
     if not isinstance(body, dict):
         return make_error_response("Request body must be a JSON object", 400, "invalid_request")
 
-    request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    request_id = f"chatcmpl-{uuid.uuid4().hex}"
     logger.info(f">>> NEW REQUEST {request_id}")
 
     # Parse request
@@ -3361,6 +3537,9 @@ def chat_completions():
 
     # Validate message elements are dicts (rejects e.g. messages: ["hello"])
     messages = [m for m in messages if isinstance(m, dict)]
+    if not messages:
+        return make_error_response("'messages' must contain at least one valid message object",
+                                   400, "invalid_request")
 
     # === VL AUTO-ROUTING: Check for images BEFORE normalizing content ===
     _vl_has_images = _has_images_in_messages(messages)
@@ -3706,6 +3885,19 @@ def chat_completions():
     if config is None:
         return make_error_response(f"Model '{requested_model}' not found", 404, "not_found")
 
+    if config.get('skip_chat'):
+        return make_error_response(
+            f"Model '{name}' is an embedding/reranker model — use /v1/embeddings or /v1/rerank on port 8001",
+            400, "invalid_request"
+        )
+
+    # Strip tool injection for models that opt out (e.g. small context models that
+    # can't fit 39 tool definitions alongside conversation history).
+    if _has_tools and config.get('disable_tools'):
+        _has_tools = False
+        messages = messages[1:]  # remove the injected tool system prompt (always first)
+        logger.info(f"[{request_id}] Tool injection stripped — '{name}' has disable_tools=true")
+
     # Atomic check-and-set: reject if another generation is in progress
     if not try_start_request(request_id, name):
         logger.warning(f"[{request_id}] Rejected - request already in progress")
@@ -3714,7 +3906,8 @@ def chat_completions():
             503, "service_unavailable"
         )
 
-    ABORT_EVENT.clear()
+    ABORT_EVENT.clear()  # Clear immediately after claiming slot — minimises window where a
+    # stale abort from shutdown() could clear a new request's abort signal.
     created = int(time.time())
 
     try:
@@ -3752,7 +3945,7 @@ def chat_completions():
 
             all_embeds = []
             for img_idx, img_bytes in enumerate(images_to_process):
-                img_key = hashlib.md5(img_bytes).hexdigest()
+                img_key = f"{vl_name}:{hashlib.md5(img_bytes).hexdigest()}"
                 with _VL_EMBED_CACHE_LOCK:
                     if img_key in _vl_embed_cache:
                         _vl_embed_cache.move_to_end(img_key)
@@ -3855,6 +4048,16 @@ def chat_completions():
             else:
                 vl_prompt = f"{vl_image_tag * n_images}{_vl_text_prompt}"
 
+            # VL context length check (image tokens + text tokens vs model context)
+            _vl_ctx = vl_config.get('context_length', CONTEXT_LENGTH_DEFAULT)
+            _vl_img_tok = _vision_encoder.model_image_token * n_images
+            _vl_text_tok = len(vl_prompt) // CHARS_PER_TOKEN_ESTIMATE
+            if (_vl_img_tok + _vl_text_tok) > _vl_ctx * 1.1:
+                end_request(request_id)
+                return make_error_response(
+                    f"VL prompt too long (~{_vl_img_tok + _vl_text_tok} tokens, context is {_vl_ctx}). "
+                    "Shorten your message.", 400, "context_length_exceeded")
+
             vl_data = {
                 'image_embed': image_embed,
                 'n_image_tokens': _vision_encoder.model_image_token,
@@ -3893,14 +4096,8 @@ def chat_completions():
         # =================================================================
         # TEXT PATH -- normal text-only request (existing logic unchanged)
         # =================================================================
-        # Load model
-        logger.info(f"Loading model {name} for request {request_id}")
-        if not load_model(name, config):
-            end_request(request_id)
-            return make_error_response(f"Failed to load model '{name}'", 500)
-        update_request_activity()
-
-        # Build prompt
+        # Pre-check context length BEFORE loading model (saves NPU load time on oversized prompts).
+        # Build prompt first (needs model name for template), but skip model load until after check.
         prompt, is_rag, enable_thinking = build_prompt(messages, name)
         if not prompt:
             # System-only or empty requests (e.g. OpenWebUI title-gen meta tasks)
@@ -3921,9 +4118,8 @@ def chat_completions():
             }
             return jsonify(_empty_resp)
 
-        # Hard-reject prompts that exceed context length.
-        # The RKLLM runtime returns -1 for oversized prompts, but we can
-        # fail fast with a clear error instead of tying up the NPU.
+        # Hard-reject prompts that exceed context length — before model load
+        # so we don't spend 30s initialising the NPU for a prompt we'll reject.
         # Use 1.1x multiplier to account for token estimation inaccuracy
         # (we estimate ~4 chars/token but actual varies by language/content).
         _ctx = config.get('context_length', CONTEXT_LENGTH_DEFAULT)
@@ -3939,6 +4135,13 @@ def chat_completions():
                 f"Shorten your message or reduce conversation history.",
                 400, "context_length_exceeded"
             )
+
+        # Load model (after context check so oversized prompts skip the load entirely)
+        logger.info(f"Loading model {name} for request {request_id}")
+        if not load_model(name, config):
+            end_request(request_id)
+            return make_error_response(f"Failed to load model '{name}'", 500)
+        update_request_activity()
 
         # KV cache strategy:
         # - RAG: always keep_history=0 (fresh context each time)
@@ -4029,7 +4232,10 @@ def chat_completions():
                                  'Connection': 'keep-alive'},
                     )
                 else:
-                    message_obj = {"role": "assistant", "content": cleaned_content}
+                    message_obj = {
+                        "role": "assistant",
+                        "content": cleaned_content,
+                    }
                     if reasoning_content:
                         message_obj["reasoning_content"] = reasoning_content
                     return jsonify({
@@ -4174,14 +4380,13 @@ def _generate_stream(prompt, request_id, model_name, created,
     request_ended = False
     stats_data = {}
     think_parser = ThinkTagParser()
-
     try:
         update_request_activity()  # Refresh after model load delay
 
         # First chunk: role
         yield make_sse_chunk(request_id, model_name, created, delta={"role": "assistant"})
 
-        _heartbeat_interval = 15   # Send SSE comment every N seconds during prefill
+        _heartbeat_interval = 3    # Send SSE comment every N seconds during prefill (shorter = faster stop detection)
         _last_heartbeat = time.time()
 
         while True:
@@ -4255,7 +4460,12 @@ def _generate_stream(prompt, request_id, model_name, created,
                             _window = total_content[-max(_stop_buf_len + 32, 64):]
                             for _seq in _req_stop:
                                 if _seq in _window:
-                                    _cut = total_content.rfind(_seq)
+                                    # Search only from recent boundary to avoid matching
+                                    # the same sequence in already-sent earlier content.
+                                    _search_from = max(0, _prev_len - _stop_buf_len)
+                                    _cut = total_content.find(_seq, _search_from)
+                                    if _cut == -1:
+                                        _cut = total_content.rfind(_seq)
                                     if not has_tools and _cut > _prev_len:
                                         _tail = total_content[_prev_len:_cut]
                                         if _tail:
@@ -4375,6 +4585,8 @@ def _generate_stream(prompt, request_id, model_name, created,
             })
 
         yield "data: [DONE]\n\n"
+        end_request(request_id)
+        request_ended = True
 
         # Prometheus: record inference stats
         if _PROMETHEUS_AVAILABLE and stats_data:
@@ -4444,13 +4656,18 @@ def _generate_stream(prompt, request_id, model_name, created,
             logger.debug(f"[{request_id}] Drained {_drained} orphaned token(s) from queue")
         if not request_ended:
             end_request(request_id)
-        # Ensure worker thread is cleaned up
+        # Ensure worker thread is cleaned up — join OUTSIDE PROCESS_LOCK so other
+        # operations (model monitor, health) are not blocked for up to 5 seconds.
         with PROCESS_LOCK:
-            if _worker_thread and _worker_thread.is_alive():
-                if _active_wrapper:
-                    _active_wrapper.abort()
-                _worker_thread.join(timeout=5)
-                _worker_thread = None
+            _cleanup_thread = _worker_thread
+            _worker_thread = None
+        if _cleanup_thread and _cleanup_thread.is_alive():
+            if _active_wrapper:
+                _active_wrapper.abort()
+            _cleanup_thread.join(timeout=5)
+            if _cleanup_thread.is_alive():
+                logger.critical(f"[{request_id}] Worker thread did not exit after 5s abort — "
+                                "NPU may be in an undefined state")
         GENERATION_COMPLETE.set()
         if total_reasoning:
             logger.info(f"[{request_id}] Stream ended ({len(total_content)} content + "
@@ -4621,15 +4838,21 @@ def _generate_complete(prompt, request_id, model_name, created,
                 logger.error(f"[{request_id}] rkllm_run error: {msg_data}")
                 break
 
-        # End request tracking immediately (frees slot for next request)
+        # Wait for worker thread BEFORE freeing request slot — prevents a new
+        # request from launching a second worker while this one is still alive.
+        # Join outside PROCESS_LOCK to avoid blocking health/monitor for 5s.
+        with PROCESS_LOCK:
+            _cleanup_thread = _worker_thread
+            _worker_thread = None
+        if _cleanup_thread and _cleanup_thread.is_alive():
+            _cleanup_thread.join(timeout=5)
+            if _cleanup_thread.is_alive():
+                logger.critical(f"[{request_id}] Worker thread did not exit after 5s "
+                                "— NPU may be in an undefined state")
+
+        # Free slot after worker thread is confirmed done
         end_request(request_id)
         request_ended = True
-
-        # Wait for worker thread
-        with PROCESS_LOCK:
-            if _worker_thread and _worker_thread.is_alive():
-                _worker_thread.join(timeout=5)
-            _worker_thread = None
 
         full_content = "".join(content_parts).rstrip()
 
@@ -4671,6 +4894,7 @@ def _generate_complete(prompt, request_id, model_name, created,
 
         message_obj = {
             "role": "assistant",
+            # Mirror thinking into raw <think> tags — clients like Open WebUI
             "content": cleaned_content,
         }
         if reasoning_content:
@@ -4701,7 +4925,7 @@ def _generate_complete(prompt, request_id, model_name, created,
             if rag_cache_info and generation_clean and cleaned_content:
                 cache_text = cleaned_content
                 if reasoning_content:
-                    cache_text = f"<think>{reasoning_content}</think>{cleaned_content}"
+                    cache_text = cleaned_content
                 _model, _question, _prompt = rag_cache_info
                 _rag_cache_put(_model, _question, _prompt, cache_text)
                 logger.info(f"[{request_id}] RAG cache STORE ({len(cache_text)} chars)")
@@ -4744,15 +4968,18 @@ def _generate_complete(prompt, request_id, model_name, created,
         _reset_kv_tracking()
         return make_error_response(f"Generation failed: {e}", 500)
     finally:
+        # Ensure worker cleanup — join outside PROCESS_LOCK (avoids 5s blockage)
+        with PROCESS_LOCK:
+            _cleanup_thread = _worker_thread
+            _worker_thread = None
+        if _cleanup_thread and _cleanup_thread.is_alive():
+            if _active_wrapper:
+                _active_wrapper.abort()
+            _cleanup_thread.join(timeout=5)
+            if _cleanup_thread.is_alive():
+                logger.critical(f"[{request_id}] Worker thread stuck after abort in finally block")
         if not request_ended:
             end_request(request_id)
-        # Ensure worker cleanup
-        with PROCESS_LOCK:
-            if _worker_thread and _worker_thread.is_alive():
-                if _active_wrapper:
-                    _active_wrapper.abort()
-                _worker_thread.join(timeout=5)
-                _worker_thread = None
         # Drain any orphaned tokens left by an aborted or failed generation
         # so the next request doesn't inherit stale output (C-4).
         _drained = 0
@@ -4787,7 +5014,7 @@ def legacy_completions():
         content = str(prompt)
     body = {k: v for k, v in body.items() if k != 'prompt'}
     body['messages'] = [{"role": "user", "content": content}]
-    from io import BytesIO
+
     body_bytes = json.dumps(body).encode()
     environ = request.environ.copy()
     environ['PATH_INFO'] = '/v1/chat/completions'
@@ -4795,10 +5022,266 @@ def legacy_completions():
     environ['CONTENT_LENGTH'] = str(len(body_bytes))
     environ['CONTENT_TYPE'] = 'application/json'
     with app.request_context(environ):
-        return chat_completions()
+        chat_resp = chat_completions()
+    # Adapt chat.completion → text_completion format for spec compliance
+    try:
+        data = chat_resp.get_json()
+        if data and data.get("object") == "chat.completion":
+            choices = data.get("choices", [])
+            text_choices = []
+            for ch in choices:
+                text_choices.append({
+                    "text": (ch.get("message") or {}).get("content") or "",
+                    "index": ch.get("index", 0),
+                    "logprobs": ch.get("logprobs"),
+                    "finish_reason": ch.get("finish_reason"),
+                })
+            data["object"] = "text_completion"
+            data["choices"] = text_choices
+            return jsonify(data), chat_resp.status_code
+    except Exception:
+        pass
+    return chat_resp
 
 
 # Register signal handlers at module level so gunicorn workers also clean up the NPU
+# =============================================================================
+# LORA ADAPTER ENDPOINTS
+# POST /v1/lora/load  {"model": "qwen3-1.7b", "path": "/path/to/adapter.rkllm",
+#                      "name": "my-adapter", "scale": 1.0}
+# GET  /v1/lora       list loaded adapters
+# DELETE /v1/lora/<name>  unload (currently a no-op in rkllm 1.2.3 — marks unloaded)
+# =============================================================================
+
+@app.route('/v1/lora', methods=['GET'])
+def lora_list():
+    return jsonify({"adapters": [
+        {"name": n, **v} for n, v in _LOADED_LORAS.items()
+    ]})
+
+
+@app.route('/v1/lora/load', methods=['POST'])
+def lora_load():
+    global _LOADED_LORAS
+    body = request.get_json(silent=True) or {}
+    path = body.get('path', '').strip()
+    name = body.get('name', '').strip()
+    try:
+        scale = float(body.get('scale', 1.0))
+    except (TypeError, ValueError):
+        return make_error_response("'scale' must be a number", 400, "invalid_request")
+
+    if not path or not name:
+        return make_error_response("'path' and 'name' are required", 400, "invalid_request")
+    if not os.path.isfile(path):
+        return make_error_response(f"Adapter file not found: {path}", 404, "not_found")
+
+    with PROCESS_LOCK:
+        if not _rkllm_wrapper or not _rkllm_wrapper.is_loaded:
+            return make_error_response("No model loaded — load a model first", 409, "model_not_loaded")
+        ok = _rkllm_wrapper.load_lora(path, name, scale)
+
+    if not ok:
+        return make_error_response(f"rkllm_load_lora failed for '{name}'", 500, "lora_load_failed")
+
+    _LOADED_LORAS[name] = {"path": path, "scale": scale, "loaded_at": int(time.time())}
+    return jsonify({"status": "loaded", "name": name, "path": path, "scale": scale})
+
+
+@app.route('/v1/lora/<name>', methods=['DELETE'])
+def lora_unload(name):
+    global _LOADED_LORAS
+    if name not in _LOADED_LORAS:
+        return make_error_response(f"Adapter '{name}' not loaded", 404, "not_found")
+    # rkllm 1.2.3 has no rkllm_unload_lora — removing from registry is sufficient
+    # (adapter will be absent from future infer_param.lora_params references)
+    del _LOADED_LORAS[name]
+    logger.info(f"LoRA adapter unregistered: {name}")
+    return jsonify({"status": "unloaded", "name": name})
+
+
+# =============================================================================
+# OLLAMA COMPATIBILITY LAYER
+# Minimal Ollama API shim so clients like VS Code Continue, AnythingLLM, and
+# Open Interpreter can point at this server without configuration changes.
+# Routes translate to OpenAI-format internally and delegate to chat_completions().
+# =============================================================================
+
+def _ollama_model_entry(name):
+    """Build an Ollama-format model entry from a MODELS config entry."""
+    cfg = MODELS.get(name, {})
+    ctx = cfg.get('context_length', CONTEXT_LENGTH_DEFAULT)
+    size_bytes = 0
+    try:
+        p = cfg.get('path', '')
+        if p and os.path.isfile(p):
+            size_bytes = os.path.getsize(p)
+    except OSError:
+        pass
+    return {
+        "name": name,
+        "model": name,
+        "modified_at": "2025-01-01T00:00:00Z",
+        "size": size_bytes,
+        "digest": f"rkllm-{name}",
+        "details": {
+            "parent_model": "",
+            "format": "rkllm",
+            "family": "rkllm",
+            "families": ["rkllm"],
+            "parameter_size": name,
+            "quantization_level": "W8A8",
+        },
+        "capabilities": cfg.get('capabilities', ['completion', 'chat']),
+    }
+
+
+@app.route('/api/version', methods=['GET'])
+def ollama_version():
+    """Ollama version endpoint — clients use this to detect Ollama compatibility."""
+    return jsonify({"version": "0.3.0-rkllm"})
+
+
+@app.route('/api/tags', methods=['GET'])
+def ollama_tags():
+    """List available models in Ollama format."""
+    models_list = [_ollama_model_entry(n) for n in MODELS]
+    return jsonify({"models": models_list})
+
+
+@app.route('/api/show', methods=['POST'])
+def ollama_show():
+    """Show model details in Ollama format."""
+    body = request.get_json(silent=True) or {}
+    name = body.get('name') or body.get('model', '')
+    resolved = ALIASES.get(name, name)
+    if resolved not in MODELS:
+        return jsonify({"error": f"model '{name}' not found"}), 404
+    entry = _ollama_model_entry(resolved)
+    cfg = MODELS[resolved]
+    return jsonify({
+        **entry,
+        "modelfile": f"# RKLLM model: {resolved}",
+        "parameters": f"num_ctx {cfg.get('context_length', CONTEXT_LENGTH_DEFAULT)}",
+        "template": "{{ .System }}\n{{ .Prompt }}",
+        "system": "",
+        "license": "",
+    })
+
+
+@app.route('/api/ps', methods=['GET'])
+def ollama_ps():
+    """Show running models in Ollama format."""
+    running = []
+    if CURRENT_MODEL:
+        running.append({**_ollama_model_entry(CURRENT_MODEL), "expires_at": "0001-01-01T00:00:00Z", "size_vram": 0})
+    return jsonify({"models": running})
+
+
+@app.route('/api/chat', methods=['POST'])
+def ollama_chat():
+    """Ollama /api/chat — translate to OpenAI chat completions and proxy."""
+    body = request.get_json(silent=True) or {}
+    model = body.get('model', '')
+    messages = body.get('messages', [])
+    stream = body.get('stream', True)
+    options = body.get('options') or {}
+
+    openai_body = {
+        'model': model,
+        'messages': messages,
+        'stream': stream,
+        'max_tokens': options.get('num_predict', options.get('max_tokens', MAX_TOKENS_DEFAULT)),
+        'temperature': options.get('temperature'),
+        'top_p': options.get('top_p'),
+    }
+    openai_body = {k: v for k, v in openai_body.items() if v is not None}
+
+    if not stream:
+        # Non-streaming: call chat_completions and translate response
+        body_bytes = json.dumps(openai_body).encode()
+        environ = request.environ.copy()
+        environ['PATH_INFO'] = '/v1/chat/completions'
+        environ['wsgi.input'] = BytesIO(body_bytes)
+        environ['CONTENT_LENGTH'] = str(len(body_bytes))
+        environ['CONTENT_TYPE'] = 'application/json'
+        with app.request_context(environ):
+            oai_resp = chat_completions()
+        try:
+            data = oai_resp.get_json()
+            choice = (data.get('choices') or [{}])[0]
+            msg = choice.get('message') or {}
+            return jsonify({
+                "model": model,
+                "created_at": datetime.utcfromtimestamp(data.get('created', 0)).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                "message": {"role": msg.get('role', 'assistant'), "content": msg.get('content', '')},
+                "done": True,
+                "done_reason": choice.get('finish_reason', 'stop'),
+                "total_duration": 0,
+                "eval_count": (data.get('usage') or {}).get('completion_tokens', 0),
+                "prompt_eval_count": (data.get('usage') or {}).get('prompt_tokens', 0),
+            })
+        except Exception:
+            return oai_resp
+
+    # Streaming: translate OpenAI SSE chunks to Ollama NDJSON
+    def _ollama_stream():
+        body_bytes = json.dumps(openai_body).encode()
+        environ = request.environ.copy()
+        environ['PATH_INFO'] = '/v1/chat/completions'
+        environ['wsgi.input'] = BytesIO(body_bytes)
+        environ['CONTENT_LENGTH'] = str(len(body_bytes))
+        environ['CONTENT_TYPE'] = 'application/json'
+        with app.request_context(environ):
+            oai_resp = chat_completions()
+        for line in oai_resp.response:
+            if isinstance(line, bytes):
+                line = line.decode()
+            line = line.strip()
+            if not line.startswith('data:'):
+                continue
+            payload = line[5:].strip()
+            if payload == '[DONE]':
+                yield json.dumps({"model": model, "created_at": "", "message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}) + '\n'
+                return
+            try:
+                chunk = json.loads(payload)
+                delta = (chunk.get('choices') or [{}])[0].get('delta') or {}
+                content = delta.get('content', '')
+                yield json.dumps({"model": model, "created_at": "", "message": {"role": "assistant", "content": content}, "done": False}) + '\n'
+            except Exception:
+                continue
+
+    return Response(stream_with_context(_ollama_stream()), mimetype='application/x-ndjson')
+
+
+@app.route('/api/generate', methods=['POST'])
+def ollama_generate():
+    """Ollama /api/generate (legacy completion format) — wrap as chat message."""
+    body = request.get_json(silent=True) or {}
+    prompt = body.get('prompt', '')
+    system = body.get('system', '')
+    messages = []
+    if system:
+        messages.append({'role': 'system', 'content': system})
+    messages.append({'role': 'user', 'content': prompt})
+    # Delegate to ollama_chat with translated body
+    chat_body = {
+        'model': body.get('model', ''),
+        'messages': messages,
+        'stream': body.get('stream', True),
+        'options': body.get('options') or {},
+    }
+    body_bytes = json.dumps(chat_body).encode()
+    environ = request.environ.copy()
+    environ['PATH_INFO'] = '/api/chat'
+    environ['wsgi.input'] = BytesIO(body_bytes)
+    environ['CONTENT_LENGTH'] = str(len(body_bytes))
+    environ['CONTENT_TYPE'] = 'application/json'
+    with app.request_context(environ):
+        return ollama_chat()
+
+
 # on SIGTERM (gunicorn graceful shutdown). Guards prevent errors in non-main threads.
 for _sig in (signal.SIGTERM, signal.SIGINT):
     try:

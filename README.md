@@ -44,6 +44,9 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Vision Encoder Resolution Comparison](#vision-encoder-resolution-comparison)
 - [Re-Exporting VL Models at Higher Resolution](#re-exporting-vl-models-at-higher-resolution)
 - [Benchmarks](#benchmarks)
+- [Ollama API Compatibility](#ollama-api-compatibility)
+- [LoRA Hot-Swap](#lora-hot-swap)
+- [Hermes Agent Integration](#hermes-agent-integration)
 - [Git Tags & Branches](#git-tags--branches)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
@@ -115,6 +118,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 
 ### Monitoring
 - **Prometheus metrics** (optional) — `rkllm_tokens_generated`, `rkllm_prefill_duration`, `rkllm_decode_duration`, `rkllm_tokens_per_request`, `rkllm_queue_wait_seconds`, `rkllm_active_requests`, `rkllm_model_load_seconds`, `rkllm_current_model` — exposed at `/metrics`
+- **NPU hardware metrics** — `rknpu_core_load_percent` (per-core %), `rknpu_freq_mhz`, `rknpu_power_on` — polled every 5s from `/sys/kernel/debug/rknpu/` via a background thread
 - **Graceful degradation** — metrics are disabled automatically if `prometheus-flask-exporter` is not installed
 
 ### Standards Compliance
@@ -123,6 +127,21 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **`max_tokens` / `max_completion_tokens`** support
 - **Request body size limit** (50 MB)
 - **Proper error responses** matching OpenAI error format
+
+### Ollama API Compatibility
+- **`GET /api/version`** — returns `{"version": "0.3.0-rkllm"}` so Ollama-native clients auto-connect
+- **`GET /api/tags`** — lists all loaded models in Ollama format (name, size, digest, details)
+- **`POST /api/chat`** — Ollama chat completions; streaming returns NDJSON, non-streaming returns Ollama JSON envelope
+- **`POST /api/generate`** — wraps a raw prompt as a user message and delegates to `/api/chat`
+- **`GET /api/show`** and **`GET /api/ps`** — stub endpoints for Ollama-compatible dashboards
+- Allows tools like [Open WebUI in Ollama mode](https://docs.openwebui.com) to connect without the OpenAI adapter
+
+### LoRA Adapters
+- **`GET /v1/lora`** — list all loaded LoRA adapters
+- **`POST /v1/lora/load`** — load a LoRA adapter from disk at runtime without model restart (calls `rkllm_load_lora()` via ctypes)
+- **`DELETE /v1/lora/<name>`** — unregister an adapter from the server's adapter table
+- Adapter scale (α) is configurable per request via the `scale` field
+- Requires `rkllm_load_lora` to be exported by the installed `librkllmrt.so`
 
 ### Vision-Language (VL) / Multimodal
 - **Dual-model architecture** — text model (e.g. Qwen3-1.7B) + VL model (e.g. Qwen3-VL-2B) loaded simultaneously
@@ -469,10 +488,30 @@ sudo bash fix_freq_rk3576.sh
 
 Ready-to-run `.rkllm` models converted by the author for RK3588 NPU are available on HuggingFace:
 
+**Text / Instruct models:**
+
 | Model | Parameters | Quant | Context | Speed | RAM | Thinking | Link |
 |-------|-----------|-------|---------|-------|-----|----------|------|
+| **xLAM-1b-fc-r** | 1.1B | w8a8 | 8,192 | ~16 tok/s | ~1.6 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/xLAM-1b-fc-r-RKLLM-v1.2.3) |
 | **Qwen3-1.7B** | 1.7B | w8a8 | 4,096 | ~13.6 tok/s | ~2 GB | ✅ Yes | [Download](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) |
-| **Phi-3-mini-4k-instruct** | 3.82B | w8a8 | 4,096 | ~6.8 tok/s | ~3.7 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8) |
+| **Llama-3.2-3B-Instruct** | 3B | w8a8 | 8,192 | — | ~3.5 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Llama-3.2-3B-Instruct-RKLLM-v1.2.3) |
+| **Qwen3-4B-Instruct-2507** | 4B | w8a8 | 16,384 | — | ~5.5 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Qwen3-4B-Instruct-2507-RKLLM-v1.2.3) |
+| ~~Qwen2.5-1.5B-Instruct~~ | 1.5B | w8a8 | 8,192 | ~14 tok/s | ~2.1 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3) *(deprecated — superseded by Qwen3-1.7B)* |
+
+**Vision-Language models (VLM):**
+
+| Model | Parameters | Quant | Type | RAM | Link |
+|-------|-----------|-------|------|-----|------|
+| **Qwen3-VL-2B-Instruct** | 2B | w8a8 | VLM | ~3 GB | [Download](https://huggingface.co/GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3) |
+| **InternVL3.5-4B-Instruct** | 4B | w8a8 | VLM | ~5.5 GB | [Download](https://huggingface.co/GatekeeperZA/InternVL3.5-4B-Instruct-RKLLM-v1.2.3) |
+| **Qwen3-VL-4B-Instruct** | 4B | w8a8 | VLM | ~5.5 GB | [Download](https://huggingface.co/GatekeeperZA/Qwen3-VL-4B-Instruct-RKLLM-v1.2.3) |
+
+**Retrieval / Embedding models:**
+
+| Model | Parameters | Quant | Type | RAM | Link |
+|-------|-----------|-------|------|-----|------|
+| **Qwen3-Embedding-0.6B** | 0.6B | w8a8 | Embedding | ~1 GB | [Download](https://huggingface.co/GatekeeperZA/Qwen3-Embedding-0.6B-RKLLM-v1.2.3) |
+| **Qwen3-Reranker-0.6B** | 0.6B | w8a8 | Reranker | ~1 GB | [Download](https://huggingface.co/GatekeeperZA/Qwen3-Reranker-0.6B-RKLLM-v1.2.3) |
 
 > Browse all models: **[huggingface.co/GatekeeperZA](https://huggingface.co/GatekeeperZA)**
 
@@ -620,7 +659,7 @@ Any model with a `.rknn` vision encoder file automatically gains the `vl` capabi
 | `capabilities` | Override capability list (`instruct`, `thinking`, `vl`, etc.) |
 | `sampling` | Override model-family sampling defaults for this specific model |
 
-**Effect on thinking:** Only models with the `thinking` capability get `enable_thinking=True` on the RKLLM runtime. Non-thinking models (Phi-3, Gemma, etc.) always run with `enable_thinking=False`, preventing wasted tokens on models that don't support `<think>` blocks.
+**Effect on thinking:** Only models with the `thinking` capability get `enable_thinking=True` on the RKLLM runtime. Non-thinking models always run with `enable_thinking=False`, preventing wasted tokens on models that don't support `<think>` blocks.
 
 ### Auto-Generated Aliases
 
@@ -630,8 +669,9 @@ Model folder names are converted to IDs (lowercase, hyphens). Aliases are auto-g
 |----------|-------------|
 | `qwen3-1.7b` | `qwen`, `qwen3` |
 | `qwen3-4b-instruct-2507` | `qwen3-4b`, `qwen3-4b-instruct` |
-| `gemma-3-4b-it` | `gemma`, `gemma-3`, `gemma-3-4b` |
-| `phi-3-mini-4k-instruct` | `phi`, `phi-3`, `phi-3-mini` |
+| `qwen2.5-1.5b-instruct` | `qwen2`, `qwen2.5`, `qwen2.5-1.5b` |
+| `xlam-1b-fc-r` | `xlam`, `xlam-1b`, `xlam-1b-fc` |
+| `internvl3.5-4b` | `internvl`, `internvl3`, `internvl3.5` |
 
 Aliases are only created when unambiguous (one model claims the alias). If two models share a prefix, that alias is skipped.
 
@@ -888,6 +928,80 @@ curl http://localhost:8000/metrics
 ```
 
 Exposes counters, histograms, and gauges for tokens generated, prefill/decode duration, tokens per request, queue wait time, active requests, model load time, and current model state.
+
+**NPU hardware gauges** (polled every 5 s from `/sys/kernel/debug/rknpu/`):
+
+```
+rknpu_core_load_percent{core="core0"} 42.0
+rknpu_core_load_percent{core="core1"} 38.0
+rknpu_core_load_percent{core="core2"} 41.0
+rknpu_freq_mhz 1000.0
+rknpu_power_on 1.0
+```
+
+Reading `/sys/kernel/debug/rknpu/` requires root. A sudoers rule is deployed by `setup.sh`:
+```
+armbian ALL=(root) NOPASSWD: /usr/bin/cat /sys/kernel/debug/rknpu/load, ...
+```
+
+### Ollama-Compatible Endpoints
+
+The server exposes an Ollama-compatible API surface so any tool that speaks Ollama (dashboards, CLI clients, some frontends) can connect without configuration changes.
+
+```bash
+# Version probe
+curl http://localhost:8000/api/version
+# {"version":"0.3.0-rkllm"}
+
+# List models
+curl http://localhost:8000/api/tags
+
+# Chat (non-streaming)
+curl -X POST http://localhost:8000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-1.7b","messages":[{"role":"user","content":"/no_think Hello"}],"stream":false}'
+
+# Chat (streaming — returns NDJSON)
+curl -X POST http://localhost:8000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-1.7b","messages":[{"role":"user","content":"/no_think Hello"}],"stream":true}'
+
+# Generate (wraps prompt as user message)
+curl -X POST http://localhost:8000/api/generate \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-1.7b","prompt":"Hello"}'
+```
+
+| Ollama endpoint | Behaviour |
+|---|---|
+| `GET /api/version` | Returns `{"version":"0.3.0-rkllm"}` |
+| `GET /api/tags` | Lists all detected models in Ollama format |
+| `POST /api/chat` | Translates Ollama → OpenAI internally; streaming returns NDJSON |
+| `POST /api/generate` | Wraps `prompt` as user message, delegates to `/api/chat` |
+| `GET /api/show` | Returns model info stub |
+| `GET /api/ps` | Returns running model stub |
+
+### LoRA Hot-Swap Endpoints
+
+Load and manage LoRA adapters at runtime without restarting the server. The adapter is applied to the currently loaded text model.
+
+```bash
+# List loaded adapters
+curl http://localhost:8000/v1/lora
+# {"adapters":[]}
+
+# Load a LoRA adapter
+curl -X POST http://localhost:8000/v1/lora/load \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/home/armbian/models/lora/my-adapter.bin","name":"my-adapter","scale":1.0}'
+# {"status":"loaded","name":"my-adapter"}
+
+# Unregister an adapter
+curl -X DELETE http://localhost:8000/v1/lora/my-adapter
+# {"status":"unloaded","name":"my-adapter"}
+```
+
+> **Runtime requirement:** `rkllm_load_lora` must be exported by your `librkllmrt.so`. The endpoint returns HTTP 500 (`lora_load_failed`) if the call fails, e.g. the symbol is absent. LoRA adapter support was introduced in RKLLM SDK ≥ v1.2.3.
 
 ---
 
@@ -1695,6 +1809,18 @@ The server:
 - **Thinking blocks stripped from history** — prior assistant responses have `<think>...</think>` removed before re-sending to the model, per Qwen3 docs ("historical output should only include the final output part"). This saves tokens and prevents the model from mimicking its own chain-of-thought
 - **Context-dependent thinking for RAG**: On small context models (< 8k), thinking is disabled via `enable_thinking = false` to save tokens for the actual answer
 
+### `/no_think` Soft-Switch
+
+For Qwen3 models, prefix any message with `/no_think` to suppress the thinking phase for that request. The server detects the prefix, strips it before sending to the model, and disables the `enable_thinking` flag — the model responds directly without a `<think>` block:
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-1.7b","messages":[{"role":"user","content":"/no_think What is 2+2?"}]}'
+```
+
+This is useful when you need a fast factual answer and the thinking overhead is not wanted. Works on the OpenAI endpoint, the Ollama `/api/chat` endpoint, and directly through Open WebUI (just type `/no_think` at the start of your message).
+
 > **Note:** DeepSeek-R1 is currently **not usable on the NPU** with RKLLM Runtime v1.2.3 (produces `[PAD]` garbage tokens). Use **Qwen3-1.7B** for NPU reasoning, or run `deepseek-r1:7b` via Ollama on CPU. See the [Pre-Built Models](#pre-built-models) section for details.
 
 ---
@@ -2182,8 +2308,11 @@ RKLLM-API-Server/
 ├── gunicorn.config.py              # Gunicorn config (env-var driven)
 ├── healthcheck.py                  # Docker HEALTHCHECK script
 ├── docker-compose.yml              # Open WebUI Docker config (all settings hardcoded)
-├── setup.sh                        # Zero-config installer (762 lines)
+├── setup.sh                        # Zero-config installer (includes Hermes Agent setup)
 ├── settings.yml                    # SearXNG configuration for Open WebUI
+├── hermes/
+│   ├── config.yaml                 # Hermes Agent config template (providers, fallback chain, API server)
+│   └── .env.example                # Environment variable template (API keys for cloud providers)
 ├── README.md                       # This file
 ├── .github/workflows/docker.yml    # CI: builds and pushes ARM64 image to GHCR on main push
 ├── tests/
@@ -2305,8 +2434,10 @@ The V1 code may be useful as a reference if:
 | Phi-3-Mini-4K-Instruct | W8A8 | 4K | ~3.8 GB | **6.8 tok/s** avg | Fully benchmarked |
 | Qwen3-4B-Instruct | W8A8 | 16K | ~4 GB | ~6 tok/s | Tested |
 | Gemma-3-4B-IT | W8A8 | 4K | ~4 GB | ~6 tok/s | Tested |
+| **Qwen2.5-1.5B-Instruct** | W8A8 | 8K | ~2.1 GB | **~14 tok/s** | Tested — fast general chat, Hermes local fallback |
+| **xLAM-1b-fc-r** | W8A8 | 8K | ~1.6 GB | **~16 tok/s** | Tested — best sub-2B tool-calling model (78.94% BFCL v3) |
 
-> Pre-built RKLLM models available on HuggingFace: [Qwen3-1.7B-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) · [Phi-3-mini-4k-instruct-w8a8](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8) · [Qwen3-VL-2B-Instruct-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3)
+> Pre-built RKLLM models available on HuggingFace: [Qwen3-1.7B-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) · [Phi-3-mini-4k-instruct-w8a8](https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8) · [Qwen3-VL-2B-Instruct-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3) · [Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3) · [xLAM-1b-fc-r-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/xLAM-1b-fc-r-RKLLM-v1.2.3)
 
 ### VL (Vision-Language) Models
 
@@ -2315,6 +2446,7 @@ The V1 code may be useful as a reference if:
 | **Qwen3-VL-2B** | W8A8 | **672×672** | ~15 tok/s | ~4s | ~6.5 GB | **Active (recommended)** |
 | Qwen3-VL-2B | W8A8 | 448×448 | ~15 tok/s | ~2s | ~5.5 GB | Available (default export) |
 | Qwen3-VL-2B | W8A8 | 896×896 | ~15 tok/s | ~12s | ~8.5 GB | Available (high-detail) |
+| **Qwen3-VL-4B** | W8A8 | 448×448 | ~6 tok/s | ~2s | ~10 GB | **Tested — higher reasoning quality** |
 | InternVL3.5-2B | W8A8 | 448×448 | ~12.1 tok/s | ~2.0s | ~3.0 GB | **Tested — poor OCR accuracy** |
 | DeepSeekOCR-3B | W8A8 | 448×448 | ~31.8 tok/s | ~2.1s | ~3.0 GB | **Tested — severe hallucination** |
 | Qwen2.5-VL-3B | W8A8 | 392×392 | ~8.7 tok/s | ~2.9s | ~5.3 GB | Supported (lower resolution) |
@@ -2323,6 +2455,8 @@ The V1 code may be useful as a reference if:
 | MiniCPM-V-2.6 | W8A8 | 448×448 | ~TBD | ~TBD | ~TBD | Supported |
 
 > **Qwen3-VL-2B is the recommended VL model** with the vision encoder re-exported at **672×672** for 2.25× more visual detail than the default 448×448. Three encoder resolutions (448/672/896) are available — see [Vision Encoder Resolution Comparison](#vision-encoder-resolution-comparison). To switch encoders, rename the `.rknn` files (only one should have the `.rknn` extension; others use `.rknn.alt`).
+>
+> **Qwen3-VL-4B memory note:** The 4B VL model requires ~10 GB of NPU IOVA (IOMMU domain 1 on RK3588). If a text model is loaded when the first VL-4B image request arrives, the server automatically unloads the text model before initialising the VL decoder to stay within the 4 GB domain-1 limit. The text model reloads on the next text-only request. This hot-swap is transparent but adds ~3 s latency on the first mixed workload request.
 >
 > All Qwen3-VL-2B files (LLM + all 3 vision encoders) are on HuggingFace: [GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3](https://huggingface.co/GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3). Pre-converted models for other architectures available in the [RKLLM official model zoo](https://console.box.lenovo.com/l/l0tXb8) (fetch code: `rkllm`).
 
@@ -2510,6 +2644,255 @@ Qwen3-VL uses `patch_size=16` and `merge_size=2`, so resolution must be divisibl
 
 ---
 
+## Ollama API Compatibility
+
+The server exposes an Ollama-compatible API surface alongside the OpenAI API. Any client that speaks the Ollama wire protocol can connect without configuration changes.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/version` | Version probe — returns `{"version":"0.3.0-rkllm"}` |
+| `GET` | `/api/tags` | List all models in Ollama format |
+| `POST` | `/api/chat` | Chat completions — streaming (NDJSON) or non-streaming |
+| `POST` | `/api/generate` | Raw prompt completion — wraps prompt as a user message |
+| `GET` | `/api/show` | Model info stub |
+| `GET` | `/api/ps` | Running-model stub |
+
+### Quick Test
+
+```bash
+# Verify Ollama handshake
+curl http://localhost:8000/api/version
+
+# List models
+curl http://localhost:8000/api/tags | python3 -c "import sys,json; [print(m['name']) for m in json.load(sys.stdin)['models']]"
+
+# Non-streaming chat
+curl -X POST http://localhost:8000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-1.7b","messages":[{"role":"user","content":"/no_think Hello"}],"stream":false}'
+
+# Streaming chat (NDJSON)
+curl -X POST http://localhost:8000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-1.7b","messages":[{"role":"user","content":"/no_think Count to 3"}],"stream":true}'
+```
+
+### Connecting Open WebUI in Ollama Mode
+
+If you want to use Open WebUI's native Ollama connection instead of the OpenAI adapter:
+
+**Admin > Settings > Connections > Ollama:**
+
+| Setting | Value |
+|---------|-------|
+| Ollama API URL | `http://host.docker.internal:8000` (no `/v1`) |
+
+All models will appear in the model dropdown exactly as they do via the OpenAI adapter. Both connection types can be active simultaneously.
+
+---
+
+## LoRA Hot-Swap
+
+Load and unload LoRA adapters at runtime without restarting the server. The adapter is applied to the currently loaded text model via the `rkllm_load_lora()` C API.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/lora` | List all currently registered adapters |
+| `POST` | `/v1/lora/load` | Load an adapter from disk |
+| `DELETE` | `/v1/lora/<name>` | Unregister an adapter |
+
+### Usage
+
+```bash
+# List loaded adapters
+curl http://localhost:8000/v1/lora
+# {"adapters":[]}
+
+# Load an adapter
+curl -X POST http://localhost:8000/v1/lora/load \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/home/armbian/models/lora/my-adapter.bin",
+    "name": "my-adapter",
+    "scale": 1.0
+  }'
+# {"status":"loaded","name":"my-adapter"}
+
+# List again to confirm
+curl http://localhost:8000/v1/lora
+# {"adapters":[{"name":"my-adapter","path":"/home/armbian/models/lora/my-adapter.bin","scale":1.0}]}
+
+# Unregister (does not unload from NPU — reload model to fully clear)
+curl -X DELETE http://localhost:8000/v1/lora/my-adapter
+# {"status":"unloaded","name":"my-adapter"}
+```
+
+### Request Body for `/v1/lora/load`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | ✅ | Absolute path to the adapter `.bin` file on the Orange Pi |
+| `name` | string | ✅ | Identifier used for listing and deletion |
+| `scale` | float | ❌ | Adapter weight scale α (default `1.0`) |
+
+### Notes
+
+- **Runtime requirement:** `rkllm_load_lora` must be exported by your `librkllmrt.so`. `POST /v1/lora/load` returns `HTTP 500` (`lora_load_failed`) if the call fails, e.g. the symbol is absent.
+- LoRA is applied to the **currently loaded text model** — the adapter must be compatible with that model's architecture.
+- Unregistering an adapter via `DELETE` removes it from the server's tracking table. To fully clear the adapter from the NPU weights, unload and reload the model (`POST /v1/models/unload` then `/v1/models/select`).
+- Multiple adapters can be loaded simultaneously if supported by the runtime.
+
+---
+
+## Hermes Agent Integration
+
+> **Branch:** `hermes-agent-integration`
+
+[Hermes Agent](https://github.com/nousresearch/hermes) is an autonomous AI agent that runs a full tool-calling loop — web search, code execution, memory, and more. This branch integrates Hermes as a selectable model inside Open WebUI, appearing alongside the local NPU models in the model dropdown.
+
+### How It Works
+
+```
+Open WebUI ──► Hermes Gateway (port 8642) ──► Nemotron 550B (OpenRouter free)
+                                         ├──► llama-3.3-70b (Groq free, fallback)
+                                         └──► qwen3-vl-4b (local NPU, vision tasks)
+```
+
+When a user selects **Hermes Agent** in Open WebUI, requests go to the Hermes gateway instead of the RKLLM API server. Hermes runs its autonomous agent loop — searching the web, using tools, maintaining memory — powered by cloud LLMs. Vision tasks (image analysis) are routed to the local `qwen3-vl-4b` NPU model via the `auxiliary.vision` provider. Local NPU models are available directly in OWUI for fast single-turn chat; Hermes requires ≥64K context which exceeds what the NPU models support.
+
+### Provider Fallback Chain
+
+Hermes tries each provider in order until one succeeds:
+
+| Priority | Provider | Model | Notes |
+|----------|----------|-------|-------|
+| 1st | OpenRouter | `nvidia/nemotron-3-ultra-550b-a55b:free` | Free tier, 550B parameter model, 1M context |
+| 2nd | Groq | `llama-3.3-70b-versatile` | ~14,400 req/day free, fast inference |
+
+### Setup
+
+The `setup.sh` script handles Hermes installation automatically when cloud API keys are provided:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."   # Free at openrouter.ai (primary)
+export GROQ_API_KEY="gsk_..."              # Free at console.groq.com (fallback)
+
+git clone https://github.com/GatekeeperZA/RKLLM-API-Server.git
+cd RKLLM-API-Server
+./setup.sh
+```
+
+**What setup.sh installs:**
+- Hermes Agent v0.19.0 in a dedicated Python 3.11 venv (`/home/armbian/rkllm_api/.venv-hermes`)
+- `rkllm-hermes.service` — systemd service exposing the Hermes gateway on **port 8642**
+- Hermes config at `/home/armbian/.hermes/config.yaml` with provider + fallback chain
+- API key env vars in the systemd service unit (not stored in config.yaml)
+- `tests/db_fix.py` automatically adds the Hermes gateway as a connection in Open WebUI
+
+**Manual configuration** (`hermes/config.yaml` template):
+```yaml
+providers:
+  openrouter:
+    api_key: "${OPENROUTER_API_KEY}"
+    base_url: "https://openrouter.ai/api/v1"
+    request_timeout_seconds: 120
+  groq:
+    api_key: "${GROQ_API_KEY}"
+    base_url: "https://api.groq.com/openai/v1"
+    request_timeout_seconds: 60
+  local:
+    base_url: "http://127.0.0.1:8000/v1"
+    api_key: "na"
+    request_timeout_seconds: 300
+
+model:
+  provider: openrouter
+  model: nvidia/nemotron-3-ultra-550b-a55b:free
+  context_length: 131072    # override reported window — Hermes requires ≥64K
+
+fallback_providers:
+  - provider: openrouter
+    model: nvidia/nemotron-3-ultra-550b-a55b:free
+    key_env: OPENROUTER_API_KEY
+  - provider: groq
+    model: llama-3.3-70b-versatile
+    key_env: GROQ_API_KEY
+
+# Vision tasks routed to local VLM — avoids cloud roundtrip for image analysis
+auxiliary:
+  vision:
+    provider: "local"
+    model: "qwen3-vl-4b"
+
+api_server:
+  enabled: true
+  host: 0.0.0.0
+  port: 8642
+  key: "${HERMES_API_KEY}"
+```
+
+### Open WebUI Integration
+
+The Hermes gateway appears in Open WebUI as a separate OpenAI-compatible connection. `tests/db_fix.py` adds it automatically:
+
+| Setting | Value |
+|---------|-------|
+| API Base URL | `http://host.docker.internal:8642/v1` |
+| API Key | *(generated during setup)* |
+| Model | `hermes-agent` |
+
+Users see **hermes-agent** in the model dropdown alongside `qwen3-1.7b`, `qwen3-4b`, etc. Selecting it routes the request through the Hermes autonomous agent loop instead of direct NPU inference.
+
+### Key Differences vs Direct NPU Models
+
+| Feature | Direct NPU (qwen3-4b) | Hermes Agent |
+|---------|----------------------|--------------|
+| Web search | Via Open WebUI + SearXNG | Native agent tool (autonomous) |
+| Tool calling | Limited (via legacy function_calling) | Full agentic loop with retries |
+| Model size | 4B NPU | 550B cloud (free) |
+| Response time | ~2-5s | ~10-30s (cloud roundtrip) |
+| Privacy | Fully local | Cloud LLM sees queries |
+| Offline | ✅ Yes | ❌ Requires cloud connection |
+
+### Service Notes
+
+- **`StartLimitIntervalSec` / `StartLimitBurst`** must be in the `[Unit]` section of the systemd unit file — not `[Service]`. They are silently ignored in `[Service]` and the service will restart without limit. The `rkllm-hermes.service` included in this repo has the correct placement.
+- **`rkllm-embed.service`** depends on `rkllm-api.service` starting first (shared NPU memory). `After=rkllm-api.service` is set, and `RestartSec=30` gives the NPU time to free before a restart attempt.
+- **Multiple system messages** from Open WebUI pipelines are silently concatenated by `api.py` — this is expected behavior, not an error.
+
+### Service Management
+
+```bash
+# Start / stop / restart
+sudo systemctl start rkllm-hermes
+sudo systemctl stop rkllm-hermes
+sudo systemctl restart rkllm-hermes
+
+# View logs
+sudo journalctl -u rkllm-hermes -f
+
+# Test the gateway
+curl http://localhost:8642/v1/models \
+  -H "Authorization: Bearer <your-api-key>"
+```
+
+### Small Model Tool Calling (Experimental)
+
+Two sub-2B NPU models have been converted for fast local tool calling:
+
+| Model | BFCL v3 | Speed | Best For |
+|-------|---------|-------|----------|
+| **xLAM-1b-fc-r** | **78.94%** | ~16 tok/s | Structured function calls (highest sub-2B accuracy) |
+| **Qwen2.5-1.5B-Instruct** | ~40-50% | ~14 tok/s | General instruct + light tool use |
+
+Both models are on HuggingFace ([xLAM](https://huggingface.co/GatekeeperZA/xLAM-1b-fc-r-RKLLM-v1.2.3) · [Qwen2.5-1.5B](https://huggingface.co/GatekeeperZA/Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3)) and auto-discovered by the RKLLM API server. For production tool calling, use the cloud-backed Hermes Agent — the sub-2B local models are best suited to simple, well-structured function calls.
+
+---
+
 ## Git Tags & Branches
 
 | Tag / Branch | Description |
@@ -2518,6 +2901,7 @@ Qwen3-VL uses `patch_size=16` and `merge_size=2`, so resolution must be divisibl
 | `v1.1-ctypes-text-only` | Text-only ctypes version before VL additions |
 | `subprocess-legacy` | Branch preserving the subprocess architecture |
 | `main` | Current stable: RKLLM v1.2.3 runtime — ctypes + VL multimodal + meta-task shortcircuits + context-enriched query gen + document RAG + model-aware sampling + prompt cache + sliding window + NPU benchmarks |
+| `hermes-agent-integration` | Hermes Agent v0.19.0 integration — autonomous agent as an OpenWebUI model; Ollama API compat layer (`/api/chat`, `/api/tags`, `/api/generate`); NPU hardware Prometheus metrics (`rknpu_core_load_percent`, `rknpu_freq_mhz`, `rknpu_power_on`); LoRA hot-swap endpoints (`/v1/lora`); `/no_think` soft-switch for Qwen3; VL 4B domain-1 IOVA OOM fix; VL embed cache key collision fix; cloud provider fallback chain (OpenRouter Nemotron 550B → Groq llama-3.3-70b); setup.sh automation |
 | `rkllm-v1.3.0-wip` | Work-in-progress v1.3.0 upgrade — **archived, not stable**. Contains updated ctypes structs for v1.3.0 ABI and a two-phase thinking implementation. Rolled back due to phase-2 early EOS bug (13–27 tokens then mid-sentence EOS). See [ISSUES_v1.3.0.md](ISSUES_v1.3.0.md) on that branch for full bug tracker. Revisit when a newer v1.3.x runtime is released. |
 
 ### RKLLM v1.3.0 Status

@@ -122,9 +122,8 @@ services:
       # -----------------------------------------------------------------
       # Context Compaction
       # -----------------------------------------------------------------
-      # Fires at 3000 tokens — protects phi-3-mini-4k (4K context limit).
-      # All other models benefit too; compaction runs on Qwen3 1.7B, not
-      # the chat model, so phi-3-mini can't try to summarize itself.
+      # Fires at 3000 tokens — suits small models (1.7B/4B have 4-16K context).
+      # Compaction runs on Qwen3 1.7B rather than the active chat model.
       - ENABLE_CONTEXT_COMPACTION=True
       - CONTEXT_COMPACTION_MODEL=qwen3-1.7b
       - CONTEXT_COMPACTION_TOKEN_THRESHOLD=3000

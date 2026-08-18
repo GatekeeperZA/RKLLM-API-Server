@@ -707,9 +707,9 @@ Environment="RERANK_MODEL_PATH=$RERANK_MODEL_FILE"
 ExecStart=$VENV_DIR/bin/gunicorn -w 1 -k gthread --threads 2 --timeout 600 -b 0.0.0.0:8001 embed_api:app
 
 Restart=on-failure
-RestartSec=10
-StartLimitIntervalSec=60
-StartLimitBurst=3
+RestartSec=15
+StartLimitIntervalSec=600
+StartLimitBurst=40
 LimitNOFILE=65536
 ProtectHome=no
 NoNewPrivileges=yes
@@ -727,6 +727,223 @@ fi
 echo ""
 echo "  Embed service: sudo systemctl start $EMBED_SERVICE_NAME"
 echo "  Embed logs:    journalctl -u $EMBED_SERVICE_NAME -f"
+echo ""
+
+# =============================================================================
+# HERMES AGENT — install and configure gateway (port 8642)
+# =============================================================================
+
+HERMES_SERVICE_NAME="rkllm-hermes"
+HERMES_SERVICE_FILE="/etc/systemd/system/${HERMES_SERVICE_NAME}.service"
+HERMES_VENV_DIR="$INSTALL_DIR/.venv-hermes"
+HERMES_CONFIG_DIR="$INSTALL_DIR/hermes"
+HERMES_ENV_FILE="$HERMES_CONFIG_DIR/.env"
+HERMES_PORT="8642"
+
+# Cloud provider API keys (optional — set these env vars before running setup.sh
+# to have Hermes use cloud models: OpenRouter Nemotron 550B → Groq llama-3.3-70b fallback)
+OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
+GROQ_API_KEY="${GROQ_API_KEY:-}"
+
+separator "Hermes Agent Setup"
+
+# --- Python 3.11 (hermes-agent requires >=3.11, system has 3.10) ---
+PYTHON311=$(command -v python3.11 2>/dev/null || true)
+if [[ -z "$PYTHON311" ]]; then
+    info "Python 3.11 not found — installing via deadsnakes PPA..."
+    sudo add-apt-repository -y ppa:deadsnakes/ppa
+    sudo apt-get update -qq
+    sudo apt-get install -y python3.11 python3.11-venv python3.11-dev
+    PYTHON311=$(command -v python3.11)
+    success "Python 3.11 installed: $PYTHON311"
+else
+    success "Python 3.11 found: $PYTHON311"
+fi
+
+# --- Hermes venv ---
+if [[ -f "$HERMES_VENV_DIR/bin/hermes" ]]; then
+    success "hermes-agent already installed: $HERMES_VENV_DIR"
+else
+    info "Creating Hermes Agent virtual environment (Python 3.11)..."
+    "$PYTHON311" -m venv "$HERMES_VENV_DIR"
+    "$HERMES_VENV_DIR/bin/pip" install --quiet --upgrade pip
+    "$HERMES_VENV_DIR/bin/pip" install --quiet "hermes-agent>=0.19.0"
+    success "hermes-agent installed"
+fi
+
+HERMES_BIN="$HERMES_VENV_DIR/bin/hermes"
+
+# --- Generate API key if .env doesn't exist ---
+if [[ ! -f "$HERMES_ENV_FILE" ]]; then
+    info "Generating Hermes gateway API key..."
+    HERMES_API_KEY=$(openssl rand -hex 32)
+    cat > "$HERMES_ENV_FILE" << ENVEOF
+# Hermes Agent environment — do NOT commit this file
+HERMES_API_KEY=${HERMES_API_KEY}
+ENVEOF
+    success "API key written to $HERMES_ENV_FILE"
+    info "OpenWebUI connection key: $HERMES_API_KEY"
+    echo "  → Add this to OpenWebUI: Admin > Settings > Connections > OpenAI"
+    echo "    URL: http://$(hostname -I | awk '{print $1}'):$HERMES_PORT/v1"
+    echo "    Key: $HERMES_API_KEY"
+else
+    HERMES_API_KEY=$(grep HERMES_API_KEY "$HERMES_ENV_FILE" | cut -d= -f2)
+    success "Hermes .env already exists (key: ${HERMES_API_KEY:0:8}...)"
+fi
+
+# --- Write Hermes config to ~/.hermes/config.yaml with real API key ---
+# We use Python to write YAML so the API key embeds correctly without heredoc expansion issues.
+# The repo's hermes/config.yaml is a reference; the live config lives in ~/.hermes/config.yaml.
+HERMES_DOT_DIR="$HOME/.hermes"
+mkdir -p "$HERMES_DOT_DIR"
+info "Writing Hermes config to $HERMES_DOT_DIR/config.yaml"
+"$HERMES_VENV_DIR/bin/python3" << PYEOF
+import yaml, os
+
+providers = {}
+openrouter_key = '${OPENROUTER_API_KEY}'
+groq_key = '${GROQ_API_KEY}'
+if openrouter_key:
+    providers['openrouter'] = {
+        'base_url': 'https://openrouter.ai/api/v1',
+        'api_key': openrouter_key,
+        'request_timeout_seconds': 120,
+    }
+if groq_key:
+    providers['groq'] = {
+        'base_url': 'https://api.groq.com/openai/v1',
+        'api_key': groq_key,
+        'request_timeout_seconds': 60,
+    }
+
+# Pick the best available provider — cloud-only, no local NPU fallback.
+# Local NPU models are compiled at 4-16K context; Hermes requires >=64K minimum.
+if openrouter_key:
+    default_provider = 'openrouter'
+    default_model = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+elif groq_key:
+    default_provider = 'groq'
+    default_model = 'llama-3.3-70b-versatile'
+else:
+    raise RuntimeError('No cloud API keys provided. Set OPENROUTER_API_KEY or GROQ_API_KEY.')
+
+fallback_providers = []
+if openrouter_key:
+    fallback_providers.append({
+        'provider': 'openrouter',
+        'model': 'nvidia/nemotron-3-ultra-550b-a55b:free',
+        'key_env': 'OPENROUTER_API_KEY',
+    })
+if groq_key:
+    fallback_providers.append({
+        'provider': 'groq',
+        'model': 'llama-3.3-70b-versatile',
+        'key_env': 'GROQ_API_KEY',
+    })
+
+config = {
+    'providers': providers,
+    'model': {
+        'provider': default_provider,
+        'model': default_model,
+        'context_length': 131072,
+    },
+    'api_server': {
+        'enabled': True,
+        'host': '0.0.0.0',
+        'port': int('${HERMES_PORT}'),
+        'key': '${HERMES_API_KEY}',
+    },
+    # Disable heavy toolsets — keeps system prompt under ~4K tokens (Groq payload limit).
+    # Enabled: web, memory, skills, session_search, clarify, delegation
+    'agent': {
+        'disabled_toolsets': [
+            'browser', 'terminal', 'file', 'code_execution',
+            'vision', 'video', 'image_gen', 'video_gen', 'x_search',
+            'tts', 'todo', 'cronjob', 'homeassistant', 'spotify',
+            'discord', 'discord_admin', 'yuanbao', 'computer_use',
+            'context_engine',
+        ]
+    },
+    'fallback_providers': fallback_providers,
+    'memory': {'provider': 'fts5'},
+    'log_level': 'INFO',
+}
+
+out = os.path.expanduser('~/.hermes/config.yaml')
+with open(out, 'w') as f:
+    yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+print(f'Wrote {out}')
+PYEOF
+success "Hermes config written to $HERMES_DOT_DIR/config.yaml"
+
+# Register the selected provider via hermes config set (config.yaml alone is insufficient)
+if [[ -n "$OPENROUTER_API_KEY" ]]; then
+    "$HERMES_BIN" config set model.provider openrouter 2>/dev/null || true
+    "$HERMES_BIN" config set model.default "nvidia/nemotron-3-ultra-550b-a55b:free" 2>/dev/null || true
+    success "Hermes provider set to openrouter (nemotron-550b) → groq (llama-3.3-70b) fallback"
+else
+    "$HERMES_BIN" config set model.provider groq 2>/dev/null || true
+    "$HERMES_BIN" config set model.default qwen3-4b 2>/dev/null || true
+    success "Hermes provider set to local (qwen3-4b)"
+fi
+
+# --- Patch placeholder key in config ---
+# The repo ships HERMES_API_KEY_PLACEHOLDER in db_fix.py; replace with real key
+if [[ -f "$INSTALL_DIR/tests/db_fix.py" ]]; then
+    sed -i "s/HERMES_API_KEY_PLACEHOLDER/${HERMES_API_KEY}/g" "$INSTALL_DIR/tests/db_fix.py"
+    success "db_fix.py patched with real Hermes API key"
+fi
+
+# --- Systemd service ---
+if [[ -f "$HERMES_SERVICE_FILE" ]]; then
+    success "Hermes service already configured: $HERMES_SERVICE_FILE"
+else
+    info "Creating Hermes gateway service: $HERMES_SERVICE_NAME"
+    sudo tee "$HERMES_SERVICE_FILE" > /dev/null << EOF
+[Unit]
+Description=Hermes Agent Gateway (OpenWebUI agent model on port ${HERMES_PORT})
+After=network.target rkllm-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+Group=$(id -gn)
+WorkingDirectory=$INSTALL_DIR
+
+Environment="PATH=$HERMES_VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="API_SERVER_ENABLED=true"
+Environment="API_SERVER_KEY=${HERMES_API_KEY}"
+Environment="API_SERVER_HOST=0.0.0.0"
+Environment="API_SERVER_PORT=${HERMES_PORT}"
+$([ -n "${OPENROUTER_API_KEY}" ] && echo "Environment=\"OPENROUTER_API_KEY=${OPENROUTER_API_KEY}\"")
+$([ -n "${GROQ_API_KEY}" ] && echo "Environment=\"GROQ_API_KEY=${GROQ_API_KEY}\"")
+
+ExecStart=$HERMES_BIN gateway
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=3
+LimitNOFILE=65536
+ProtectHome=no
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=$INSTALL_DIR /tmp /home/$USER/.hermes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$HERMES_SERVICE_NAME"
+    success "Hermes gateway service created and enabled"
+fi
+
+echo ""
+echo "  Hermes gateway: sudo systemctl start $HERMES_SERVICE_NAME"
+echo "  Hermes logs:    journalctl -u $HERMES_SERVICE_NAME -f"
+echo "  Gateway URL:    http://$(hostname -I | awk '{print $1}'):$HERMES_PORT/v1"
 echo ""
 
 # =============================================================================
@@ -786,12 +1003,16 @@ echo "  ├───────────────────────
 echo "  │                                                         │"
 echo "  │  API Server   : $INSTALL_DIR/api.py"
 echo "  │  Embed Server : $INSTALL_DIR/embed_api.py"
+echo "  │  Hermes Agent : $INSTALL_DIR/hermes/config.yaml"
 echo "  │  Venv         : $VENV_DIR"
+echo "  │  Hermes Venv  : $HERMES_VENV_DIR"
 echo "  │  Models       : $MODELS_DIR ($MODEL_COUNT model(s))"
 echo "  │  Service      : $SERVICE_NAME (port $BIND_PORT)"
 echo "  │  Embed Svc    : $EMBED_SERVICE_NAME (port 8001)"
+echo "  │  Hermes Svc   : $HERMES_SERVICE_NAME (port $HERMES_PORT)"
 echo "  │  Endpoint     : http://0.0.0.0:$BIND_PORT/v1"
 echo "  │  Embed URL    : http://0.0.0.0:8001/v1"
+echo "  │  Hermes URL   : http://0.0.0.0:$HERMES_PORT/v1"
 echo "  │  librkllmrt   : ${RKLLM_LIB_FINAL:-not found}"
 echo "  │  librknnrt    : ${RKNN_LIB_FINAL:-not installed (VL models unavailable)}"
 echo "  │                                                         │"
