@@ -3522,6 +3522,17 @@ def health():
     })
 
 
+@app.route('/ready', methods=['GET'])
+@app.route('/v1/ready', methods=['GET'])
+def ready():
+    """Kubernetes/Docker readiness probe — returns 200 only when a model is loaded and idle."""
+    if not is_model_loaded() and not VL_CURRENT_MODEL:
+        return jsonify({"status": "not_ready", "reason": "no model loaded"}), 503
+    if is_request_active():
+        return jsonify({"status": "not_ready", "reason": "inference in progress"}), 503
+    return jsonify({"status": "ready", "model": CURRENT_MODEL or VL_CURRENT_MODEL})
+
+
 @app.route('/v1/chat/completions', methods=['POST'])
 @app.route('/chat/completions', methods=['POST'])
 def chat_completions():
@@ -4270,10 +4281,20 @@ def chat_completions():
         # Prepare cache info for RAG queries
         rag_cache_info = (name, user_question, prompt) if is_rag and RAG_CACHE_TTL > 0 else None
 
+        # Advisory rate-limit headers — single NPU: 1 concurrent request, no TPM limit
+        _ctx_len = config.get('context_length', CONTEXT_LENGTH_DEFAULT)
+        _rl_hdrs = {
+            'x-ratelimit-limit-requests': '1',
+            'x-ratelimit-limit-tokens': str(_ctx_len),
+            'x-ratelimit-remaining-requests': '0' if is_request_active() else '1',
+            'x-ratelimit-remaining-tokens': str(_ctx_len),
+            'x-ratelimit-reset-requests': '1s',
+        }
         _stream_hdrs = {
             'Cache-Control': 'no-cache',
             'X-Accel-Buffering': 'no',
             'Connection': 'keep-alive',
+            **_rl_hdrs,
         }
         if _sampling_warning:
             _stream_hdrs['X-RKLLM-Warning'] = _sampling_warning
@@ -4306,6 +4327,8 @@ def chat_completions():
                 req_stop=req_stop,
                 has_tools=_has_tools,
             )
+            for _h, _v in _rl_hdrs.items():
+                _r.headers[_h] = _v
             if _sampling_warning:
                 _r.headers['X-RKLLM-Warning'] = _sampling_warning
             return _r
@@ -5062,6 +5085,36 @@ def legacy_completions():
     return chat_resp
 
 
+# =============================================================================
+# RERANK PROXY — forwards to rkllm-embed on port 8001
+# POST /v1/rerank  {"model": "...", "query": "...", "documents": [...]}
+# Cohere-compatible reranking. Proxied so callers only need one base URL.
+# =============================================================================
+
+_EMBED_SERVICE_URL = os.environ.get('RKLLM_EMBED_URL', 'http://127.0.0.1:8001')
+
+@app.route('/v1/rerank', methods=['POST'])
+def rerank_proxy():
+    """Proxy reranking requests to rkllm-embed service on port 8001."""
+    import urllib.request as _ur
+    import urllib.error as _ue
+    body = request.get_data()
+    try:
+        req = _ur.Request(
+            f'{_EMBED_SERVICE_URL}/v1/rerank',
+            data=body,
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        with _ur.urlopen(req, timeout=120) as resp:
+            data = resp.read()
+            return Response(data, status=resp.status, mimetype='application/json')
+    except _ue.HTTPError as e:
+        return Response(e.read(), status=e.code, mimetype='application/json')
+    except Exception as e:
+        return make_error_response(f"Embed service unavailable: {e}", 503, "service_unavailable")
+
+
 # Register signal handlers at module level so gunicorn workers also clean up the NPU
 # =============================================================================
 # LORA ADAPTER ENDPOINTS
@@ -5154,6 +5207,107 @@ def _ollama_model_entry(name):
         },
         "capabilities": cfg.get('capabilities', ['completion', 'chat']),
     }
+
+
+# =============================================================================
+# ANTHROPIC / CLAUDE MESSAGES API COMPATIBILITY
+# POST /v1/messages  {"model": "...", "messages": [...], "max_tokens": ...}
+# Translates Claude message format to OpenAI chat format and proxies internally.
+# =============================================================================
+
+@app.route('/v1/messages', methods=['POST'])
+def anthropic_messages():
+    """Anthropic Messages API shim — translates to OpenAI chat completions."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return make_error_response("Request body must be a JSON object", 400, "invalid_request")
+
+    model = body.get('model', '')
+    messages = body.get('messages', [])
+    system_text = body.get('system', '')
+    max_tokens = body.get('max_tokens', 2048)
+    stream = body.get('stream', False)
+    temperature = body.get('temperature', None)
+    top_p = body.get('top_p', None)
+
+    # Build OpenAI-style messages list
+    oai_messages = []
+    if system_text:
+        oai_messages.append({'role': 'system', 'content': system_text})
+    for msg in messages:
+        role = msg.get('role', 'user')
+        content = msg.get('content', '')
+        # Anthropic content can be a list of blocks
+        if isinstance(content, list):
+            text_parts = [b.get('text', '') for b in content if b.get('type') == 'text']
+            content = '\n'.join(text_parts)
+        oai_messages.append({'role': role, 'content': content})
+
+    # Build OpenAI-compatible body and forward internally via request context
+    oai_body = {
+        'model': model,
+        'messages': oai_messages,
+        'max_tokens': max_tokens,
+        'stream': stream,
+    }
+    if temperature is not None:
+        oai_body['temperature'] = temperature
+    if top_p is not None:
+        oai_body['top_p'] = top_p
+
+    # Push a new request context with the translated body
+    environ = request.environ.copy()
+    import io as _io
+    oai_bytes = json.dumps(oai_body).encode()
+    environ['wsgi.input'] = _io.BytesIO(oai_bytes)
+    environ['CONTENT_LENGTH'] = str(len(oai_bytes))
+    environ['CONTENT_TYPE'] = 'application/json'
+    environ['REQUEST_METHOD'] = 'POST'
+    environ['PATH_INFO'] = '/v1/chat/completions'
+
+    ctx = app.request_context(environ)
+    ctx.push()
+    try:
+        oai_resp = chat_completions()
+    finally:
+        ctx.pop()
+
+    if stream:
+        # Stream already in SSE format — pass through
+        return oai_resp
+
+    # Non-streaming: translate OpenAI response to Anthropic format
+    try:
+        oai_data = oai_resp.get_json()
+        choice = (oai_data.get('choices') or [{}])[0]
+        message = choice.get('message', {})
+        content = message.get('content', '')
+        reasoning = message.get('reasoning_content')
+        stop_reason = 'end_turn' if choice.get('finish_reason') == 'stop' else choice.get('finish_reason', 'end_turn')
+        usage = oai_data.get('usage', {})
+
+        content_blocks = []
+        if reasoning:
+            content_blocks.append({'type': 'thinking', 'thinking': reasoning})
+        content_blocks.append({'type': 'text', 'text': content})
+
+        anthropic_resp = {
+            'id': oai_data.get('id', f"msg_{uuid.uuid4().hex}"),
+            'type': 'message',
+            'role': 'assistant',
+            'content': content_blocks,
+            'model': oai_data.get('model', model),
+            'stop_reason': stop_reason,
+            'stop_sequence': None,
+            'usage': {
+                'input_tokens': usage.get('prompt_tokens', 0),
+                'output_tokens': usage.get('completion_tokens', 0),
+            },
+        }
+        return jsonify(anthropic_resp)
+    except Exception as e:
+        logger.error(f"Anthropic format translation failed: {e}")
+        return oai_resp
 
 
 @app.route('/api/version', methods=['GET'])
