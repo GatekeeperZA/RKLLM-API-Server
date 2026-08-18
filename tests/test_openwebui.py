@@ -27,10 +27,12 @@ API_KEY = os.environ.get("OWUI_API_KEY", "sk-owui-eae7cdfc8d566d50a2b9ac6f5e22d0
 
 MODELS = [
     "qwen3-1.7b",
-    "qwen3-vl-2b",
-    "phi-3-mini-4k-instruct",
-    "gemma-3-4b-it",
     "qwen3-4b-instruct-2507",
+    "llama-3.2-3b-instruct",
+    "xlam-1b-fc-r",
+    "qwen3-vl-2b",
+    "qwen3-vl-4b",
+    "internvl3.5-4b",
 ]
 TOOL_MODEL = "qwen3-1.7b"
 RAG_MODEL  = "qwen3-1.7b"

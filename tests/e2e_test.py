@@ -357,12 +357,17 @@ def test_shortcircuits():
           f"'{content}'")
 
     # --- Tag Generation Shortcircuit ---
+    # Must include chat_history context — shortcircuit guards against bare user messages
     print("\n  --- Tag Gen Shortcircuit ---")
     t0 = time.time()
     result = _chat(model, [
         {"role": "user", "content": (
             "Generate 1-3 tags to categorize the chat. "
-            "Return a JSON list of tag strings."
+            "Return a JSON list of tag strings.\n\n"
+            "<chat_history>\n"
+            "USER: How do I install Python?\n"
+            "ASSISTANT: Download it from python.org.\n"
+            "</chat_history>"
         )}
     ], stream=True)
     elapsed = time.time() - t0
