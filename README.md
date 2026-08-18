@@ -2665,6 +2665,62 @@ Measured on **Orange Pi 5 Plus (16 GB)** — RK3588, 3 NPU cores, RKNPU driver 0
 
 ---
 
+## KV Cache & Inference Performance
+
+### How KV Cache Works on This Server
+
+The KV (Key-Value) cache stores the attention matrices computed during the prefill phase. Instead of recomputing them for every token in the prompt, the NPU reads them from cache — saving significant time on long conversations.
+
+```
+Turn 1: "What is South Africa known for?"
+  → Full prefill: compute KV for all tokens (~95ms for 15 tokens)
+  → Generate answer (kept in KV cache)
+
+Turn 2: "Tell me more about the wildlife."
+  → Incremental prefill: only new tokens computed (~20ms for 8 tokens)
+  → Prior conversation already in KV cache — no re-prefill needed
+```
+
+**The speedup compounds with conversation length** — a 10-turn conversation would take ~10× longer per turn without KV cache.
+
+### What This Server Does
+
+| Mechanism | Status | Effect |
+|---|---|---|
+| `keep_history=1` between turns | ✅ Active | Each follow-up only prefills new tokens — ~20× prefill speedup on long conversations |
+| System prompt preserved on KV reset | ✅ Active | When a new chat starts, system prompt tokens stay cached — only user/assistant turns are cleared |
+| Disk prompt cache (`save_prompt_cache`) | ✅ Active | KV state for common system prompts is saved to disk and loaded on next server start — skips re-prefill of long system prompts |
+| KV reset on new conversation | ✅ Active | `rkllm_clear_kv_cache()` called when OpenWebUI starts a new chat window — frees NPU memory |
+| RAG uses `keep_history=0` | ✅ Correct | RAG always starts fresh so stale conversation context doesn't pollute retrieval answers |
+
+### What KV Cache Does NOT Do
+
+- **Asking the same question in a new chat is not faster.** Each new chat window does a full KV reset — there is no cross-conversation cache.
+- **Generation speed is unaffected.** KV cache only speeds up the prefill phase (reading the prompt). Token generation speed (tok/s) is fixed by the NPU clock and model size.
+- **The 57-second "Thought for 57s" in OpenWebUI is not cache-related.** That is Qwen3's built-in reasoning mode computing an internal chain of thought before answering. It runs at the same 13 tok/s as regular output — it's just generating a lot of reasoning tokens. Use `/no_think` at the start of your message to skip it for simple queries.
+
+### What RKLLM Does Not Expose (Current Limits)
+
+| Feature | Status | Notes |
+|---|---|---|
+| Prefix sharing across users | ❌ Not possible | Single NPU context — only one inference at a time |
+| Content-hash KV reuse | ❌ No SDK API | Would require hashing prompt prefixes and matching across conversations |
+| KV cache quantization | ❌ Not exposed | Would allow longer effective context at lower memory cost |
+| Partial cache invalidation | ❌ Not exposed | Can only clear full cache or preserve system prompt — no per-turn granularity |
+
+**Conclusion:** KV cache is being used to its full extent given what RKLLM v1.3.0 exposes. Future SDK versions may expose finer-grained control.
+
+### Reducing Inference Latency
+
+| Technique | Effect | How |
+|---|---|---|
+| `/no_think` prefix | Eliminates reasoning overhead (~30–60s on Qwen3) | Type `/no_think` before your message in OpenWebUI |
+| Shorter system prompts | Faster prefill on new conversations | Reduce system prompt length in OpenWebUI settings |
+| Keep conversations going | More turns benefit from KV cache | Avoid opening new chats for follow-up questions |
+| Use smaller models | Higher tok/s | Qwen3-1.7B (~13 tok/s) vs Phi-3-Mini (~7 tok/s) |
+
+---
+
 ## VL Model Evaluation
 
 We tested all available pre-converted VL models to find the best option for real-world OCR tasks (reading gas meters from phone photos). All models use the same 448×448 (or lower) vision encoder, which crushes high-resolution phone photos (14-15 MP) down to a tiny thumbnail — a fundamental bottleneck for OCR accuracy.
