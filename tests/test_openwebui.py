@@ -21,9 +21,9 @@ import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-DEFAULT_HOST = os.environ.get("OWUI_HOST", "192.168.2.180")
+DEFAULT_HOST = os.environ.get("OWUI_HOST", "localhost")
 DEFAULT_PORT = int(os.environ.get("OWUI_PORT", "3000"))
-API_KEY = os.environ.get("OWUI_API_KEY", "sk-owui-eae7cdfc8d566d50a2b9ac6f5e22d0913c01d057ec8a991e")
+API_KEY = os.environ["OWUI_API_KEY"]  # Required: set OWUI_API_KEY env var before running
 
 MODELS = [
     "qwen3-1.7b",

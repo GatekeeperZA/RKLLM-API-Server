@@ -3013,6 +3013,116 @@ The heuristic `if len(system_text) > 3000: enable_thinking = False` was intended
 
 ---
 
+### [FIXED `audit-2`] Hardcoded API keys committed to repository
+
+**Severity:** Critical  
+**Affects:** All versions before this audit — `tools/rkllm-hermes.service` and `tests/test_openwebui.py`
+
+`tools/rkllm-hermes.service` contained a live `API_SERVER_KEY` value hardcoded in an `Environment=` line. `tests/test_openwebui.py` contained a live Open WebUI session key as the default for `OWUI_API_KEY`. Both were committed to git history and readable by anyone with repo access.
+
+**Fix:** Service file now uses `EnvironmentFile=-/etc/rkllm-hermes.env` (mode 0600, root-owned). Test file now requires `OWUI_API_KEY` to be set as an environment variable — no default. Rotate any keys that were exposed.
+
+---
+
+### [FIXED `audit-2`] OWUI RAG used CPU sentence-transformers instead of rkllm-embed NPU service
+
+**Severity:** High  
+**Affects:** All Docker deployments before this audit
+
+`docker-compose.yml` configured Open WebUI to download and run `BAAI/bge-small-en-v1.5` inside the container for RAG embeddings, ignoring the `rkllm-embed` service already running on port 8001. This caused a vector space mismatch (RAG indexed with bge, direct embeddings used Qwen3-Embedding-0.6B) and wasted CPU on a task the NPU was already handling.
+
+**Fix:** `docker-compose.yml` now sets `RAG_EMBEDDING_ENGINE=openai` pointing to `http://host.docker.internal:8001/v1`, using the same Qwen3-Embedding-0.6B model for both RAG and direct embedding calls.
+
+---
+
+### [FIXED `audit-2`] NPU metrics poller used `sudo cat` — privilege escalation risk
+
+**Severity:** High  
+**Affects:** All versions before this audit using Prometheus metrics
+
+The NPU load metric poller executed `sudo /usr/bin/cat /sys/kernel/debug/rknpu/load` on every poll cycle. Granting passwordless `sudo cat` is a file-read primitive for any process running as the service user. The fallback `open()` path already worked for world-readable debugfs files.
+
+**Fix:** Removed the `sudo cat` path entirely. The `open()` fallback is now the only read method. If `rknpu` debugfs requires elevated access on your kernel, add a udev ACL rule instead.
+
+---
+
+### [FIXED `audit-2`] `/v1/lora/load` accepted arbitrary filesystem paths
+
+**Severity:** High  
+**Affects:** All versions before this audit on unauthenticated deployments
+
+The LoRA load endpoint accepted any file path from the request body and passed it to `rkllm_load_lora()` without validating it was inside the models directory. Any network client could use this as a filesystem existence probe or to attempt loading arbitrary files via the C library.
+
+**Fix:** Added `os.path.realpath()` check — path must be inside `MODELS_ROOT`. Returns HTTP 403 otherwise.
+
+---
+
+### [FIXED `audit-2`] `rkllm-embed.service` missing security hardening directives
+
+**Severity:** High  
+**Affects:** Users who deployed `tools/rkllm-embed.service` directly (not via `setup.sh`)
+
+The committed embed service file lacked `NoNewPrivileges`, `ProtectSystem`, `ProtectHome`, and `ReadWritePaths` directives that `setup.sh` generated. It also had inconsistent `RestartSec` (30s vs 15s in setup.sh) and `StartLimitBurst` values.
+
+**Fix:** Service file now includes full security hardening block matching setup.sh output, `RestartSec=15`, and the correct start limit values.
+
+---
+
+### [FIXED `audit-2`] `CONTEXT_COMPACTION_TOKEN_CAP=32000` exceeded qwen3-1.7b context window
+
+**Severity:** Medium  
+**Affects:** All Docker deployments before this audit using context compaction
+
+The compaction cap was set to 32,000 tokens but qwen3-1.7b (the compaction model) has a 4K–8K context window. Compaction summaries would be rejected or silently truncated.
+
+**Fix:** `CONTEXT_COMPACTION_TOKEN_CAP` reduced to `2048` — within the model's safe context window.
+
+---
+
+### [FIXED `audit-2`] RAG cache stored reasoning differently in streaming vs non-streaming paths
+
+**Severity:** Medium  
+**Affects:** Users with thinking-capable models (Qwen3) using RAG before this audit
+
+The streaming path stored `<think>reasoning</think>content` in the cache when reasoning was present. The non-streaming path always stored only `content`, discarding reasoning. A cache miss on the non-streaming path would return a response without reasoning; a subsequent miss on the streaming path would return one with it — inconsistent behaviour.
+
+**Fix:** Non-streaming path now stores `<think>reasoning</think>content` when reasoning is present, matching the streaming path.
+
+---
+
+### [FIXED `audit-2`] Title shortcircuit could intercept real user queries
+
+**Severity:** Low  
+**Affects:** Users sending messages containing words like "title", "concise", and "chat" before this audit
+
+The OWUI title-generation shortcircuit matched purely on keywords in the last user message. A real query like "Give me a concise title for this chat" would be intercepted and return the first 60 characters of the conversation instead of being sent to the model.
+
+**Fix:** Shortcircuit now also requires the OWUI task signature to be present in a system message before firing — it no longer triggers on user messages alone.
+
+---
+
+### [FIXED `audit-2`] `embed_api.py` embedding extraction used slow Python ctypes loop
+
+**Severity:** Medium  
+**Affects:** All embed service deployments before this audit
+
+The embedding callback extracted the final token's hidden state vector using a Python `for i in range(d)` loop over ctypes pointer indexing. For Qwen3-Embedding-0.6B (d=1024+), this ran entirely in Python inside the `_LOCK` critical section, blocking all concurrent embedding requests.
+
+**Fix:** Replaced with a single `np.frombuffer()` copy from a cast ctypes pointer — O(1) Python, O(d) C memcopy.
+
+---
+
+### [FIXED `audit-2`] `embed_api.py` missing null handle check and content length limit
+
+**Severity:** High  
+**Affects:** All embed service deployments before this audit
+
+`rkllm_init()` returning 0 with a null handle (NPU OOM) was not detected — subsequent `rkllm_run()` calls would segfault. Additionally, no `MAX_CONTENT_LENGTH` was set, allowing arbitrarily large embedding requests that would silently truncate at the model's 2048-token context limit.
+
+**Fix:** Null handle check added after `rkllm_init()`. `MAX_CONTENT_LENGTH = 1 MB` set on the Flask app.
+
+---
+
 ## Git Tags & Branches
 
 | Tag / Branch | Description |

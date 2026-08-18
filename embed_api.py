@@ -261,7 +261,8 @@ def _embed_callback(result_ptr, _userdata, state):
             n, d = lhl.num_tokens, lhl.embd_size
             # Last-token pooling: take the final token's hidden state row.
             start = (n - 1) * d
-            _cb_state.embed_vec = [lhl.hidden_states[start + i] for i in range(d)]
+            ptr = ctypes.cast(lhl.hidden_states, ctypes.POINTER(ctypes.c_float * (start + d)))
+            _cb_state.embed_vec = np.frombuffer(ptr.contents, dtype=np.float32)[start:start + d].copy()
     elif state == RKLLM_RUN_FINISH:
         if not hasattr(_cb_state, 'embed_vec'):
             _cb_state.embed_vec = None
@@ -369,6 +370,8 @@ class _ModelWrapper:
         )
         if ret != 0:
             raise RuntimeError(f'rkllm_init failed for {name} (ret={ret})')
+        if not self.handle:
+            raise RuntimeError(f'rkllm_init returned 0 but handle is null for {name} — NPU OOM?')
 
         self.loaded = True
         logger.info(f'{name} loaded in {time.time()-t0:.1f}s')
@@ -396,6 +399,7 @@ class _ModelWrapper:
         if self.loaded and self.handle:
             _lib.rkllm_destroy(self.handle)
             self.loaded = False
+            self.handle = ctypes.c_void_p(None)
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +492,7 @@ def _rerank_pair(query: str, document: str, instruction: str) -> float:
 # Flask application
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024  # 1 MB — sufficient for text embedding requests
 
 # ---------------------------------------------------------------------------
 # Prometheus metrics (optional — degrades gracefully if not installed)

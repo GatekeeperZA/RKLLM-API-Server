@@ -139,20 +139,13 @@ try:
 
     def _npu_metrics_poller():
         import re as _re
-        import subprocess as _sp
         _RKNPU = "/sys/kernel/debug/rknpu"
 
         def _read(fname):
             try:
-                return _sp.check_output(
-                    ["sudo", "/usr/bin/cat", f"{_RKNPU}/{fname}"],
-                    stderr=_sp.DEVNULL, timeout=2
-                ).decode()
+                return open(f"{_RKNPU}/{fname}").read()
             except Exception:
-                try:
-                    return open(f"{_RKNPU}/{fname}").read()
-                except Exception:
-                    return None
+                return None
 
         while True:
             raw = _read("load")
@@ -3533,6 +3526,7 @@ def health():
 @app.route('/chat/completions', methods=['POST'])
 def chat_completions():
     """OpenAI-compatible chat completions endpoint (streaming and non-streaming)."""
+    global VL_LAST_REQUEST_TIME
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return make_error_response("Request body must be a JSON object", 400, "invalid_request")
@@ -3832,7 +3826,16 @@ def chat_completions():
 
     # === SHORTCIRCUIT: Title generation ===
     # Open WebUI asks for a concise 3-5 word chat title.
-    _is_title_gen = (
+    # Require the OWUI task signature to be in the last-user-content AND in a
+    # system message — prevents false-positive on real user queries that happen
+    # to contain words like "title", "concise", or "chat".
+    _has_owui_sys = any(
+        any(sig in (m.get('content') or '').lower()
+            for sig in ('create a concise', 'emoji as a title', 'title for the prompt',
+                        'title for the chat', '3-5 word'))
+        for m in messages if m.get('role') == 'system'
+    )
+    _is_title_gen = _has_owui_sys and (
         ('title' in _luc_lower and 'chat' in _luc_lower
          and ('3-5 word' in _luc_lower or 'concise' in _luc_lower))
         or 'emoji as a title' in _luc_lower
@@ -3949,7 +3952,6 @@ def chat_completions():
                 return make_error_response(f"Failed to load VL model '{vl_name}'", 500)
             update_request_activity()
             with PROCESS_LOCK:
-                global VL_LAST_REQUEST_TIME
                 VL_LAST_REQUEST_TIME = time.time()
 
             # --- Multi-image support: encode each image, concatenate embeddings ---
@@ -4941,7 +4943,7 @@ def _generate_complete(prompt, request_id, model_name, created,
             if rag_cache_info and generation_clean and cleaned_content:
                 cache_text = cleaned_content
                 if reasoning_content:
-                    cache_text = cleaned_content
+                    cache_text = f"<think>{reasoning_content}</think>{cleaned_content}"
                 _model, _question, _prompt = rag_cache_info
                 _rag_cache_put(_model, _question, _prompt, cache_text)
                 logger.info(f"[{request_id}] RAG cache STORE ({len(cache_text)} chars)")
@@ -5089,6 +5091,8 @@ def lora_load():
 
     if not path or not name:
         return make_error_response("'path' and 'name' are required", 400, "invalid_request")
+    if not os.path.realpath(path).startswith(os.path.realpath(MODELS_ROOT)):
+        return make_error_response("Path must be inside the models directory", 403, "forbidden")
     if not os.path.isfile(path):
         return make_error_response(f"Adapter file not found: {path}", 404, "not_found")
 

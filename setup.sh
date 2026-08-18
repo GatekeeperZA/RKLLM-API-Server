@@ -311,6 +311,7 @@ if [[ "$LIB_INSTALLED" == false ]]; then
             # Directory exists but missing expected structure — might be incomplete
             warn "rknn-llm directory exists at $RKNN_LLM_DIR but missing rkllm-runtime/"
             warn "Re-cloning..."
+            [[ "$RKNN_LLM_DIR" != */rknn-llm ]] && { error "Refusing to rm -rf unrecognized dir: $RKNN_LLM_DIR"; exit 1; }
             rm -rf "$RKNN_LLM_DIR"
         fi
         info "Cloning rknn-llm repository..."
@@ -767,7 +768,7 @@ else
     info "Creating Hermes Agent virtual environment (Python 3.11)..."
     "$PYTHON311" -m venv "$HERMES_VENV_DIR"
     "$HERMES_VENV_DIR/bin/pip" install --quiet --upgrade pip
-    "$HERMES_VENV_DIR/bin/pip" install --quiet "hermes-agent>=0.19.0"
+    "$HERMES_VENV_DIR/bin/pip" install --quiet "hermes-agent>=0.19.0,<1.0"
     success "hermes-agent installed"
 fi
 
@@ -928,12 +929,10 @@ Group=$(id -gn)
 WorkingDirectory=$INSTALL_DIR
 
 Environment="PATH=$HERMES_VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=-/etc/rkllm-hermes.env
 Environment="API_SERVER_ENABLED=true"
-Environment="API_SERVER_KEY=${HERMES_API_KEY}"
 Environment="API_SERVER_HOST=0.0.0.0"
 Environment="API_SERVER_PORT=${HERMES_PORT}"
-$([ -n "${OPENROUTER_API_KEY}" ] && echo "Environment=\"OPENROUTER_API_KEY=${OPENROUTER_API_KEY}\"")
-$([ -n "${GROQ_API_KEY}" ] && echo "Environment=\"GROQ_API_KEY=${GROQ_API_KEY}\"")
 
 ExecStart=$HERMES_BIN gateway
 
@@ -953,6 +952,22 @@ EOF
     sudo systemctl daemon-reload
     sudo systemctl enable "$HERMES_SERVICE_NAME"
     success "Hermes gateway service created and enabled"
+fi
+
+# --- Write secrets to /etc/rkllm-hermes.env (mode 0600, root-owned) ---
+# Keeps API keys out of the unit file (visible via systemctl show) and git.
+if [[ ! -f /etc/rkllm-hermes.env ]]; then
+    info "Writing /etc/rkllm-hermes.env with service secrets..."
+    {
+        echo "API_SERVER_KEY=${HERMES_API_KEY}"
+        [ -n "${OPENROUTER_API_KEY}" ] && echo "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}"
+        [ -n "${GROQ_API_KEY}" ] && echo "GROQ_API_KEY=${GROQ_API_KEY}"
+    } | sudo tee /etc/rkllm-hermes.env > /dev/null
+    sudo chmod 600 /etc/rkllm-hermes.env
+    sudo chown root:root /etc/rkllm-hermes.env
+    success "/etc/rkllm-hermes.env written (mode 0600)"
+else
+    success "/etc/rkllm-hermes.env already exists"
 fi
 
 echo ""

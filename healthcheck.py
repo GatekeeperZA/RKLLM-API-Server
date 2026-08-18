@@ -10,8 +10,10 @@ if bind.startswith('['):
     port = bind[bracket_end + 2:]
 else:
     host, port = bind.rsplit(':', 1)
-if host in ('0.0.0.0', '::'):
+if host == '0.0.0.0':
     host = '127.0.0.1'
+elif host == '::':
+    host = '[::1]'
 
 try:
     url = f'http://{host}:{port}/health'

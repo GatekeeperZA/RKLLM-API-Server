@@ -15,7 +15,12 @@ Environment=EMBED_MODEL_PATH=/home/armbian/models/Qwen3-Embedding-0.6B/Qwen3-Emb
 Environment=RERANK_MODEL_PATH=/home/armbian/models/Qwen3-Reranker-0.6B/Qwen3-Reranker-0.6B-rk3588-w8a8-opt-1-hybrid-ratio-0.5.rkllm
 ExecStart=/home/armbian/rkllm_api/.venv/bin/gunicorn embed_api:app --bind 0.0.0.0:8001 --workers 1 --timeout 600 --worker-class gthread --threads 2
 Restart=on-failure
-RestartSec=30
+RestartSec=15
+LimitNOFILE=65536
+ProtectHome=read-only
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/armbian/rkllm_api /tmp
 
 [Install]
 WantedBy=multi-user.target

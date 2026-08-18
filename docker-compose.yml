@@ -36,9 +36,17 @@ services:
       # -----------------------------------------------------------------
       # RAG Pipeline
       # -----------------------------------------------------------------
-      # Embedding & Reranking
-      - RAG_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
-      - RAG_RERANKING_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+      # Embedding & Reranking — routed to rkllm-embed (NPU, port 8001)
+      # Uses same Qwen3-Embedding-0.6B model as the embed service so RAG and
+      # direct embedding calls share the same vector space.
+      - RAG_EMBEDDING_ENGINE=openai
+      - RAG_EMBEDDING_MODEL=Qwen3-Embedding-0.6B
+      - RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8001/v1
+      - RAG_OPENAI_API_KEY=unused
+      - RAG_RERANKING_MODEL=Qwen3-Reranker-0.6B
+      - RAG_RERANKING_ENGINE=openai
+      - RAG_RERANKING_OPENAI_API_BASE_URL=http://host.docker.internal:8001/v1
+      - RAG_RERANKING_OPENAI_API_KEY=unused
       - RAG_EMBEDDING_BATCH_SIZE=10
       - ENABLE_ASYNC_EMBEDDING=True
 
@@ -127,7 +135,7 @@ services:
       - ENABLE_CONTEXT_COMPACTION=True
       - CONTEXT_COMPACTION_MODEL=qwen3-1.7b
       - CONTEXT_COMPACTION_TOKEN_THRESHOLD=3000
-      - CONTEXT_COMPACTION_TOKEN_CAP=32000
+      - CONTEXT_COMPACTION_TOKEN_CAP=2048
       - CONTEXT_COMPACTION_RETENTION_PERCENTAGE=30
 
       # -----------------------------------------------------------------
