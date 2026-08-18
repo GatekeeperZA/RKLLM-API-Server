@@ -3250,7 +3250,7 @@ _monitor_thread.start()
 # =============================================================================
 
 
-_SHUTDOWN_DONE = threading.Event()
+_SHUTDOWN_DONE = Event()
 
 
 def shutdown():
