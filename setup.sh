@@ -792,17 +792,20 @@ else
 fi
 
 # --- Write Hermes config to ~/.hermes/config.yaml with real API key ---
-# We use Python to write YAML so the API key embeds correctly without heredoc expansion issues.
-# The repo's hermes/config.yaml is a reference; the live config lives in ~/.hermes/config.yaml.
+# Read env vars inside Python (os.environ.get) so special chars in keys are safe.
+# Quoted 'PYEOF' delimiter prevents shell expansion of $VARIABLES inside the block.
 HERMES_DOT_DIR="$HOME/.hermes"
 mkdir -p "$HERMES_DOT_DIR"
 info "Writing Hermes config to $HERMES_DOT_DIR/config.yaml"
-"$HERMES_VENV_DIR/bin/python3" << PYEOF
-import yaml, os
+"$HERMES_VENV_DIR/bin/python3" << 'PYEOF'
+import yaml, os, sys
+
+openrouter_key = os.environ.get('OPENROUTER_API_KEY', '')
+groq_key       = os.environ.get('GROQ_API_KEY', '')
+hermes_port    = int(os.environ.get('HERMES_PORT', '8642'))
+hermes_api_key = os.environ.get('HERMES_API_KEY', '')
 
 providers = {}
-openrouter_key = '${OPENROUTER_API_KEY}'
-groq_key = '${GROQ_API_KEY}'
 if openrouter_key:
     providers['openrouter'] = {
         'base_url': 'https://openrouter.ai/api/v1',
@@ -825,7 +828,19 @@ elif groq_key:
     default_provider = 'groq'
     default_model = 'llama-3.3-70b-versatile'
 else:
-    raise RuntimeError('No cloud API keys provided. Set OPENROUTER_API_KEY or GROQ_API_KEY.')
+    # No cloud keys — write a placeholder config so setup completes cleanly.
+    # Edit ~/.hermes/config.yaml and set OPENROUTER_API_KEY or GROQ_API_KEY to activate.
+    print('WARNING: No cloud API keys set (OPENROUTER_API_KEY / GROQ_API_KEY).')
+    print('         Hermes will not start until a provider is configured.')
+    print('         Edit ~/.hermes/config.yaml after adding your key.')
+    placeholder = {
+        '_placeholder': True,
+        '_instructions': 'Set OPENROUTER_API_KEY or GROQ_API_KEY and re-run setup.sh',
+    }
+    out = os.path.expanduser('~/.hermes/config.yaml')
+    with open(out, 'w') as f:
+        yaml.dump(placeholder, f, default_flow_style=False)
+    sys.exit(0)
 
 fallback_providers = []
 if openrouter_key:
@@ -851,8 +866,8 @@ config = {
     'api_server': {
         'enabled': True,
         'host': '0.0.0.0',
-        'port': int('${HERMES_PORT}'),
-        'key': '${HERMES_API_KEY}',
+        'port': hermes_port,
+        'key': hermes_api_key,
     },
     # Disable heavy toolsets — keeps system prompt under ~4K tokens (Groq payload limit).
     # Enabled: web, memory, skills, session_search, clarify, delegation

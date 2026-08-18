@@ -376,7 +376,7 @@ RAG_CACHE_TTL = 300
 RAG_CACHE_MAX_ENTRIES = 50
 
 # Request tracking
-REQUEST_STALE_TIMEOUT = 30   # clear abandoned SSE streams quickly (e.g. Hermes client disconnect)
+REQUEST_STALE_TIMEOUT = 120  # must exceed worst-case model load time (~90s on NPU cold-start)
 
 # Monitoring
 MONITOR_INTERVAL = 10
@@ -1609,7 +1609,7 @@ class RKLLMWrapper:
             param.img_start = b""
             param.img_end = b""
             param.img_content = b""
-            param.extend_param.base_domain_id = 1
+            param.extend_param.base_domain_id = 1  # domain 1 for all text models (same as VL); safe because load_model() calls unload_current() before init and REQUEST_STALE_TIMEOUT prevents concurrent loads
         param.extend_param.embed_flash = 1
         param.extend_param.n_batch = 1
         param.extend_param.use_cross_attn = 0
@@ -2838,11 +2838,18 @@ def build_prompt(messages, model_name):
                 logger.info("Home Assistant request detected — thinking disabled for speed")
 
         # --- Agent framework detection (Hermes Agent, AutoGen, etc.) ---
-        # Agent frameworks send very long system prompts with tool definitions.
+        # Agent frameworks inject long system prompts with tool schemas.
         # Thinking mode wastes context tokens and causes timeouts for these callers.
-        if enable_thinking and system_text and len(system_text) > 3000:
+        # Use content-based markers, not length alone, to avoid misfiring on long user prompts.
+        _agent_markers = ('<tools>', '<tool_call>', '"type": "function"', 'function_calls',
+                          '## Tools\n', '# Tools\n', 'tool_choice')
+        _is_agent_fw = (system_text and len(system_text) > 3000
+                        and any(m in system_text for m in _agent_markers))
+        if enable_thinking and _is_agent_fw:
             enable_thinking = False
-            logger.info(f"Agent framework detected (system prompt {len(system_text)} chars) — thinking disabled")
+            logger.info(f"Agent framework detected (system prompt {len(system_text)} chars, tool markers present) — thinking disabled")
+        elif enable_thinking and system_text and len(system_text) > 3000:
+            logger.debug(f"Long system prompt ({len(system_text)} chars) without tool markers — thinking kept enabled")
 
     logger.debug(f"Prompt built ({len(prompt)} chars, ctx={ctx}, "
                  f"rag={'yes' if rag_parts else 'no'})")
@@ -3243,10 +3250,14 @@ _monitor_thread.start()
 # =============================================================================
 
 
+_SHUTDOWN_DONE = threading.Event()
+
+
 def shutdown():
     """Clean shutdown - destroy text model, VL model, stop monitor."""
-    if SHUTDOWN_EVENT.is_set():
-        return  # Already shutting down (atexit + signal race)
+    if _SHUTDOWN_DONE.is_set():
+        return  # Guard against atexit + model_monitor double-call
+    _SHUTDOWN_DONE.set()
     logger.info("Shutting down RKLLM API...")
     SHUTDOWN_EVENT.set()
     ABORT_EVENT.set()
@@ -3895,8 +3906,13 @@ def chat_completions():
     # can't fit 39 tool definitions alongside conversation history).
     if _has_tools and config.get('disable_tools'):
         _has_tools = False
-        messages = messages[1:]  # remove the injected tool system prompt (always first)
-        logger.info(f"[{request_id}] Tool injection stripped — '{name}' has disable_tools=true")
+        # The server always injects a tool system prompt at messages[0] when _has_tools=True
+        # (line ~3610). Verify before stripping to avoid removing a legitimate user message.
+        if messages and messages[0].get('role') == 'system' and messages[0].get('content', '').startswith('# Tools\n'):
+            messages = messages[1:]
+            logger.info(f"[{request_id}] Tool injection stripped — '{name}' has disable_tools=true")
+        else:
+            logger.warning(f"[{request_id}] disable_tools=true but messages[0] is not the injected tool prompt — skipping strip")
 
     # Atomic check-and-set: reject if another generation is in progress
     if not try_start_request(request_id, name):
@@ -5145,7 +5161,8 @@ def ollama_version():
 @app.route('/api/tags', methods=['GET'])
 def ollama_tags():
     """List available models in Ollama format."""
-    models_list = [_ollama_model_entry(n) for n in MODELS]
+    models_list = [_ollama_model_entry(n) for n, cfg in MODELS.items()
+                   if not cfg.get('skip_chat')]
     return jsonify({"models": models_list})
 
 
@@ -5232,25 +5249,36 @@ def ollama_chat():
         environ['wsgi.input'] = BytesIO(body_bytes)
         environ['CONTENT_LENGTH'] = str(len(body_bytes))
         environ['CONTENT_TYPE'] = 'application/json'
-        with app.request_context(environ):
+        # Push context manually so it stays alive for the full generator iteration.
+        # A `with` block would pop the context as soon as chat_completions() returns,
+        # but oai_resp.response is a lazy generator that yields outside that scope.
+        ctx = app.request_context(environ)
+        ctx.push()
+        try:
             oai_resp = chat_completions()
-        for line in oai_resp.response:
-            if isinstance(line, bytes):
-                line = line.decode()
-            line = line.strip()
-            if not line.startswith('data:'):
-                continue
-            payload = line[5:].strip()
-            if payload == '[DONE]':
-                yield json.dumps({"model": model, "created_at": "", "message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}) + '\n'
-                return
-            try:
-                chunk = json.loads(payload)
-                delta = (chunk.get('choices') or [{}])[0].get('delta') or {}
-                content = delta.get('content', '')
-                yield json.dumps({"model": model, "created_at": "", "message": {"role": "assistant", "content": content}, "done": False}) + '\n'
-            except Exception:
-                continue
+        except Exception:
+            ctx.pop()
+            return
+        try:
+            for line in oai_resp.response:
+                if isinstance(line, bytes):
+                    line = line.decode()
+                line = line.strip()
+                if not line.startswith('data:'):
+                    continue
+                payload = line[5:].strip()
+                if payload == '[DONE]':
+                    yield json.dumps({"model": model, "created_at": "", "message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}) + '\n'
+                    return
+                try:
+                    chunk = json.loads(payload)
+                    delta = (chunk.get('choices') or [{}])[0].get('delta') or {}
+                    content = delta.get('content', '')
+                    yield json.dumps({"model": model, "created_at": "", "message": {"role": "assistant", "content": content}, "done": False}) + '\n'
+                except Exception:
+                    continue
+        finally:
+            ctx.pop()
 
     return Response(stream_with_context(_ollama_stream()), mimetype='application/x-ndjson')
 

@@ -1,9 +1,9 @@
 [Unit]
 Description=RKLLM Embed API (embeddings + reranker on port 8001)
 After=network.target rkllm-api.service
-# Allow many restarts — embed may wait for rkllm-api to free NPU; 30s delay between retries
-StartLimitIntervalSec=600
-StartLimitBurst=40
+# 5 restarts in 300s; 30s RestartSec means ~150s total before systemd gives up
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
