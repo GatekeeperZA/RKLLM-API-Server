@@ -488,11 +488,31 @@ sudo bash fix_freq_rk3576.sh
 
 Ready-to-run `.rkllm` models converted by the author for RK3588 NPU are available on HuggingFace:
 
+**Text / Instruct models:**
+
 | Model | Parameters | Quant | Context | Speed | RAM | Thinking | Link |
 |-------|-----------|-------|---------|-------|-----|----------|------|
-| **Qwen3-1.7B** | 1.7B | w8a8 | 4,096 | ~13.6 tok/s | ~2 GB | ✅ Yes | [Download](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) |
-| **Qwen2.5-1.5B-Instruct** | 1.5B | w8a8 | 8,192 | ~14 tok/s | ~2.1 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3) |
+| **Qwen3.5-0.8B** | 0.8B | w8a8 | 8,192 | — | ~1.5 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Qwen3.5-0.8B-RKLLM-v1.2.3) |
 | **xLAM-1b-fc-r** | 1.1B | w8a8 | 8,192 | ~16 tok/s | ~1.6 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/xLAM-1b-fc-r-RKLLM-v1.2.3) |
+| **Qwen3-1.7B** | 1.7B | w8a8 | 4,096 | ~13.6 tok/s | ~2 GB | ✅ Yes | [Download](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) |
+| **Llama-3.2-3B-Instruct** | 3B | w8a8 | 8,192 | — | ~3.5 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Llama-3.2-3B-Instruct-RKLLM-v1.2.3) |
+| **Qwen3-4B-Instruct-2507** | 4B | w8a8 | 16,384 | — | ~5.5 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Qwen3-4B-Instruct-2507-RKLLM-v1.2.3) |
+| ~~Qwen2.5-1.5B-Instruct~~ | 1.5B | w8a8 | 8,192 | ~14 tok/s | ~2.1 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3) *(deprecated — superseded by Qwen3-1.7B)* |
+
+**Vision-Language models (VLM):**
+
+| Model | Parameters | Quant | Type | RAM | Link |
+|-------|-----------|-------|------|-----|------|
+| **Qwen3-VL-2B-Instruct** | 2B | w8a8 | VLM | ~3 GB | [Download](https://huggingface.co/GatekeeperZA/Qwen3-VL-2B-Instruct-RKLLM-v1.2.3) |
+| **InternVL3.5-4B-Instruct** | 4B | w8a8 | VLM | ~5.5 GB | [Download](https://huggingface.co/GatekeeperZA/InternVL3.5-4B-Instruct-RKLLM-v1.2.3) |
+| **Qwen3-VL-4B-Instruct** | 4B | w8a8 | VLM | ~5.5 GB | [Download](https://huggingface.co/GatekeeperZA/Qwen3-VL-4B-Instruct-RKLLM-v1.2.3) |
+
+**Retrieval / Embedding models:**
+
+| Model | Parameters | Quant | Type | RAM | Link |
+|-------|-----------|-------|------|-----|------|
+| **Qwen3-Embedding-0.6B** | 0.6B | w8a8 | Embedding | ~1 GB | [Download](https://huggingface.co/GatekeeperZA/Qwen3-Embedding-0.6B-RKLLM-v1.2.3) |
+| **Qwen3-Reranker-0.6B** | 0.6B | w8a8 | Reranker | ~1 GB | [Download](https://huggingface.co/GatekeeperZA/Qwen3-Reranker-0.6B-RKLLM-v1.2.3) |
 
 > Browse all models: **[huggingface.co/GatekeeperZA](https://huggingface.co/GatekeeperZA)**
 
