@@ -127,6 +127,8 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **`stream_options.include_usage`** — streaming token counts per OpenAI spec
 - **`system_fingerprint`** in all responses
 - **`x-ratelimit-*` headers** — `limit-requests`, `limit-tokens`, `remaining-requests`, `remaining-tokens`, `reset-requests` on all completions responses
+- **Request queuing** — concurrent requests wait up to `RKLLM_QUEUE_TIMEOUT` seconds (default 30s) instead of getting an immediate 503. `x-queue-wait-seconds` header is returned on queued responses
+- **Tool call streaming** — role delta is emitted immediately when tool calling is active, keeping the connection alive during silent buffering
 - **`/ready` / `/v1/ready`** — readiness probe (503 when no model loaded or busy)
 - **`/v1/tokenize`** — BPE token estimation without inference
 - **`/v1/count_tokens`** — Anthropic SDK alias for token counting
@@ -371,6 +373,7 @@ docker compose up -d
 | `GUNICORN_THREADS` | `4` | Request handler threads |
 | `GUNICORN_TIMEOUT` | `300` | Request timeout in seconds |
 | `GUNICORN_BIND` | `0.0.0.0:8000` | Bind address |
+| `RKLLM_QUEUE_TIMEOUT` | `30` | Seconds a queued request waits for the NPU slot before returning 503 |
 
 **Check health:**
 ```bash
@@ -2118,6 +2121,7 @@ Only specified fields are overridden; unset fields use the family profile defaul
 | `MONITOR_INTERVAL` | 10s | Health check / idle monitoring frequency |
 | `IDLE_UNLOAD_TIMEOUT` | 300s | Auto-unload text model after idle (0 to disable) |
 | `VL_IDLE_UNLOAD_TIMEOUT` | 300s | Auto-unload VL model after idle (0 to disable) |
+| `RKLLM_QUEUE_TIMEOUT` | 30s | How long a queued request waits for the NPU slot |
 
 ### Environment Variables
 
