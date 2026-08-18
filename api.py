@@ -828,6 +828,16 @@ if os.path.exists(MODELS_ROOT):
             "capabilities": capabilities,
             "sampling": sampling,
         }
+        # Read extra flags from model_config.json (disable_tools, etc.)
+        _mcfg_path = os.path.join(root, 'model_config.json')
+        if os.path.isfile(_mcfg_path):
+            try:
+                with open(_mcfg_path) as _f:
+                    _mcfg = json.load(_f)
+                if _mcfg.get('disable_tools'):
+                    config['disable_tools'] = True
+            except Exception:
+                pass
 
         if vision_encoder_path and vl_config:
             config["vision_encoder_path"] = vision_encoder_path
@@ -3870,6 +3880,13 @@ def chat_completions():
 
     if config is None:
         return make_error_response(f"Model '{requested_model}' not found", 404, "not_found")
+
+    # Strip tool injection for models that opt out (e.g. small context models that
+    # can't fit 39 tool definitions alongside conversation history).
+    if _has_tools and config.get('disable_tools'):
+        _has_tools = False
+        messages = messages[1:]  # remove the injected tool system prompt (always first)
+        logger.info(f"[{request_id}] Tool injection stripped — '{name}' has disable_tools=true")
 
     # Atomic check-and-set: reject if another generation is in progress
     if not try_start_request(request_id, name):
