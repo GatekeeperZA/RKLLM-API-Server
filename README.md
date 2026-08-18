@@ -373,7 +373,7 @@ docker compose up -d
 | `GUNICORN_THREADS` | `4` | Request handler threads |
 | `GUNICORN_TIMEOUT` | `300` | Request timeout in seconds |
 | `GUNICORN_BIND` | `0.0.0.0:8000` | Bind address |
-| `RKLLM_QUEUE_TIMEOUT` | `30` | Seconds a queued request waits for the NPU slot before returning 503 |
+| `RKLLM_QUEUE_TIMEOUT` | `240` | Seconds a queued request waits for the NPU slot before returning 503 |
 
 **Check health:**
 ```bash
@@ -2121,7 +2121,7 @@ Only specified fields are overridden; unset fields use the family profile defaul
 | `MONITOR_INTERVAL` | 10s | Health check / idle monitoring frequency |
 | `IDLE_UNLOAD_TIMEOUT` | 300s | Auto-unload text model after idle (0 to disable) |
 | `VL_IDLE_UNLOAD_TIMEOUT` | 300s | Auto-unload VL model after idle (0 to disable) |
-| `RKLLM_QUEUE_TIMEOUT` | 30s | How long a queued request waits for the NPU slot |
+| `RKLLM_QUEUE_TIMEOUT` | 240s | How long a queued request waits for the NPU slot |
 
 ### Environment Variables
 
