@@ -1,0 +1,62 @@
+# =============================================================================
+# Hermes Agent — configuration for RKLLM local API
+# =============================================================================
+# Docs: https://hermes-agent.nousresearch.com/docs
+#
+# This config points Hermes Agent at the local Qwen3 inference server
+# (api.py on port 8000) and exposes an OpenAI-compatible gateway on
+# port 8642 so OpenWebUI can use it as a selectable model.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# LLM backend — our local OpenAI-compatible API
+# ---------------------------------------------------------------------------
+providers:
+  local:
+    base_url: "http://127.0.0.1:8000/v1"
+    api_key: "na"
+    request_timeout_seconds: 300
+
+model:
+  provider: "local"
+  model: "qwen3-4b"          # change to qwen3-1.7b for speed, qwen3-14b for quality
+  max_context_tokens: 8192   # cap to prevent fallback overflow (Groq limit is 12k)
+
+# ---------------------------------------------------------------------------
+# Auxiliary providers — vision tasks routed to local VLM
+# ---------------------------------------------------------------------------
+auxiliary:
+  vision:
+    provider: "local"
+    model: "qwen3-vl-4b"    # local VLM on port 8000; fallback: internvl3.5-4b
+
+# ---------------------------------------------------------------------------
+# Gateway / API server — exposes Hermes Agent to OpenWebUI on port 8642
+# ---------------------------------------------------------------------------
+api_server:
+  enabled: true
+  host: "0.0.0.0"            # bind all interfaces so OWUI (Docker) can reach it
+  port: 8642
+  key: "${HERMES_API_KEY}"   # loaded from hermes/.env
+
+# ---------------------------------------------------------------------------
+# Memory — use built-in FTS5 full-text search (no embedding service needed)
+# ---------------------------------------------------------------------------
+memory:
+  provider: "fts5"           # SQLite FTS5, zero extra deps
+  max_results: 10
+
+# ---------------------------------------------------------------------------
+# Tools — enable the core agent toolset
+# ---------------------------------------------------------------------------
+tools:
+  terminal: true             # shell command execution
+  file_ops: true             # read/write files
+  web_search: true           # web search via public APIs
+  memory_read: true
+  memory_write: true
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+log_level: "INFO"

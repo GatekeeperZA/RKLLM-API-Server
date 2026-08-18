@@ -492,7 +492,6 @@ Ready-to-run `.rkllm` models converted by the author for RK3588 NPU are availabl
 
 | Model | Parameters | Quant | Context | Speed | RAM | Thinking | Link |
 |-------|-----------|-------|---------|-------|-----|----------|------|
-| **Qwen3.5-0.8B** | 0.8B | w8a8 | 8,192 | — | ~1.5 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Qwen3.5-0.8B-RKLLM-v1.2.3) |
 | **xLAM-1b-fc-r** | 1.1B | w8a8 | 8,192 | ~16 tok/s | ~1.6 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/xLAM-1b-fc-r-RKLLM-v1.2.3) |
 | **Qwen3-1.7B** | 1.7B | w8a8 | 4,096 | ~13.6 tok/s | ~2 GB | ✅ Yes | [Download](https://huggingface.co/GatekeeperZA/Qwen3-1.7B-RKLLM-v1.2.3) |
 | **Llama-3.2-3B-Instruct** | 3B | w8a8 | 8,192 | — | ~3.5 GB | ❌ No | [Download](https://huggingface.co/GatekeeperZA/Llama-3.2-3B-Instruct-RKLLM-v1.2.3) |
@@ -2759,10 +2758,11 @@ curl -X DELETE http://localhost:8000/v1/lora/my-adapter
 
 ```
 Open WebUI ──► Hermes Gateway (port 8642) ──► Nemotron 550B (OpenRouter free)
-                                         └──► llama-3.3-70b (Groq free, fallback)
+                                         ├──► llama-3.3-70b (Groq free, fallback)
+                                         └──► qwen3-vl-4b (local NPU, vision tasks)
 ```
 
-When a user selects **Hermes Agent** in Open WebUI, requests go to the Hermes gateway instead of the RKLLM API server. Hermes runs its autonomous agent loop — searching the web, using tools, maintaining memory — powered by cloud LLMs. Local NPU models are available directly in OWUI for fast single-turn chat; Hermes requires ≥64K context which exceeds what the NPU models support.
+When a user selects **Hermes Agent** in Open WebUI, requests go to the Hermes gateway instead of the RKLLM API server. Hermes runs its autonomous agent loop — searching the web, using tools, maintaining memory — powered by cloud LLMs. Vision tasks (image analysis) are routed to the local `qwen3-vl-4b` NPU model via the `auxiliary.vision` provider. Local NPU models are available directly in OWUI for fast single-turn chat; Hermes requires ≥64K context which exceeds what the NPU models support.
 
 ### Provider Fallback Chain
 
@@ -2804,6 +2804,10 @@ providers:
     api_key: "${GROQ_API_KEY}"
     base_url: "https://api.groq.com/openai/v1"
     request_timeout_seconds: 60
+  local:
+    base_url: "http://127.0.0.1:8000/v1"
+    api_key: "na"
+    request_timeout_seconds: 300
 
 model:
   provider: openrouter
@@ -2817,6 +2821,12 @@ fallback_providers:
   - provider: groq
     model: llama-3.3-70b-versatile
     key_env: GROQ_API_KEY
+
+# Vision tasks routed to local VLM — avoids cloud roundtrip for image analysis
+auxiliary:
+  vision:
+    provider: "local"
+    model: "qwen3-vl-4b"
 
 api_server:
   enabled: true
@@ -2847,6 +2857,12 @@ Users see **hermes-agent** in the model dropdown alongside `qwen3-1.7b`, `qwen3-
 | Response time | ~2-5s | ~10-30s (cloud roundtrip) |
 | Privacy | Fully local | Cloud LLM sees queries |
 | Offline | ✅ Yes | ❌ Requires cloud connection |
+
+### Service Notes
+
+- **`StartLimitIntervalSec` / `StartLimitBurst`** must be in the `[Unit]` section of the systemd unit file — not `[Service]`. They are silently ignored in `[Service]` and the service will restart without limit. The `rkllm-hermes.service` included in this repo has the correct placement.
+- **`rkllm-embed.service`** depends on `rkllm-api.service` starting first (shared NPU memory). `After=rkllm-api.service` is set, and `RestartSec=30` gives the NPU time to free before a restart attempt.
+- **Multiple system messages** from Open WebUI pipelines are silently concatenated by `api.py` — this is expected behavior, not an error.
 
 ### Service Management
 

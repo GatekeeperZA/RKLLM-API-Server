@@ -2459,7 +2459,7 @@ def build_prompt(messages, model_name):
                 logger.warning(f"Unknown message role '{role}' — treating as user message")
                 conversation.append(('user', content))
     if len(system_parts) > 1:
-        logger.warning(f"Multiple system messages ({len(system_parts)}) — concatenating")
+        logger.debug(f"Multiple system messages ({len(system_parts)}) — concatenating")
     system_text = "\n\n".join(system_parts)
 
     # --- /no_think soft-switch: strip prefix from the latest user message ---

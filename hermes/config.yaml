@@ -48,13 +48,17 @@ memory:
 
 # Disabled toolsets — keeps system prompt under ~4K tokens (Groq payload limit)
 # Enabled: web, memory, skills, session_search, clarify, delegation
+auxiliary:
+  vision:
+    provider: "local"
+    model: "qwen3-vl-4b"    # local VLM on port 8000; falls back to internvl3.5-4b
+
 agent:
   disabled_toolsets:
     - browser
     - terminal
     - file
     - code_execution
-    - vision
     - video
     - image_gen
     - video_gen

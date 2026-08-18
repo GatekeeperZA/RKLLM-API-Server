@@ -1,0 +1,31 @@
+[Unit]
+Description=Hermes Agent Gateway (OpenWebUI agent model on port 8642)
+After=network.target rkllm-api.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=armbian
+Group=armbian
+WorkingDirectory=/home/armbian/rkllm_api
+
+Environment=PATH=/home/armbian/rkllm_api/.venv-hermes/bin:/usr/local/bin:/usr/bin:/bin
+Environment=API_SERVER_ENABLED=true
+Environment=API_SERVER_KEY=1c1a0f07b672d892391d47574faff8c14aae59837ff16969975f6bcf54d2f9b1
+Environment=API_SERVER_HOST=0.0.0.0
+Environment=API_SERVER_PORT=8642
+
+ExecStart=/home/armbian/rkllm_api/.venv-hermes/bin/hermes gateway
+
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+ProtectHome=no
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/armbian/rkllm_api /tmp /home/armbian/.hermes
+
+[Install]
+WantedBy=multi-user.target
