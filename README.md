@@ -47,6 +47,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - [Ollama API Compatibility](#ollama-api-compatibility)
 - [LoRA Hot-Swap](#lora-hot-swap)
 - [Hermes Agent Integration](#hermes-agent-integration)
+- [Known Issues & Fixes](#known-issues--fixes)
 - [Git Tags & Branches](#git-tags--branches)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
@@ -2890,6 +2891,111 @@ Two sub-2B NPU models have been converted for fast local tool calling:
 | **Qwen2.5-1.5B-Instruct** | ~40-50% | ~14 tok/s | General instruct + light tool use |
 
 Both models are on HuggingFace ([xLAM](https://huggingface.co/GatekeeperZA/xLAM-1b-fc-r-RKLLM-v1.2.3) · [Qwen2.5-1.5B](https://huggingface.co/GatekeeperZA/Qwen2.5-1.5B-Instruct-RKLLM-v1.2.3)) and auto-discovered by the RKLLM API server. For production tool calling, use the cloud-backed Hermes Agent — the sub-2B local models are best suited to simple, well-structured function calls.
+
+---
+
+## Known Issues & Fixes
+
+Bugs found during code audits, with the commit where each was resolved. Listed so other users running this codebase can identify whether they are affected and apply the fix manually if they are on an older commit.
+
+---
+
+### [FIXED `ec3cfc6`] Shutdown cleanup skipped on SIGTERM/SIGINT — NPU handle never released
+
+**Severity:** Critical  
+**Affects:** All versions before commit `ec3cfc6`
+
+`shutdown()` used `SHUTDOWN_EVENT.is_set()` as a double-call guard. The signal handler sets `SHUTDOWN_EVENT` first, then delegates cleanup to `model_monitor` which calls `shutdown()`. Because the event was already set, the guard fired immediately and returned — skipping `unload_current()` and `_unload_vl_model()`. The NPU RKLLM handle was never destroyed on clean shutdown.
+
+**Fix:** Replaced the guard with a separate `_SHUTDOWN_DONE = Event()` that is only set inside `shutdown()` itself, not by the signal handler.
+
+---
+
+### [FIXED `ec3cfc6`] Stale request timeout (30s) shorter than NPU model load time (30–90s)
+
+**Severity:** High  
+**Affects:** All versions before commit `ec3cfc6`
+
+`REQUEST_STALE_TIMEOUT = 30` meant a second concurrent request arriving while a slow model was loading (cold NPU, large model) would see the first slot as stale, clear it, and start a second `rkllm_init()` — two concurrent NPU inits produces undefined behaviour.
+
+**Fix:** `REQUEST_STALE_TIMEOUT` increased to `120` (seconds). `update_request_activity()` is also called immediately after `load_model()` returns to reset the stale clock.
+
+---
+
+### [FIXED `ec3cfc6`] Ollama `/api/tags` listed embedding/reranker models
+
+**Severity:** Medium  
+**Affects:** Deployments using `skip_chat: true` in `model_config.json` before commit `ec3cfc6`
+
+`/v1/models` correctly filtered models with `skip_chat: true` (embedding/reranker models). The Ollama-compatibility endpoint `/api/tags` did not, so Ollama-compatible clients (Continue, AnythingLLM) showed those models in their picker and returned a confusing 400 error when selected for chat.
+
+**Fix:** `ollama_tags()` now applies the same `skip_chat` filter as `list_models()`.
+
+---
+
+### [FIXED `ec3cfc6`] `setup.sh` Hermes config block aborted mid-install with no cloud API keys
+
+**Severity:** Medium  
+**Affects:** Users running `setup.sh` without `OPENROUTER_API_KEY` or `GROQ_API_KEY` set, before commit `ec3cfc6`
+
+The embedded Python heredoc raised `RuntimeError('No cloud API keys provided...')` when neither cloud key was set. This caused `setup.sh` to exit non-zero mid-run, leaving the hermes venv installed but the systemd service not registered. There was no recovery guidance printed.
+
+**Fix:** The no-key path now writes a placeholder `~/.hermes/config.yaml` with instructions, prints a clear warning, and exits `sys.exit(0)` so the rest of `setup.sh` continues cleanly.
+
+---
+
+### [FIXED `ec3cfc6`] `setup.sh` PYEOF heredoc expanded shell variables into Python source
+
+**Severity:** Medium  
+**Affects:** All versions before commit `ec3cfc6` on any deployment where `OPENROUTER_API_KEY` or `GROQ_API_KEY` contain shell metacharacters (`$`, `\`, `'`)
+
+The heredoc delimiter was unquoted (`<< PYEOF`), so the shell expanded `${OPENROUTER_API_KEY}` inline into the Python source. API keys containing single-quotes or dollar signs would produce a Python `SyntaxError` or silently embed a truncated key.
+
+**Fix:** Delimiter is now quoted (`<< 'PYEOF'`); API keys are read inside the script via `os.environ.get('OPENROUTER_API_KEY', '')`, which is safe for all key formats.
+
+---
+
+### [FIXED `ec3cfc6`] Ollama streaming response iterated outside its request context
+
+**Severity:** Medium  
+**Affects:** All versions before commit `ec3cfc6` using the Ollama `/api/chat` streaming path
+
+`_ollama_stream()` called `chat_completions()` inside `with app.request_context(environ):`, then iterated `oai_resp.response` (a lazy generator) after the `with` block exited and tore down the context. Subsequent chunks would attempt to push `stream_with_context`'s inner context into a torn-down application context, raising `RuntimeError('Working outside of application context')`.
+
+**Fix:** Replaced `with` block with manual `ctx.push()` / `ctx.pop()` in a `try/finally` wrapping both the `chat_completions()` call and the full generator iteration.
+
+---
+
+### [FIXED `ec3cfc6`] Agent framework heuristic silently disabled thinking for long user system prompts
+
+**Severity:** Medium  
+**Affects:** Thinking-capable models (Qwen3) with user system prompts longer than 3000 characters, before commit `ec3cfc6`
+
+The heuristic `if len(system_text) > 3000: enable_thinking = False` was intended to detect agent frameworks (Hermes, AutoGen) which inject large tool schemas. It also fired for any user with a long system prompt, silently degrading thinking models with no response header or warning logged at a visible level.
+
+**Fix:** The heuristic now also checks for tool-related content markers (`<tools>`, `tool_call`, `"type": "function"`, etc.) before disabling thinking. A long system prompt without tool markers keeps thinking enabled; this case is logged at DEBUG level.
+
+---
+
+### [FIXED `ec3cfc6`] embed service `StartLimitBurst=40` could storm the NPU driver
+
+**Severity:** Low  
+**Affects:** Deployments using `rkllm-embed.service` before commit `ec3cfc6`
+
+`StartLimitBurst=40` in a 600s window permitted 40 rapid systemd restarts if the embed service failed fast (e.g. NPU busy). With `RestartSec=30`, all 40 attempts fire within 20 minutes, hammering the NPU driver and flooding the journal rather than backing off.
+
+**Fix:** Reduced to `StartLimitBurst=5` in a `StartLimitIntervalSec=300s` window — 5 attempts over 5 minutes is sufficient for transient NPU contention recovery.
+
+---
+
+### [FIXED `ec3cfc6`] `disable_tools` strip removed user system message if injected prompt was absent
+
+**Severity:** Medium  
+**Affects:** Edge case: models with `disable_tools: true` in `model_config.json`, before commit `ec3cfc6`
+
+`messages = messages[1:]` was always executed when `_has_tools=True` and `disable_tools=True`, on the assumption that `messages[0]` was always the server-injected tool system prompt. If that assumption was ever violated (e.g. a future code path where injection didn't happen), the first user or system message would be silently dropped.
+
+**Fix:** Added a guard: `messages[0]` is only stripped if its `role == 'system'` and its content starts with `# Tools\n` (the known injection prefix). A `logger.warning` fires if the expected prefix is absent.
 
 ---
 
