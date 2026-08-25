@@ -131,7 +131,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
 - **Request queuing** — concurrent requests wait up to `RKLLM_QUEUE_TIMEOUT` seconds (default 30s) instead of getting an immediate 503. `x-queue-wait-seconds` header is returned on queued responses
 - **Tool call streaming** — role delta is emitted immediately when tool calling is active, keeping the connection alive during silent buffering
 - **`/ready` / `/v1/ready`** — readiness probe (503 when no model loaded or busy)
-- **`/v1/tokenize`** — BPE token estimation without inference
+- **`/v1/tokenize`** — exact token count via tiktoken (Qwen/Llama) without inference
 - **`/v1/count_tokens`** — Anthropic SDK alias for token counting
 - **`/v1/rerank`** — reranker proxy to NPU embed service
 - **`/v1/messages`** — Anthropic Messages API shim (Claude-format requests)
@@ -1135,7 +1135,7 @@ curl -i http://localhost:8000/ready
 
 ### `POST /v1/tokenize`, `POST /tokenize`
 
-Estimate token count for a prompt or messages array without running inference. Uses a BPE estimator tuned per model family with CJK-awareness.
+Exact token count for a prompt or messages array without running inference. Uses **tiktoken** (`o200k_base` for all Qwen models, `cl100k_base` for Llama-3) loaded at startup — sub-millisecond per call, no model load required.
 
 ```bash
 # From a prompt string

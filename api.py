@@ -261,7 +261,36 @@ FALLBACK_SILENCE = 20         # Max silence between tokens after first token
 # Defaults
 MAX_TOKENS_DEFAULT = 2048
 CONTEXT_LENGTH_DEFAULT = 4096
-CHARS_PER_TOKEN_ESTIMATE = 4  # ~4 chars/token for English (industry standard)
+CHARS_PER_TOKEN_ESTIMATE = 4  # ~4 chars/token for English (fallback only)
+
+# ---------------------------------------------------------------------------
+# Exact tokenizer (tiktoken) — used for sliding window, overflow guard, usage
+# ---------------------------------------------------------------------------
+# Qwen3-x / Qwen2.5-x / Qwen3-Embedding / Qwen3-Reranker all use o200k_base.
+# Llama-3.x uses a separate Meta BPE vocab (cl100k-derived, 128k tokens).
+# Both are loaded once at startup; per-call encode() is sub-millisecond.
+try:
+    import tiktoken as _tiktoken
+    _tok_qwen   = _tiktoken.get_encoding("o200k_base")   # all Qwen models
+    _tok_llama3 = _tiktoken.get_encoding("cl100k_base")  # Llama-3 (close proxy)
+    _TIKTOKEN_OK = True
+except Exception as _e:
+    _TIKTOKEN_OK = False
+    _tok_qwen = _tok_llama3 = None
+    # Non-fatal: falls back to CHARS_PER_TOKEN_ESTIMATE
+
+def _count_tokens(text: str, model_name: str = '') -> int:
+    """Return exact token count via tiktoken, falling back to char estimate."""
+    if not text:
+        return 0
+    if _TIKTOKEN_OK:
+        mn = model_name.lower()
+        enc = _tok_llama3 if 'llama' in mn else _tok_qwen
+        try:
+            return len(enc.encode(text, disallowed_special=()))
+        except Exception:
+            pass
+    return max(1, len(text) // CHARS_PER_TOKEN_ESTIMATE)
 
 # Repetition loop detection — abort generation when model enters text loops.
 # Small LLMs sometimes repeat the same paragraph verbatim; rkllm's repeat_penalty
@@ -2789,26 +2818,24 @@ def build_prompt(messages, model_name):
 
         # --- Sliding window: trim oldest turns if prompt exceeds context ---
         # Reserve space for current turn + model output, fit recent history.
-        max_prompt_chars = int(ctx * CHARS_PER_TOKEN_ESTIMATE * (1 - HISTORY_CONTEXT_RESERVE))
+        # Uses exact tiktoken counts (not char estimate) for accurate trimming.
+        max_prompt_tokens = int(ctx * (1 - HISTORY_CONTEXT_RESERVE))
         prompt = "\n".join(parts)
-        if len(prompt) > max_prompt_chars and len(parts) > 2:
+        if _count_tokens(prompt, model_name) > max_prompt_tokens and len(parts) > 2:
             original_parts = len(parts)
             # Always keep: last part (current user msg).
             # Trim oldest turns from the front.  If parts[0] is a system
             # prompt (starts with "System:"), keep it; otherwise treat all
             # parts equally and trim from index 0.
             _keep_front = 1 if (parts and not parts[0].startswith(("User:", "Assistant:"))) else 0
-            # Track running length to avoid O(n^2) re-join
-            _total_len = sum(len(p) for p in parts) + len(parts) - 1  # newline separators
-            while len(parts) > (_keep_front + 1) and _total_len > max_prompt_chars:
-                removed = parts.pop(_keep_front)
-                _total_len -= len(removed) + 1  # +1 for newline separator
+            while len(parts) > (_keep_front + 1) and _count_tokens("\n".join(parts), model_name) > max_prompt_tokens:
+                parts.pop(_keep_front)
             prompt = "\n".join(parts)
             trimmed = original_parts - len(parts)
             if trimmed > 0:
                 logger.info(f"History sliding window: trimmed {trimmed} oldest turns "
                             f"({original_parts} -> {len(parts)} parts, "
-                            f"{len(prompt)} chars, ctx={ctx})")
+                            f"~{_count_tokens(prompt, model_name)} tokens, ctx={ctx})")
         # Only enable thinking for models with the "thinking" capability
         enable_thinking = ('thinking' in model_caps) and not no_think_requested
 
@@ -2854,7 +2881,7 @@ def build_prompt(messages, model_name):
     else:
         logger.debug(f"Prompt FULL: {prompt}")
 
-    approx_tokens = len(prompt) // CHARS_PER_TOKEN_ESTIMATE
+    approx_tokens = _count_tokens(prompt, model_name)
     if approx_tokens > ctx * 0.85:
         logger.warning(
             f"Prompt (~{approx_tokens} tokens) approaches context limit ({ctx}). "
@@ -4094,8 +4121,8 @@ def chat_completions():
             # VL context length check (image tokens + text tokens vs model context)
             _vl_ctx = vl_config.get('context_length', CONTEXT_LENGTH_DEFAULT)
             _vl_img_tok = _vision_encoder.model_image_token * n_images
-            _vl_text_tok = len(vl_prompt) // CHARS_PER_TOKEN_ESTIMATE
-            if (_vl_img_tok + _vl_text_tok) > _vl_ctx * 1.1:
+            _vl_text_tok = _count_tokens(vl_prompt, vl_name)
+            if (_vl_img_tok + _vl_text_tok) > _vl_ctx * 1.05:
                 end_request(request_id)
                 return make_error_response(
                     f"VL prompt too long (~{_vl_img_tok + _vl_text_tok} tokens, context is {_vl_ctx}). "
@@ -4166,15 +4193,15 @@ def chat_completions():
         # Use 1.1x multiplier to account for token estimation inaccuracy
         # (we estimate ~4 chars/token but actual varies by language/content).
         _ctx = config.get('context_length', CONTEXT_LENGTH_DEFAULT)
-        _approx_tok = len(prompt) // CHARS_PER_TOKEN_ESTIMATE
-        if _approx_tok > _ctx * 1.1:
+        _approx_tok = _count_tokens(prompt, name)
+        if _approx_tok > _ctx * 1.05:
             logger.warning(
-                f"[{request_id}] Prompt rejected — estimated {_approx_tok} tokens "
+                f"[{request_id}] Prompt rejected — {_approx_tok} tokens "
                 f"exceeds context limit ({_ctx}) by >{int((_approx_tok / _ctx - 1) * 100)}%"
             )
             end_request(request_id)
             return make_error_response(
-                f"Prompt too long (~{_approx_tok} tokens, model context is {_ctx}). "
+                f"Prompt too long ({_approx_tok} tokens, model context is {_ctx}). "
                 f"Shorten your message or reduce conversation history.",
                 400, "context_length_exceeded"
             )
@@ -4615,9 +4642,7 @@ def _generate_stream(prompt, request_id, model_name, created,
                 yield make_sse_chunk(request_id, model_name, created, delta=_tc_delta)
                 yield make_sse_chunk(request_id, model_name, created, finish_reason="tool_calls")
                 if include_usage:
-                    prompt_text = "".join(m.get("content", "") for m in (messages or [])
-                                          if isinstance(m.get("content"), str))
-                    _pt = max(1, len(prompt_text) // CHARS_PER_TOKEN_ESTIMATE)
+                    _pt = stats_data.get('prefill_tokens') or _count_tokens(prompt, model_name)
                     _ct = stats_data.get('generate_tokens', max(1, len(total_content) // CHARS_PER_TOKEN_ESTIMATE))
                     yield make_sse_chunk(request_id, model_name, created,
                                          usage={"prompt_tokens": _pt, "completion_tokens": _ct,
@@ -4636,9 +4661,7 @@ def _generate_stream(prompt, request_id, model_name, created,
 
         # Usage chunk (stream_options.include_usage)
         if include_usage:
-            prompt_text = "".join(m.get("content", "") for m in (messages or [])
-                                  if isinstance(m.get("content"), str))
-            prompt_tokens = max(1, len(prompt_text) // CHARS_PER_TOKEN_ESTIMATE)
+            prompt_tokens = stats_data.get('prefill_tokens') or _count_tokens(prompt, model_name)
             total_output_chars = len(total_content) + len(total_reasoning)
             completion_tokens = stats_data.get(
                 'generate_tokens', max(1, total_output_chars // CHARS_PER_TOKEN_ESTIMATE))
@@ -4927,7 +4950,7 @@ def _generate_complete(prompt, request_id, model_name, created,
                 logger.info(f"[{request_id}] Tool call detected: {[c['function']['name'] for c in _tool_calls]}")
                 prompt_text = "".join(m.get("content", "") for m in (messages or [])
                                       if isinstance(m.get("content"), str))
-                _pt = max(1, len(prompt_text) // CHARS_PER_TOKEN_ESTIMATE)
+                _pt = stats_data.get('prefill_tokens') or _count_tokens(prompt, model_name)
                 _ct = stats_data.get('generate_tokens', max(1, len(full_content) // CHARS_PER_TOKEN_ESTIMATE))
                 return jsonify({
                     "id": request_id, "object": "chat.completion",
@@ -4946,10 +4969,8 @@ def _generate_complete(prompt, request_id, model_name, created,
         # Parse think tags
         reasoning_content, cleaned_content = parse_think_tags(full_content)
 
-        # Token counts: use real NPU stats if available, else approximate
-        prompt_text = "".join(m.get("content", "") for m in (messages or [])
-                              if isinstance(m.get("content"), str))
-        prompt_tokens = max(1, len(prompt_text) // CHARS_PER_TOKEN_ESTIMATE)
+        # Token counts: exact prefill from NPU stats, tiktoken for prompt estimate
+        prompt_tokens = stats_data.get('prefill_tokens') or _count_tokens(prompt, model_name)
         completion_tokens = stats_data.get('generate_tokens', max(1, len(full_content) // CHARS_PER_TOKEN_ESTIMATE))
 
         # Determine finish_reason: "stop" for clean generation, "length" for
@@ -5210,7 +5231,7 @@ def tokenize():
     if request.method == 'GET':
         model = request.args.get('model', '')
         prompt = request.args.get('prompt', '')
-        count = _estimate_tokens(prompt, model)
+        count = _count_tokens(prompt, model)
         return jsonify({"model": model, "tokens": count, "text": prompt})
 
     body = request.get_json(silent=True) or {}
@@ -5229,7 +5250,7 @@ def tokenize():
     resolved, config = (model, MODELS.get(ALIASES.get(model, model))) if model else ('', None)
     ctx_len = config.get('context_length', CONTEXT_LENGTH_DEFAULT) if config else CONTEXT_LENGTH_DEFAULT
 
-    count = _estimate_tokens(text, resolved)
+    count = _count_tokens(text, resolved)
     return jsonify({
         "model": resolved or model,
         "tokens": count,
