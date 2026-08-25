@@ -19,6 +19,7 @@ Built for single-board computers like the **Orange Pi 5 Plus**, this server brid
   - [Automated Setup (systemd)](#automated-setup-recommended)
   - [Manual Installation](#manual-installation)
 - [Pre-Built Models](#pre-built-models)
+- [Model Conversion](#model-conversion)
 - [Model Setup](#model-setup)
 - [Running the Server](#running-the-server)
 - [API Endpoints](#api-endpoints)
@@ -612,6 +613,116 @@ git clone https://huggingface.co/GatekeeperZA/Phi-3-mini-4k-instruct-w8a8 .
 **Qwen3-1.7B** — Hybrid thinking model. Produces `<think>...</think>` reasoning blocks that this API server parses into `reasoning_content` for Open WebUI's collapsible thinking display. Supports English and Chinese.
 
 **Phi-3-mini-4k-instruct** — Microsoft's 3.8B parameter model excelling at reasoning, math (85.7% GSM8K), and code generation (57.3% HumanEval). English-primary. No thinking mode — this is a standard instruct model. MIT licensed.
+
+---
+
+## Model Conversion
+
+To convert a HuggingFace model to `.rkllm` format for use on the RK3588 NPU, you need the `rkllm-toolkit` running on an **x86_64 Linux** host (or WSL2 on Windows).
+
+### RK3588 Quantization Constraints
+
+> **Important:** The RK3588 NPU hardware only supports `w8a8` (INT8) quantization at runtime. These are confirmed against runtime v1.3.0:
+>
+> | Quantization | Toolkit converts | Runtime loads | Notes |
+> |---|---|---|---|
+> | `w8a8` | ✅ | ✅ | Only supported option on RK3588 |
+> | `w8a8_g128` / `g256` / `g512` | ✅ | ❌ | Rejected by runtime on load |
+> | `w4a16` / `w4a16_g32` / `w4a16_g64` / `w4a16_g128` | ❌ | ❌ | RK3576+ only (hardware INT4 limitation) |
+>
+> Do not attempt w4a16 or group-quantized w8a8 variants — they will either fail to convert or fail to load on the device.
+
+### WSL2 Setup (Windows)
+
+Install WSL2 Ubuntu to a non-system drive to avoid filling `C:`:
+
+```powershell
+# Install WSL with Ubuntu-24.04 to D:\RK3588
+wsl --install -d Ubuntu-24.04 --location D:\RK3588
+
+# After install, enter WSL
+wsl -d Ubuntu-24.04
+```
+
+Inside WSL, create an isolated Python 3.12 venv (separate from any rknn-toolkit2 environment, which requires torch≤2.4 and conflicts):
+
+```bash
+# Install Python 3.12 and venv
+sudo apt update && sudo apt install -y python3.12 python3.12-venv
+
+# Create venv
+sudo python3.12 -m venv /opt/rkllm-convert
+source /opt/rkllm-convert/bin/activate
+
+# Install torch 2.6 (CPU-only) — required by rkllm-toolkit 1.3.0
+pip install torch==2.6.0+cpu torchvision==0.21.0+cpu \
+    --index-url https://download.pytorch.org/whl/cpu
+```
+
+> **Note:** `torchvision 0.21.0+cpu` has a known NMS extension bug in WSL2. The setup script patches this with a minimal stub module.
+
+Download the wheel (not on PyPI):
+
+```bash
+sudo wget -O /opt/rkllm_toolkit-1.3.0-cp312-cp312-linux_x86_64.whl \
+  https://github.com/airockchip/rknn-llm/raw/main/rkllm-toolkit/packages/rkllm_toolkit-1.3.0-cp312-cp312-linux_x86_64.whl
+```
+
+Install dependencies and the toolkit (note: `auto_gptq==0.7.1` is skipped — it requires CUDA and is not needed for standard HF conversion):
+
+```bash
+pip install \
+    "numpy==1.26.4" \
+    "transformers==5.8.0" \
+    "timm==1.0.19" --no-deps \
+    "huggingface_hub" "pyyaml" "safetensors" \
+    "datasets" "pyarrow" "sentencepiece" "accelerate<=1.5.2" \
+    "einops" "tiktoken<=0.9.0" "tabulate" "Jinja2==3.1.4" \
+    "colorlog" "jsonschema" "flatbuffers" "pillow" \
+    "jsonlines" "protobuf<=4.25.4" "scipy" \
+    "easydict==1.13" "matplotlib>=3.9.4" "optimum==1.23.3" \
+    "tokenizers" "regex" "filelock" "packaging" "tqdm" "requests"
+
+# Install toolkit without deps (skips auto_gptq which needs CUDA)
+pip install /opt/rkllm_toolkit-1.3.0-cp312-cp312-linux_x86_64.whl --no-deps
+
+# Patch torchvision stub (fixes WSL2 NMS extension crash)
+SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
+# ... see tools/setup_wsl_convert.sh for the full patching script
+
+# Verify
+python3 -c "from rkllm.api import RKLLM; print('rkllm-toolkit v1.3.0 OK')"
+```
+
+### Converting a Model
+
+Store the HuggingFace cache and output on the large drive to avoid filling `C:` (via `/mnt/d/` in WSL):
+
+```bash
+source /opt/rkllm-convert/bin/activate
+export HF_HOME=/mnt/d/RK3588/hf_cache
+
+python3 tools/convert_rkllm.py \
+    --model Qwen/Qwen3-1.7B \
+    --quant w8a8 \
+    --context 8192 \
+    --output /mnt/d/RK3588/rkllm_output/Qwen3-1.7B-rk3588-w8a8.rkllm
+```
+
+This downloads the model to `HF_HOME`, quantizes it, and exports the `.rkllm` file.  
+Qwen3-1.7B takes ~2 minutes on a modern CPU.
+
+### Deploying to the Device
+
+```bash
+scp /mnt/d/RK3588/rkllm_output/Qwen3-1.7B-rk3588-w8a8.rkllm \
+    armbian@192.168.2.180:/home/armbian/models/Qwen3-1.7B/
+
+# Restart the API server
+ssh armbian@192.168.2.180 "sudo systemctl restart rkllm-api"
+```
+
+> If multiple `.rkllm` files exist in a model folder, the server picks the alphabetically first one and logs a warning. Keep only one `.rkllm` per folder or name them so the correct one sorts first.
 
 ---
 
@@ -3116,7 +3227,7 @@ Both models are on HuggingFace ([xLAM](https://huggingface.co/GatekeeperZA/xLAM-
 
 | Item | Notes |
 |---|---|
-| **W4A16 quantization guide** | W4A16 models run ~1.5–2× faster than W8A8/W8A16 at the cost of 1–3% accuracy loss on benchmarks. Requires re-converting models with `rkllm-toolkit`. Guide + accuracy tradeoff table to be added. |
+| **Model conversion documentation** | Full WSL setup + conversion workflow documented in [Model Conversion](#model-conversion). |
 | **Prompt caching research** | RKLLM exposes `save_prompt_cache` / `load_prompt_cache` for disk-based KV state persistence. Currently implemented for system prompts. Research whether per-user prefix caching is feasible given single-NPU constraints. |
 | **Vision auto-load on demand** | VL model currently stays resident in NPU memory once loaded (~2–3 GB). Auto-unload after idle + reload on next image request would free memory for text model but adds 3–5s latency on first image after idle. Evaluating whether the tradeoff is worth it. |
 
@@ -3139,15 +3250,13 @@ Both models are on HuggingFace ([xLAM](https://huggingface.co/GatekeeperZA/xLAM-
 
 ### Undocumented Tools
 
-The `tools/` directory contains helper scripts that are not yet covered in the README:
+The `tools/` directory contains helper scripts not yet covered in the README:
 
-| Script | Purpose |
-|---|---|
-| `tools/convert_rkllm.py` | Convert HuggingFace models to `.rkllm` format using `rkllm-toolkit` |
-| `tools/hf_upload.py` | Upload converted models to HuggingFace Hub |
-| `tools/hf_upload_pi_models.py` | Upload Orange Pi compiled models directly from the device |
-
-Documentation for these scripts is planned.
+| Script | Purpose | Status |
+|---|---|---|
+| `tools/convert_rkllm.py` | Convert HuggingFace models to `.rkllm` format | Documented — see [Model Conversion](#model-conversion) |
+| `tools/hf_upload.py` | Upload converted models to HuggingFace Hub | Undocumented |
+| `tools/hf_upload_pi_models.py` | Upload Orange Pi compiled models directly from the device | Undocumented |
 
 ---
 
